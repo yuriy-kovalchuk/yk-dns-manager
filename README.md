@@ -98,6 +98,10 @@ The controller selects the active provider based on the `provider` field in your
 - A Kubernetes cluster with [Gateway API CRDs](https://gateway-api.sigs.k8s.io/) installed
 - A supported DNS provider (currently OPNsense)
 
+### Remote Deployment (Recommended)
+
+For production or homelab use, see the [Remote Deployment Guide](docs/deployment.md) for instructions on installing via Helm from GHCR.
+
 ### Local Development
 
 ```bash
