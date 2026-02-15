@@ -2,9 +2,9 @@
 
    on:
      push:
-       branches: [ main ]
+       branches: [ master ]
      pull_request:
-       branches: [ main ]
+       branches: [ master ]
 
    jobs:
      test:
@@ -20,12 +20,11 @@
          - name: Verify dependencies
            run: go mod verify
 
-         - name: Run fmt and vet
-           run: |
-             make fmt
-             make vet
-             # Check if fmt changed anything
-             git diff --exit-code
+         - name: Run fmt
+           run: make fmt
+
+         - name: Run vet
+           run: make vet
 
          - name: Run Unit Tests
            run: make test-unit

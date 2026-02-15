@@ -1,6 +1,5 @@
 # Default values for yk-dns-manager.
 # This is a YAML-formatted file.
-
 nameOverride: ""
 fullnameOverride: ""
 
