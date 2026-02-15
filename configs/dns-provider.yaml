@@ -1,0 +1,8 @@
+provider: opnsense
+upsert: false
+settings:
+  base_url: "https://opnsense.example.com/api"
+  skip_tls_verify: "true"
+  api_key: "${OPNSENSE_API_KEY}"
+  api_secret: "${OPNSENSE_API_SECRET}"
+  default_ttl: "300"

@@ -24,9 +24,59 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# Build output
+bin/
+dist/
+
+# env files
 .env
+!.env.example
+
+# Local config overrides
+*.local.yaml
+
+# Developer notes
+.developer/
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Helm
+charts/*/charts/
+*.tgz
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# Secrets
+*.pem
+*.key
+
+# AI Agents
+.claude/
+.cursor/
+.copilot/
+.aider*
+.codeium/
+.continue/
+.windsurf/
+.tabnine/
+.sourcegraph/

@@ -1,0 +1,118 @@
+# Default values for yk-dns-manager.
+# This is a YAML-formatted file.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # -- Image repository for the controller container.
+  repository: ghcr.io/yuriy-kovalchuk/yk-dns-manager
+  # -- Image tag, defaults to `.Chart.AppVersion` if not set.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+strategy:
+  type: Recreate
+
+revisionHistoryLimit: 3
+
+serviceAccount:
+  # -- If true, create a new ServiceAccount.
+  create: true
+  # -- If set, use this name for the ServiceAccount.
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+priorityClassName: ""
+
+# -- Domain-to-IP mapping. The controller uses this to resolve which IP
+# a DNS record should point to when an HTTPRoute hostname matches.
+# Example:
+#   "*.example.com": "10.0.0.1"
+#   "special.example.com": "10.0.0.2"
+domainMap:
+  "example.com": "10.0.0.1"
+
+# -- DNS provider configuration. The controller will not manage any DNS
+# records until a provider is configured.
+dnsProvider:
+  # -- Provider name (e.g. "opnsense"). Must match a registered provider.
+  provider: "opnsense"
+  # -- If true, update existing records on every reconcile.
+  # If false, only create records that don't already exist.
+  upsert: false
+  # -- Provider-specific connection settings. Each provider defines its own keys.
+  settings:
+    base_url: "https://opnsense.example.com/api"
+    skip_tls_verify: "false"
+    api_key: "${OPNSENSE_API_KEY}"
+    api_secret: "${OPNSENSE_API_SECRET}"
+    default_ttl: "300"
+  # -- Name of an existing Secret containing provider credentials.
+  # The secret's data will be injected as environment variables, which
+  # can be referenced in settings via ${ENV_VAR} syntax.
+  existingSecret: ""
+
+metrics:
+  service:
+    # -- Metrics endpoint port.
+    port: 9090
+
+serviceMonitor:
+  # -- If true, create a Prometheus ServiceMonitor resource.
+  enabled: false
+  # -- Scrape interval.
+  interval: 30s
+  # -- Namespace for the ServiceMonitor. Defaults to the release namespace.
+  namespace: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8081
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# -- Container resource requests and limits.
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

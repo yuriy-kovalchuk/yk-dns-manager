@@ -1,0 +1,6 @@
+apiVersion: v2
+name: yk-dns-manager
+description: A Kubernetes controller that manages DNS records for Gateway API HTTPRoutes
+type: application
+version: 0.2.0
+appVersion: "0.2.0"

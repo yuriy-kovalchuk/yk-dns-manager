@@ -1,0 +1,5 @@
+# Maps base domains to load balancer IPs.
+# When an HTTPRoute hostname matches a subdomain (e.g. app.my-domain1.com),
+# the controller resolves the IP from the matching base domain (my-domain1.com).
+example.com: 10.0.0.1
+example.org: 10.0.0.2
