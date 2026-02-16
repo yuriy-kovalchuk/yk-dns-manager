@@ -19,10 +19,10 @@ import (
 
 // fakeOPNsense is a minimal in-memory OPNsense Unbound API for testing.
 type fakeOPNsense struct {
-	mu      sync.Mutex
-	store   map[string]hostOverride
-	nextID  int
-	calls   []string // tracks endpoint calls in order
+	mu     sync.Mutex
+	store  map[string]hostOverride
+	nextID int
+	calls  []string // tracks endpoint calls in order
 }
 
 type hostOverride struct {

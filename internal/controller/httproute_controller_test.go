@@ -98,6 +98,7 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 	mock := &mockDNSProvider{}
 	reconciler := &HTTPRouteReconciler{
 		Client:    fakeClient,
+		APIReader: fakeClient,
 		Log:       zap.New(zap.UseDevMode(true)),
 		DomainMap: newTestDomainMap(t),
 		DNS:       mock,
@@ -167,6 +168,7 @@ func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
 	mock := &mockDNSProvider{}
 	reconciler := &HTTPRouteReconciler{
 		Client:    fakeClient,
+		APIReader: fakeClient,
 		Log:       zap.New(zap.UseDevMode(true)),
 		DomainMap: newTestDomainMap(t),
 		DNS:       mock,
@@ -223,6 +225,7 @@ func TestHTTPRouteReconciler_UpsertEnabled(t *testing.T) {
 	mock := &mockDNSProvider{}
 	reconciler := &HTTPRouteReconciler{
 		Client:    fakeClient,
+		APIReader: fakeClient,
 		Log:       zap.New(zap.UseDevMode(true)),
 		DomainMap: newTestDomainMap(t),
 		DNS:       mock,
@@ -280,6 +283,7 @@ func TestHTTPRouteReconciler_CreateSkipsExisting(t *testing.T) {
 	}
 	reconciler := &HTTPRouteReconciler{
 		Client:    fakeClient,
+		APIReader: fakeClient,
 		Log:       zap.New(zap.UseDevMode(true)),
 		DomainMap: newTestDomainMap(t),
 		DNS:       mock,
@@ -335,6 +339,7 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 	mock := &mockDNSProvider{}
 	reconciler := &HTTPRouteReconciler{
 		Client:    fakeClient,
+		APIReader: fakeClient,
 		Log:       zap.New(zap.UseDevMode(true)),
 		DomainMap: newTestDomainMap(t),
 		DNS:       mock,

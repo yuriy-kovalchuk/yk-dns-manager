@@ -19,7 +19,7 @@ build:
 
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
-	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME)
+	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
 
 test:
 	go test ./...

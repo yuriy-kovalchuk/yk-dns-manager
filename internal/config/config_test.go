@@ -67,12 +67,12 @@ func TestLookupIPWildcard(t *testing.T) {
 		wantIP   string
 		wantOK   bool
 	}{
-		{"app1.mydomain.com", "10.0.0.1", true},          // wildcard match
-		{"app2.mydomain.com", "10.0.0.2", true},           // exact match wins over wildcard
-		{"app3.mydomain.com", "10.0.0.1", true},           // wildcard match
-		{"deep.nested.mydomain.com", "10.0.0.1", true},    // wildcard match (walks up)
-		{"mydomain.com", "", false},                        // wildcard does not match bare domain
-		{"other.com", "", false},                           // no match
+		{"app1.mydomain.com", "10.0.0.1", true},        // wildcard match
+		{"app2.mydomain.com", "10.0.0.2", true},        // exact match wins over wildcard
+		{"app3.mydomain.com", "10.0.0.1", true},        // wildcard match
+		{"deep.nested.mydomain.com", "10.0.0.1", true}, // wildcard match (walks up)
+		{"mydomain.com", "", false},                    // wildcard does not match bare domain
+		{"other.com", "", false},                       // no match
 	}
 
 	for _, tt := range tests {
@@ -101,11 +101,11 @@ func TestLookupIPWildcardWithBaseDomain(t *testing.T) {
 		wantIP   string
 		wantOK   bool
 	}{
-		{"app1.mydomain.com", "10.0.0.1", true},           // wildcard *.mydomain.com
-		{"app2.mydomain.com", "10.0.0.2", true},           // exact wins
-		{"mydomain.com", "10.0.0.3", true},                // exact base domain
-		{"foo.other.mydomain.com", "10.0.0.4", true},      // wildcard *.other.mydomain.com
-		{"other.mydomain.com", "10.0.0.1", true},          // wildcard *.mydomain.com
+		{"app1.mydomain.com", "10.0.0.1", true},      // wildcard *.mydomain.com
+		{"app2.mydomain.com", "10.0.0.2", true},      // exact wins
+		{"mydomain.com", "10.0.0.3", true},           // exact base domain
+		{"foo.other.mydomain.com", "10.0.0.4", true}, // wildcard *.other.mydomain.com
+		{"other.mydomain.com", "10.0.0.1", true},     // wildcard *.mydomain.com
 	}
 
 	for _, tt := range tests {

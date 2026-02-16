@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -30,6 +31,14 @@ func init() {
 }
 
 func main() {
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -37,7 +46,6 @@ func main() {
 }
 
 func run() error {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("setup")
 
 	log.Info("starting yk-dns-manager", "version", Version)
@@ -81,6 +89,7 @@ func run() error {
 
 	reconciler := &controller.HTTPRouteReconciler{
 		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
 		Log:       ctrl.Log.WithName("httproute-controller"),
 		DomainMap: domainMap,
 		DNS:       dnsProvider,
