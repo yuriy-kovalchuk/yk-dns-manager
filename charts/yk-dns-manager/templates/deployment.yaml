@@ -48,6 +48,8 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --zap-log-level={{ .Values.logLevel }}
           env:
             - name: DOMAIN_MAP_PATH
               value: /etc/yk-dns-manager/domain-map/domain-map.yaml

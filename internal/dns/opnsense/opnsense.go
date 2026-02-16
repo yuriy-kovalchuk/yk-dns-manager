@@ -191,7 +191,7 @@ func buildHostBody(record dns.Record) map[string]interface{} {
 
 // Exists checks whether a DNS host override exists for the given hostname and record type.
 func (p *Provider) Exists(ctx context.Context, hostname, recordType string) (bool, error) {
-	p.log.Info("checking if record exists", "hostname", hostname, "type", recordType)
+	p.log.V(1).Info("checking if record exists", "hostname", hostname, "type", recordType)
 	uuid, err := p.findOverride(ctx, hostname, recordType)
 	if err != nil {
 		return false, err
@@ -226,7 +226,7 @@ func (p *Provider) Create(ctx context.Context, record dns.Record) error {
 		return fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
 	}
 
-	p.log.Info("record created", "uuid", result.UUID)
+	p.log.V(1).Info("record created", "uuid", result.UUID)
 	return p.reconfigure(ctx)
 }
 
@@ -264,7 +264,7 @@ func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result.Result)
 	}
 
-	p.log.Info("record updated", "uuid", uuid)
+	p.log.V(1).Info("record updated", "uuid", uuid)
 	return p.reconfigure(ctx)
 }
 
@@ -277,7 +277,8 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 		return err
 	}
 	if uuid == "" {
-		return fmt.Errorf("opnsense: no existing override found for %s/%s", hostname, recordType)
+		p.log.V(1).Info("opnsense: no existing override found for deletion", hostname, recordType)
+		return nil
 	}
 
 	resp, err := p.doRequest(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/delHostOverride/%s", uuid), struct{}{})
@@ -301,7 +302,7 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
 	}
 
-	p.log.Info("record deleted", "uuid", uuid)
+	p.log.V(1).Info("record deleted", "uuid", uuid)
 	return p.reconfigure(ctx)
 }
 

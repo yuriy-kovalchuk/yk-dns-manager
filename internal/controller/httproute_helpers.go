@@ -7,6 +7,15 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+func Contains(arr []string, val string) bool {
+	for _, v := range arr {
+		if v == val {
+			return true
+		}
+	}
+	return false
+}
+
 // FormatHTTPRoute returns a human-readable string representation of an HTTPRoute.
 func FormatHTTPRoute(route *gatewayv1.HTTPRoute) string {
 	var b strings.Builder

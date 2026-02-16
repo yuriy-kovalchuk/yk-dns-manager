@@ -15,6 +15,9 @@ imagePullSecrets: []
 
 replicaCount: 1
 
+# -- Log level for the controller. Valid values are 'info' or 'debug'.
+logLevel: info
+
 strategy:
   type: Recreate
 
