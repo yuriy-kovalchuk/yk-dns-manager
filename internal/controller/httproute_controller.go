@@ -41,12 +41,29 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion
+	currentHostnames := make([]string, 0, len(route.Spec.Hostnames))
+	for _, h := range route.Spec.Hostnames {
+		currentHostnames = append(currentHostnames, string(h))
+	}
+
+	specHostnames := make([]string, 0, len(currentHostnames))
+	for _, h := range currentHostnames {
+		if _, ok := r.DomainMap.LookupIP(h); ok {
+			specHostnames = append(specHostnames, h)
+		} else {
+			r.Log.V(1).Info("hostname not in domain map, skipping", "hostname", h)
+		}
+	}
+
+	if len(specHostnames) == 0 {
+		return ctrl.Result{}, nil
+	}
+
 	if !route.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&route, finalizerName) {
 			r.Log.Info("deleting DNS records for HTTPRoute", "name", req.NamespacedName)
-			for _, hostname := range route.Spec.Hostnames {
-				if err := r.DNS.Delete(ctx, string(hostname), "A"); err != nil {
+			for _, hostname := range specHostnames {
+				if err := r.DNS.Delete(ctx, hostname, "A"); err != nil {
 					return ctrl.Result{}, fmt.Errorf("deleting DNS record for %s: %w", hostname, err)
 				}
 				r.Log.Info("deleted DNS record", "hostname", hostname)
@@ -85,13 +102,15 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		_ = json.Unmarshal([]byte(val), &managedHostnames)
 	}
 
-	currentHostnames := make([]string, 0, len(route.Spec.Hostnames))
-	for _, h := range route.Spec.Hostnames {
-		currentHostnames = append(currentHostnames, string(h))
+	managedHostnamesFiltered := make([]string, 0, len(managedHostnames))
+	for _, h := range managedHostnames {
+		if _, ok := r.DomainMap.LookupIP(h); ok {
+			managedHostnamesFiltered = append(managedHostnamesFiltered, h)
+		}
 	}
 
 	// Delete hostnames that were removed from the spec
-	for _, oldHost := range managedHostnames {
+	for _, oldHost := range managedHostnamesFiltered {
 		if !Contains(currentHostnames, oldHost) {
 			r.Log.Info("hostname removed from HTTPRoute, deleting DNS record", "hostname", oldHost)
 			if err := r.DNS.Delete(ctx, oldHost, "A"); err != nil {
@@ -101,16 +120,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// Update and Create
-	for _, hostname := range route.Spec.Hostnames {
-		ip, ok := r.DomainMap.LookupIP(string(hostname))
-		if !ok {
-			r.Log.V(1).Info("no domain mapping found for hostname", "hostname", hostname)
-			continue
-		}
+	for _, hostname := range specHostnames {
+		ip, _ := r.DomainMap.LookupIP(hostname)
 
 		r.Log.V(1).Info("resolved hostname to IP", "hostname", hostname, "ip", ip)
 		record := dns.Record{
-			Hostname: string(hostname),
+			Hostname: hostname,
 			Type:     "A",
 			Value:    ip,
 			Meta:     map[string]string{"description": "managed by yk-dns-manager"},
@@ -125,7 +140,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// Non-upsert path: only create if missing
-		exists, err := r.DNS.Exists(ctx, string(hostname), "A")
+		exists, err := r.DNS.Exists(ctx, hostname, "A")
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("checking DNS record for %s: %w", hostname, err)
 		}

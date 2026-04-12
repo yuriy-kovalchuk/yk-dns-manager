@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -46,6 +47,7 @@ func main() {
 }
 
 func run() error {
+	ctx := context.Background()
 	log := ctrl.Log.WithName("setup")
 
 	log.Info("starting yk-dns-manager", "version", Version)
@@ -69,6 +71,11 @@ func run() error {
 	dnsProvider, err := dns.NewProvider(providerCfg.Provider, ctrl.Log.WithName("dns-"+providerCfg.Provider), providerCfg.Settings)
 	if err != nil {
 		return fmt.Errorf("unable to create DNS provider: %w", err)
+	}
+
+	log.Info("checking DNS provider connectivity")
+	if err := dnsProvider.HealthCheck(ctx); err != nil {
+		return fmt.Errorf("DNS provider health check failed: %w", err)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

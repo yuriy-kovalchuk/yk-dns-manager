@@ -97,9 +97,49 @@ func (p *Provider) doRequest(ctx context.Context, method, path string, body inte
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("opnsense: %s %s: %w", method, path, err)
+		return nil, p.classifyError(method, path, err)
 	}
 	return resp, nil
+}
+
+// classifyError wraps HTTP errors with meaningful types.
+func (p *Provider) classifyError(method, path string, err error) error {
+	errMsg := err.Error()
+
+	var Wrapf = func(msg string) error {
+		return fmt.Errorf("opnsense: %s %s: %s: %s", method, path, msg, errMsg)
+	}
+
+	switch {
+	case strings.Contains(errMsg, "connection refused"):
+		return Wrapf("connection refused")
+	case strings.Contains(errMsg, "no such host"):
+		return Wrapf("dns resolution failed")
+	case strings.Contains(errMsg, "timeout"):
+		return Wrapf("timeout")
+	case strings.Contains(errMsg, "no route to host"):
+		return Wrapf("no route to host")
+	default:
+		return Wrapf("request failed")
+	}
+}
+
+// HealthCheck verifies the OPNsense API is reachable and credentials are valid.
+func (p *Provider) HealthCheck(ctx context.Context) error {
+	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("opnsense: authentication failed (HTTP %d)", resp.StatusCode)
+	default:
+		return fmt.Errorf("opnsense: health check failed (HTTP %d)", resp.StatusCode)
+	}
 }
 
 // reconfigure tells OPNsense to apply DNS changes.
@@ -201,7 +241,7 @@ func (p *Provider) Exists(ctx context.Context, hostname, recordType string) (boo
 
 // Create adds a new DNS host override.
 func (p *Provider) Create(ctx context.Context, record dns.Record) error {
-	p.log.Info("creating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
+	p.log.V(1).Info("creating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
 
 	body := buildHostBody(record)
 	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/addHostOverride", body)
@@ -232,7 +272,7 @@ func (p *Provider) Create(ctx context.Context, record dns.Record) error {
 
 // Update modifies an existing DNS host override.
 func (p *Provider) Update(ctx context.Context, record dns.Record) error {
-	p.log.Info("updating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
+	p.log.V(1).Info("updating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
 
 	uuid, err := p.findOverride(ctx, record.Hostname, record.Type)
 	if err != nil {
@@ -270,7 +310,7 @@ func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 
 // Delete removes a DNS host override.
 func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error {
-	p.log.Info("deleting record", "hostname", hostname, "type", recordType)
+	p.log.V(1).Info("deleting record", "hostname", hostname, "type", recordType)
 
 	uuid, err := p.findOverride(ctx, hostname, recordType)
 	if err != nil {
@@ -298,7 +338,11 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("opnsense: decode delHostOverride response: %w", err)
 	}
-	if result.Result != "deleted" {
+	if result.Result == "deleted" {
+		p.log.V(1).Info("record deleted", "uuid", uuid)
+	} else if result.Result == "not found" {
+		p.log.V(1).Info("record already deleted", "uuid", uuid)
+	} else {
 		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
 	}
 
