@@ -17,11 +17,15 @@ This project follows the **Conventional Commits** specification, which is the st
 | :--- | :--- |
 | **feat** | A new feature (e.g., adding a new DNS provider) |
 | **fix** | A bug fix (e.g., fixing a finalizer cleanup error) |
+| **perf** | A performance improvement |
+| **build** | Changes to build system or external dependencies |
 | **chore** | Maintenance tasks (e.g., version bumps, updating dependencies) |
 | **docs** | Documentation changes only |
+| **style** | Formatting, whitespace (no logic changes) |
 | **test** | Adding or correcting tests |
 | **refactor** | Code change that neither fixes a bug nor adds a feature |
 | **ci** | Changes to CI/CD configuration (GitHub Actions, Makefile) |
+| **revert** | Reverts a previous commit |
 
 ## Examples
 
@@ -43,6 +47,41 @@ chore(release): bump version to 0.4.0
 ### Infrastructure/CI
 ```text
 ci: add multi-arch support to release pipeline
+```
+
+### Performance
+```text
+perf(dns): cache DNS queries to reduce API calls
+```
+
+### Build
+```text
+build: upgrade Go to 1.23
+```
+
+### Documentation
+```text
+docs: update README with new provider setup steps
+```
+
+### Style
+```text
+style: format code with gofmt
+```
+
+### Test
+```text
+test(controller): add unit tests for finalizer logic
+```
+
+### Refactor
+```text
+refactor(provider): extract common HTTP client logic
+```
+
+### Revert
+```text
+revert: fix(controller): resolve race condition
 ```
 
 ## Why it Matters
