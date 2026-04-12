@@ -326,8 +326,8 @@ func TestDeleteNonExistent(t *testing.T) {
 	ctx := context.Background()
 
 	err := p.Delete(ctx, "ghost.example.com", "A")
-	if err == nil {
-		t.Fatal("expected error when deleting non-existent record")
+	if err != nil {
+		t.Fatalf("expected no error when deleting non-existent record: %v", err)
 	}
 }
 

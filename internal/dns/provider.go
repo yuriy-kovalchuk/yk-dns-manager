@@ -1,6 +1,18 @@
 package dns
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var (
+	ErrNotFound     = errors.New("not found")
+	ErrAuthFailed   = errors.New("authentication failed")
+	ErrConnection   = errors.New("connection failed")
+	ErrTimeout      = errors.New("request timeout")
+	ErrRetryable    = errors.New("retryable error")
+	ErrNonRetryable = errors.New("non-retryable error")
+)
 
 // Record represents a DNS record to be managed.
 type Record struct {
@@ -18,4 +30,5 @@ type Provider interface {
 	Update(ctx context.Context, record Record) error
 	Delete(ctx context.Context, hostname, recordType string) error
 	Upsert(ctx context.Context, record Record) error
+	HealthCheck(ctx context.Context) error
 }
