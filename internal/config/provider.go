@@ -16,12 +16,11 @@ type ProviderConfig struct {
 }
 
 // LoadProviderConfig reads the DNS provider configuration from the path
-// specified by the DNS_PROVIDER_PATH environment variable, defaulting to
-// "configs/dns-provider.yaml".
+// specified by the DNS_PROVIDER_PATH environment variable.
 func LoadProviderConfig() (*ProviderConfig, error) {
 	path := os.Getenv("DNS_PROVIDER_PATH")
 	if path == "" {
-		path = "configs/dns-provider.yaml"
+		return nil, fmt.Errorf("DNS_PROVIDER_PATH environment variable is required")
 	}
 	return LoadProviderConfigFromPath(path)
 }

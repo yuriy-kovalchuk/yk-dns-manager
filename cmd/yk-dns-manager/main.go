@@ -54,7 +54,7 @@ func run() error {
 
 	domainMapPath := os.Getenv("DOMAIN_MAP_PATH")
 	if domainMapPath == "" {
-		domainMapPath = "configs/domain-map.yaml"
+		return fmt.Errorf("DOMAIN_MAP_PATH environment variable is required")
 	}
 	domainMap, err := config.LoadDomainMap(domainMapPath)
 	if err != nil {

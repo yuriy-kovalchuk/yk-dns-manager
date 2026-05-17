@@ -1,0 +1,27 @@
+image:
+  tag: local
+  pullPolicy: Never  # image is loaded directly into kind via `make kind-load`
+
+logLevel: debug
+
+domainMap:
+  "*.example.com": "10.0.0.1"
+
+dnsProvider:
+  provider: opnsense
+  upsert: true
+  settings:
+    base_url: "https://your-opnsense.local/api"
+    skip_tls_verify: "true"
+    api_key: "${OPNSENSE_API_KEY}"
+    api_secret: "${OPNSENSE_API_SECRET}"
+    default_ttl: "60"
+  existingSecret: yk-dns-manager-credentials
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 32Mi

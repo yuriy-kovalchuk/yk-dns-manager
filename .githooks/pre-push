@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+echo "Running tests before push..."
+go test -race -timeout 120s ./...
+
+echo "Checking commit message format and tag names..."
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/tags/*)
+      tag="${local_ref#refs/tags/}"
+      if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$'; then
+        echo "Bad tag name: $tag"
+        echo "  Expected: v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-<pre-release>"
+        echo "  Examples: v1.0.0  v0.3.0-alpha  v1.0.0-rc.1"
+        exit 1
+      fi
+      ;;
+    *)
+      if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+        commits=$(git log --format="%H" "$local_sha" --not --remotes 2>/dev/null)
+      else
+        commits=$(git log --format="%H" "$remote_sha..$local_sha")
+      fi
+
+      for commit in $commits; do
+        msg=$(git log -1 --format="%s" "$commit")
+        if ! echo "$msg" | grep -qE '^(feat|fix|refactor|test|docs|build|ci|chore|perf|style)(\([^)]+\))?!?: .+'; then
+          echo "Bad commit message: $commit"
+          echo "  $msg"
+          echo "  Expected: type: description  (see docs/commits.md)"
+          exit 1
+        fi
+      done
+      ;;
+  esac
+done
