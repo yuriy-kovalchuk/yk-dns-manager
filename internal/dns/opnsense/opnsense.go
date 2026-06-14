@@ -1,3 +1,4 @@
+// Package opnsense provides a DNS provider implementation for OPNsense Unbound.
 package opnsense
 
 import (
@@ -8,19 +9,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
-
-func init() {
-	dns.Register("opnsense", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-		return New(log, settings)
-	})
-}
 
 // Provider implements dns.Provider for OPNsense Unbound DNS.
 type Provider struct {
@@ -33,12 +30,22 @@ type Provider struct {
 }
 
 // New creates an OPNsense DNS provider from the given settings map.
-// Required settings: base_url, api_key, api_secret.
-// Optional settings: default_ttl (default 300), skip_tls_verify (default false).
+// Returns (nil, err) if mandatory settings are missing.
 func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	baseURL := settings["base_url"]
 	if baseURL == "" {
 		return nil, fmt.Errorf("opnsense: missing required setting 'base_url'")
+	}
+	// Validate that base_url includes the /api path segment.
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("opnsense: invalid base_url %q: %w", baseURL, err)
+	}
+	if !strings.HasPrefix(parsedURL.Path, "/api") {
+		return nil, fmt.Errorf(
+			"opnsense: base_url path must start with '/api' (e.g. https://opnsense.example.com/api), got %q",
+			parsedURL.Path,
+		)
 	}
 	apiKey := settings["api_key"]
 	if apiKey == "" {
@@ -68,13 +75,18 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		apiKey:     apiKey,
 		apiSecret:  apiSecret,
 		defaultTTL: defaultTTL,
-		client:     &http.Client{Transport: transport},
+		client:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:        log,
 	}, nil
 }
 
 // doRequest builds and executes an HTTP request against the OPNsense API.
 func (p *Provider) doRequest(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
+	// Context cancellation is not an error — return nil immediately.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -97,31 +109,9 @@ func (p *Provider) doRequest(ctx context.Context, method, path string, body inte
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, p.classifyError(method, path, err)
+		return nil, fmt.Errorf("opnsense: %s %s: %w", method, path, err)
 	}
 	return resp, nil
-}
-
-// classifyError wraps HTTP errors with meaningful types.
-func (p *Provider) classifyError(method, path string, err error) error {
-	errMsg := err.Error()
-
-	var Wrapf = func(msg string) error {
-		return fmt.Errorf("opnsense: %s %s: %s: %s", method, path, msg, errMsg)
-	}
-
-	switch {
-	case strings.Contains(errMsg, "connection refused"):
-		return Wrapf("connection refused")
-	case strings.Contains(errMsg, "no such host"):
-		return Wrapf("dns resolution failed")
-	case strings.Contains(errMsg, "timeout"):
-		return Wrapf("timeout")
-	case strings.Contains(errMsg, "no route to host"):
-		return Wrapf("no route to host")
-	default:
-		return Wrapf("request failed")
-	}
 }
 
 // HealthCheck verifies the OPNsense API is reachable and credentials are valid.
@@ -130,7 +120,7 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -148,7 +138,7 @@ func (p *Provider) reconfigure(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opnsense: reconfigure: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("opnsense: reconfigure returned status %d", resp.StatusCode)
@@ -186,7 +176,7 @@ func (p *Provider) findOverride(ctx context.Context, fqdn, recordType string) (s
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("opnsense: searchHostOverride returned status %d", resp.StatusCode)
@@ -248,7 +238,7 @@ func (p *Provider) Create(ctx context.Context, record dns.Record) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -287,7 +277,7 @@ func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -325,7 +315,7 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -338,11 +328,12 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("opnsense: decode delHostOverride response: %w", err)
 	}
-	if result.Result == "deleted" {
+	switch result.Result {
+	case "deleted":
 		p.log.V(1).Info("record deleted", "uuid", uuid)
-	} else if result.Result == "not found" {
+	case "not found":
 		p.log.V(1).Info("record already deleted", "uuid", uuid)
-	} else {
+	default:
 		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
 	}
 

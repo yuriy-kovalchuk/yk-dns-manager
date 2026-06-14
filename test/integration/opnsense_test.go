@@ -133,7 +133,7 @@ func (f *fakeOPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request)
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func readJSON(r *http.Request, v interface{}) error {

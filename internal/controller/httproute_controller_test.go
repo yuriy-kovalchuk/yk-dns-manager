@@ -28,7 +28,7 @@ type mockDNSProvider struct {
 	deletedHosts    []string
 }
 
-func (m *mockDNSProvider) Exists(_ context.Context, hostname, recordType string) (bool, error) {
+func (m *mockDNSProvider) Exists(_ context.Context, hostname, _ string) (bool, error) {
 	if m.existingHosts != nil {
 		return m.existingHosts[hostname], nil
 	}
@@ -42,11 +42,11 @@ func (m *mockDNSProvider) Create(_ context.Context, record dns.Record) error {
 	return nil
 }
 
-func (m *mockDNSProvider) Update(_ context.Context, record dns.Record) error {
+func (m *mockDNSProvider) Update(_ context.Context, _ dns.Record) error {
 	return nil
 }
 
-func (m *mockDNSProvider) Delete(_ context.Context, hostname, recordType string) error {
+func (m *mockDNSProvider) Delete(_ context.Context, hostname, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedHosts = append(m.deletedHosts, hostname)
@@ -120,7 +120,7 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Error("expected no requeue")
 	}
 
@@ -129,7 +129,7 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error on second reconcile: %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Error("expected no requeue")
 	}
 
@@ -196,7 +196,7 @@ func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Error("expected no requeue")
 	}
 
@@ -360,7 +360,7 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Requeue {
+	if result.RequeueAfter != 0 {
 		t.Error("expected no requeue")
 	}
 

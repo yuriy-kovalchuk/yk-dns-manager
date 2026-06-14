@@ -28,6 +28,8 @@ serviceAccount:
   create: true
   # -- If set, use this name for the ServiceAccount.
   name: ""
+  # -- Automount API credentials for the ServiceAccount.
+  automountServiceAccountToken: false
 
 podAnnotations: {}
 podLabels: {}
