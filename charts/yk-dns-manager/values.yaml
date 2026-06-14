@@ -29,7 +29,9 @@ serviceAccount:
   # -- If set, use this name for the ServiceAccount.
   name: ""
   # -- Automount API credentials for the ServiceAccount.
-  automountServiceAccountToken: false
+  # Must be true — this is a Kubernetes controller that needs API access
+  # to watch HTTPRoutes and update finalizers/annotations.
+  automountServiceAccountToken: true
 
 podAnnotations: {}
 podLabels: {}
