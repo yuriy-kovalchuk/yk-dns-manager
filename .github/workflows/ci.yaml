@@ -39,7 +39,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: coverage.txt
-        fail_ci_if_error: false
+          fail_ci_if_error: false
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
