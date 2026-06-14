@@ -1,3 +1,4 @@
+// Package dns provides a provider interface and utilities for DNS record management.
 package dns
 
 import (

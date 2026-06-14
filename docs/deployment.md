@@ -46,8 +46,8 @@ resources:
 Run the following command to install the controller from the OCI registry:
 
 ```bash
-helm install yk-dns-manager oci://ghcr.io/yuriy-kovalchuk/yk-dns-manager-chart/yk-dns-manager 
-  --version 0.3.1 
+helm install yk-dns-manager oci://ghcr.io/yuriy-kovalchuk/yk-dns-manager-chart/yk-dns-manager \
+  --version <version> 
   --namespace yk-dns-manager 
   --create-namespace 
   -f values.local.yaml

@@ -23,11 +23,14 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \
     -trimpath \
-    -ldflags="-s -w -X main.Version=${VERSION}" \
+    -ldflags="-s -w \
+      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.Version=${VERSION} \
+      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.Commit=${COMMIT} \
+      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.BuildDate=${BUILD_DATE}" \
     -o /yk-dns-manager ./cmd/yk-dns-manager
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 
 LABEL org.opencontainers.image.title="yk-dns-manager" \
       org.opencontainers.image.description="Kubernetes controller that manages DNS records for Gateway API HTTPRoutes" \

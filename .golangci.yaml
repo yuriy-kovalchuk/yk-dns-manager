@@ -1,0 +1,41 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - exhaustive
+    - noctx
+    - bodyclose
+    - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yuriy-kovalchuk
+
+linters-settings:
+  exhaustive:
+    default-signifies-exhaustive: true
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: var-naming
+        severity: warning
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - unparam
+        - exhaustive

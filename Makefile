@@ -18,81 +18,98 @@ GATEWAY_API_VERSION ?= v1.4.1
 LOCALBIN              ?= $(shell pwd)/bin
 GOLANGCI_LINT_VERSION ?= v2.11.4
 
-LDFLAGS := -s -w -X main.Version=$(VERSION)
+VERSION_PKG := github.com/yuriy-kovalchuk/yk-dns-manager/internal/version
+
+LDFLAGS := -s -w \
+	-X $(VERSION_PKG).Version=$(VERSION) \
+	-X $(VERSION_PKG).Commit=$(COMMIT) \
+	-X $(VERSION_PKG).BuildDate=$(BUILD_DATE)
 
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run \
-        test test-unit test-integration \
-        clean \
-        docker-build docker-push docker-buildx docker-build-local \
-        helm-package helm-push \
-        kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs \
-        install-hooks
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
-all: tidy fmt vet build
+## all: tidy, fmt, vet, lint, build
+all: tidy fmt vet lint build
 
 # ── Development ────────────────────────────────────────────────────────────────
+## tidy: tidy and verify dependencies
 tidy:
-	go mod tidy
+	go mod tidy && go mod verify
 
+## deps-check: list outdated direct dependencies
 deps-check:
-	@go list -u -m -f '{{if and (not .Indirect) .Update}}{{.Path}}  {{.Version}} → {{.Update.Version}}{{end}}' all | grep -v "^$$" || echo "All direct dependencies are up to date."
+	@go list -u -m -f '{{if and (not .Indirect) .Update}}{{.Path}}  {{.Version}} → {{.Update.Version}}{{end}}' all \
+	  | grep -v "^$$" \
+	  || echo "All direct dependencies are up to date."
 
+## fmt: format Go source files
 fmt:
 	go fmt ./...
 
+## vet: check for suspicious constructs
 vet:
 	go vet ./...
 
+## lint: run golangci-lint
 lint: $(LOCALBIN)/golangci-lint
-	$(LOCALBIN)/golangci-lint run --timeout=5m
+	$(LOCALBIN)/golangci-lint run --timeout=5m ./...
 
+## build: compile the primary binary to bin/
 build:
+	mkdir -p $(LOCALBIN)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(LOCALBIN)/$(APP_NAME) ./cmd/$(APP_NAME)
 
+## run: build and run the primary binary locally
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
 
 # ── Testing ────────────────────────────────────────────────────────────────────
+## test: run all tests (unit + integration)
 test: test-unit test-integration
 
+## test-unit: run unit tests with coverage profile
 test-unit:
+	go test -race -timeout 120s -v -count=1 -coverprofile=coverage.txt ./internal/...
+
+## test-cover: run tests, print function summary, generate HTML report
+test-cover:
 	go test -v -race -count=1 -coverprofile=coverage.txt ./internal/...
+	go tool cover -html=coverage.txt -o coverage.html
 
+## test-integration: run integration tests
 test-integration:
-	go test -v -race -count=1 ./test/integration/
+	go test -race -timeout 120s -v -count=1 ./test/integration/
 
-# ── Cleanup ────────────────────────────────────────────────────────────────────
-clean:
-	rm -rf $(LOCALBIN) *.tgz coverage.txt
+## vuln: check for known vulnerabilities (manual/CI only)
+vuln:
+	govulncheck ./...
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
+## docker-build: multi-platform build via buildx (no push)
 docker-build:
-	docker build \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		-t $(IMG) .
-
-docker-push: docker-build
-	docker push $(IMG)
-
-docker-buildx:
+	$(MAKE) buildx-setup
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMG) \
-		--push .
+		--load
+
+## docker-push: multi-platform build and push to registry
+docker-push:
+	$(MAKE) docker-build
+	docker push $(IMG)
 
 # ── Helm ───────────────────────────────────────────────────────────────────────
+## helm-package: package the Helm chart
 helm-package:
 	helm package $(CHART_DIR)
 
+## helm-push: package and push the Helm chart to OCI registry
 helm-push: helm-package
 	helm push $(APP_NAME)-*.tgz oci://$(REGISTRY)/charts
 
@@ -144,14 +161,29 @@ kind-logs:
 		--follow
 
 # ── Git hooks ──────────────────────────────────────────────────────────────────
+## install-hooks: install git hooks from .githooks/
 install-hooks:
 	git config core.hooksPath .githooks
 	@echo "Git hooks installed — tests and commit messages will be checked before every push."
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
+## buildx-setup: create or start the multi-platform buildx builder
+buildx-setup:
+	docker buildx create --name multiplatform --driver docker-container --bootstrap --use 2>/dev/null || \
+	  docker buildx inspect --bootstrap multiplatform
+
+## clean: remove build artifacts (bin/, coverage files, helm packages)
+clean:
+	rm -rf $(LOCALBIN) coverage.* *.tgz
+
+# ── Internal ───────────────────────────────────────────────────────────────────
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
 $(LOCALBIN)/golangci-lint: $(LOCALBIN)
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
 		sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION)
+
+## help: print this help text
+help:
+	@grep -E '^## ' Makefile | sed 's/^## //' | column -t -s ':'

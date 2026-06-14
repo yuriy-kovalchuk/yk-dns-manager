@@ -1,3 +1,4 @@
+// Package controller provides the HTTPRoute reconciler for managing DNS records.
 package controller
 
 import (
@@ -35,6 +36,7 @@ type HTTPRouteReconciler struct {
 	Upsert    bool // when true, update existing records; when false, only create missing ones
 }
 
+// Reconcile implements controller-runtime's Reconciler interface.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var route gatewayv1.HTTPRoute
 	if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
@@ -62,11 +64,14 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !route.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&route, finalizerName) {
 			r.Log.Info("deleting DNS records for HTTPRoute", "name", req.NamespacedName)
+			var deleteErr error
 			for _, hostname := range specHostnames {
 				if err := r.DNS.Delete(ctx, hostname, "A"); err != nil {
-					return ctrl.Result{}, fmt.Errorf("deleting DNS record for %s: %w", hostname, err)
+					r.Log.Error(err, "failed to delete DNS record", "hostname", hostname)
+					deleteErr = fmt.Errorf("at least one DNS record deletion failed")
+				} else {
+					r.Log.Info("deleted DNS record", "hostname", hostname)
 				}
-				r.Log.Info("deleted DNS record", "hostname", hostname)
 			}
 
 			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -78,6 +83,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			})
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+			}
+			// Best-effort cleanup: log errors but always succeed so the route is removed.
+			if deleteErr != nil {
+				r.Log.Error(deleteErr, "one or more DNS record deletions failed during cleanup")
 			}
 		}
 		return ctrl.Result{}, nil
@@ -139,13 +148,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			continue
 		}
 
-		// Non-upsert path: only create if missing
+		// Non-upsert path: only create if missing.
 		exists, err := r.DNS.Exists(ctx, hostname, "A")
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("checking DNS record for %s: %w", hostname, err)
 		}
 		if exists {
-			r.Log.V(1).Info("DNS record already exists, skipping", "hostname", hostname)
+			r.Log.Info("DNS record already exists and upsert mode is disabled — IPs may drift if domain map changes; consider enabling upsert mode to keep records in sync", "hostname", hostname)
 			continue
 		}
 		if err := r.DNS.Create(ctx, record); err != nil {
@@ -154,8 +163,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.Log.Info("created DNS record", "hostname", hostname, "ip", ip)
 	}
 
-	// Update annotation with the current list of managed hostnames
-	if !reflect.DeepEqual(managedHostnames, currentHostnames) {
+	// Update annotation with the list of hostnames we actually manage (those matching domain map).
+	if !reflect.DeepEqual(managedHostnames, specHostnames) {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
 				return err
@@ -163,7 +172,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if route.Annotations == nil {
 				route.Annotations = make(map[string]string)
 			}
-			data, _ := json.Marshal(currentHostnames)
+			data, _ := json.Marshal(specHostnames)
 			route.Annotations[managedHostnamesAnnotation] = string(data)
 			return r.Update(ctx, &route)
 		})
@@ -175,6 +184,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, nil
 }
 
+// SetupWithManager registers the reconciler with the controller manager.
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).

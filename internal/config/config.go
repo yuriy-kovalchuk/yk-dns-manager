@@ -1,3 +1,4 @@
+// Package config provides configuration loading for domain maps and DNS provider settings.
 package config
 
 import (

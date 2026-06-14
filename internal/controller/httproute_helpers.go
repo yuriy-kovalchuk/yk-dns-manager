@@ -7,6 +7,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+// Contains reports whether the string slice contains the given value.
 func Contains(arr []string, val string) bool {
 	for _, v := range arr {
 		if v == val {

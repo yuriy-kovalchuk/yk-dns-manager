@@ -5,6 +5,7 @@ import (
 	"errors"
 )
 
+// Standard DNS provider errors.
 var (
 	ErrNotFound     = errors.New("not found")
 	ErrAuthFailed   = errors.New("authentication failed")
