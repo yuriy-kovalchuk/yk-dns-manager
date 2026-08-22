@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Regression tests for every previously known reconciler bug (B1–B3, B13): deletion with unmapped hostnames, deletion covering annotation ∪ spec, live cleanup when a route loses its last mapped hostname, duplicate spec hostnames.
 - Integration tests for disabled-override re-enable (B9) and reconfigure retry behaviour (B5).
 - Makefile: `kind-load` / `kind-deploy` split (image push and chart deploy are now independent steps) and an optional `VALUES=my-values.yaml` parameter on `kind-deploy`; `kind-reload` as the fast code-iteration loop.
+- `docs/providers.md` — per-provider reference: the common mechanism (settings, credential Secrets, key-agnostic validation), OPNsense configuration and behavior notes, and the steps for adding a new provider.
 
 ### Changed
 - **BREAKING:** `${ENV_VAR}` expansion in config files is removed — settings values are used literally. Credentials are not written in the config file at all; they come from the credential Secret referenced by each instance (see Added).

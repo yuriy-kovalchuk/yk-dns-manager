@@ -101,7 +101,7 @@ Credentials never live in the config file: the app reads each `secret:` via the 
 | OPNsense | Unbound DNS host overrides via OPNsense API |
 | Pi-hole, AdGuard Home, CoreDNS | Planned |
 
-Adding a provider: implement the `Provider` interface — see [Architecture](docs/architecture.md#adding-a-new-provider).
+Per-provider configuration and credential Secrets: [docs/providers.md](docs/providers.md). Adding a provider: implement the `Provider` interface — see [Architecture](docs/architecture.md#adding-a-new-provider).
 
 ## Helm values
 
