@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Integration tests for disabled-override re-enable (B9) and reconfigure retry behaviour (B5).
 - Makefile: `kind-load` / `kind-deploy` split (image push and chart deploy are now independent steps) and an optional `VALUES=my-values.yaml` parameter on `kind-deploy`; `kind-reload` as the fast code-iteration loop.
 - `docs/providers.md` — per-provider reference: the common mechanism (settings, credential Secrets, key-agnostic validation), OPNsense configuration and behavior notes, and the steps for adding a new provider.
+- `dns.Upsert` helper — canonical exists→create/update implementation for providers whose backend has no native upsert operation; a one-line `Upsert` method instead of per-provider boilerplate.
 
 ### Changed
 - **BREAKING:** `${ENV_VAR}` expansion in config files is removed — settings values are used literally. Credentials are not written in the config file at all; they come from the credential Secret referenced by each instance (see Added).
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - `HTTPRouteReconciler` slimmed to orchestration: `Client`/`APIReader`/`DNS`/`Upsert` fields replaced by `State *RouteState` and `DNS *dns.Manager`.
 - **Reconcile restructured** (`httproute_controller.go`): deletion is now handled first and independently of the domain map, deleting records for the **annotation ∪ mapped spec** set; the live path deletes records for annotated hostnames that left the spec and clears the annotation when the managed set becomes empty. The `managed-hostnames` annotation is the single source of truth for what the controller manages.
 - OPNsense provider: disabled host overrides now count as **absent** — `Create` re-enables a disabled override in place (no duplicate), `Update`/`Upsert` re-enable it. `reconfigure` is retried (3 attempts, 500 ms backoff) so a transient failure can't strand a persisted-but-unapplied change in non-upsert mode.
+- OPNsense `Upsert` no longer goes through `Update` for existing records (raw `setOverride` extracted): the common upsert path now does one `searchHostOverride` table fetch instead of two.
 - Code simplification: removed `FormatHTTPRoute` (dead code), the hand-rolled `Contains` helper (replaced by `slices.Contains`), unused `dns.Err*` sentinel variables, and the `default_ttl` setting / `Record.TTL` field (the OPNsense host-override API has no TTL — the setting was misleading). `internal/config` is now a single file. `hack/local-values.yaml` removed — `make kind-deploy` uses chart defaults + `--set` local overrides (+ optional `VALUES=` file).
 - Makefile aligned with the yk-update-checker reference: buildx-based `docker-build`/`docker-push` (`--builder multiplatform`, `:latest` tag), `go tool cover -func` in `test-cover`, `.PHONY` completeness, `chmod +x .githooks/*` in `install-hooks`.
 - Dependencies: `k8s.io/{api,apimachinery,client-go}` v0.36.1 → v0.36.3, `sigs.k8s.io/gateway-api` v1.5.1 → v1.6.1, `go-logr/logr` v1.4.3 → v1.4.4, `go.yaml.in/yaml/v3` v3.0.4 → v3.0.5.

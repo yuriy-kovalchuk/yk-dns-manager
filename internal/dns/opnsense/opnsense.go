@@ -329,6 +329,11 @@ func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 		return fmt.Errorf("opnsense: no existing override found for %s/%s", record.Hostname, record.Type)
 	}
 
+	return p.setOverride(ctx, uuid, record)
+}
+
+// setOverride calls setHostOverride for a known UUID and applies the change.
+func (p *Provider) setOverride(ctx context.Context, uuid string, record dns.Record) error {
 	result, _, err := p.callResult(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/setHostOverride/%s", uuid), buildHostBody(record))
 	if err != nil {
 		return err
@@ -372,7 +377,9 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 }
 
 // Upsert creates or updates a DNS record depending on whether it already
-// exists. A disabled override is treated as absent and re-enabled.
+// exists. A disabled override is treated as absent and re-enabled. It uses a
+// single findOverride call — the generic dns.Upsert would check again inside
+// Update.
 func (p *Provider) Upsert(ctx context.Context, record dns.Record) error {
 	uuid, _, err := p.findOverride(ctx, record.Hostname, record.Type)
 	if err != nil {
@@ -381,5 +388,5 @@ func (p *Provider) Upsert(ctx context.Context, record dns.Record) error {
 	if uuid == "" {
 		return p.addOverride(ctx, record)
 	}
-	return p.Update(ctx, record)
+	return p.setOverride(ctx, uuid, record)
 }

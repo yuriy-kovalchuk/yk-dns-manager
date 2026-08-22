@@ -81,7 +81,7 @@ Each will document its own settings and Secret keys in this file.
 
 ## Adding a new provider
 
-1. Create `internal/dns/<name>/` and implement `dns.Provider` — [internal/dns/opnsense](../internal/dns/opnsense/) is the reference implementation.
+1. Create `internal/dns/<name>/` and implement `dns.Provider` — [internal/dns/opnsense](../internal/dns/opnsense/) is the reference implementation. Backends without a native upsert operation implement `Upsert` as `return dns.Upsert(ctx, p, record)`.
 2. In the constructor, validate the required `settings` keys **and** the Secret keys you expect; fail with an error that names what is missing.
 3. Register the type in the `factories` map in [internal/app/app.go](../internal/app/app.go) — one import and one map entry.
 4. Keep `Delete` idempotent and `HealthCheck` a cheap authenticated call.

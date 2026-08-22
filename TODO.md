@@ -56,7 +56,7 @@ is operability (observability + health), not correctness or design.
 
 - [ ] **AAAA/CNAME support**: `Record.Type` is already in the interface; only the
       controller hardcodes `"A"`.
-- [ ] **Default `Upsert` helper** in `internal/dns` for providers without native upsert.
+- [x] **Default `Upsert` helper** in `internal/dns` for providers without native upsert (done: `dns.Upsert` + opnsense single-fetch `setOverride`).
 - [ ] **Kind E2E test**: the kind workflow (`kind-load`/`kind-deploy`) makes this cheap
       to script.
 

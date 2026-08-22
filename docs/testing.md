@@ -6,7 +6,7 @@ This document describes the test suite for yk-dns-manager. All tests run via `go
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `internal/*/` | 59 (incl. subtests) | Config parsing, app assembly + secret loading, manager fan-out, controller logic, provider init |
+| Unit | `internal/*/` | 62 (incl. subtests) | Config parsing, app assembly + secret loading, manager fan-out, upsert helper, controller logic, provider init |
 | Integration | `test/integration/` | 11 | OPNsense provider against an in-process fake HTTP server |
 | E2E | _(not yet implemented)_ | — | Full flow: K8s cluster + real/fake OPNsense appliance |
 
@@ -66,6 +66,14 @@ Uses mock `Provider` implementations to verify fan-out without any HTTP.
 | `TestManager_DeleteRecord_FanoutAndJoinErrors` | Delete fans out to all instances; errors joined and named |
 | `TestManager_HealthCheck_AllMustPass` | Any failing instance fails the health check; all healthy → nil |
 | `TestManager_Len` | Instance count reporting |
+
+**`upsert_test.go`**
+
+| Test | Description |
+|---|---|
+| `TestUpsert_CreatesWhenAbsent` | `dns.Upsert` calls Exists then Create when the record is absent |
+| `TestUpsert_UpdatesWhenPresent` | `dns.Upsert` calls Exists then Update when the record exists |
+| `TestUpsert_ExistsError` | An Exists error is returned and no mutation is attempted |
 
 ### OPNsense Provider — `internal/dns/opnsense/`
 

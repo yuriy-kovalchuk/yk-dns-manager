@@ -196,6 +196,8 @@ func (p *Provider) Delete(ctx context.Context, hostname, recordType string) erro
 func (p *Provider) Upsert(ctx context.Context, record dns.Record) error                   { /* ... */ }
 ```
 
+Backends without a native upsert operation implement `Upsert` as `return dns.Upsert(ctx, p, record)` — the canonical exists→create/update helper.
+
 **2. Register the type in `internal/app` (`factories`):**
 ```go
 var factories = map[string]providerFactory{

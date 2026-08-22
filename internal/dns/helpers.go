@@ -2,6 +2,7 @@
 package dns
 
 import (
+	"context"
 	"strings"
 )
 
@@ -26,6 +27,20 @@ func (c *Credentials) SecretKey(key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(c.Data[key]))
+}
+
+// Upsert creates the record if it does not exist, updates it if it does.
+// Use it as the Provider.Upsert implementation for backends that have no
+// native upsert operation.
+func Upsert(ctx context.Context, p Provider, r Record) error {
+	exists, err := p.Exists(ctx, r.Hostname, r.Type)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return p.Update(ctx, r)
+	}
+	return p.Create(ctx, r)
 }
 
 // SplitHostname splits an FQDN into subdomain and domain parts.
