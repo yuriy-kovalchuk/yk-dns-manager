@@ -13,7 +13,7 @@ CHART_DIR  := charts/$(APP_NAME)
 
 KIND_CLUSTER        ?= yk-dns-manager-dev
 KIND_CONFIG         := hack/kind-config.yaml
-GATEWAY_API_VERSION ?= v1.4.1
+GATEWAY_API_VERSION ?= v1.6.1
 VALUES              ?=   # optional values file: make kind-deploy VALUES=my-values.yaml
 
 LOCALBIN              ?= $(shell pwd)/bin
