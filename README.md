@@ -6,13 +6,13 @@ A Kubernetes controller that watches Gateway API HTTPRoutes and automatically ma
 
 ### Helm (Recommended)
 
-Create a secret with your DNS provider credentials:
+Create a Secret with your DNS provider credentials in the release namespace. The OPNsense provider expects the keys `API_KEY` and `API_SECRET` (each provider declares the keys it needs):
 
 ```bash
-kubectl create secret generic dns-provider-credentials \
+kubectl create secret generic opnsense-creds \
   --namespace yk-dns-manager \
-  --from-literal=OPNSENSE_API_KEY=your-key \
-  --from-literal=OPNSENSE_API_SECRET=your-secret
+  --from-literal=API_KEY=your-key \
+  --from-literal=API_SECRET=your-secret
 ```
 
 Install locally from the `charts/` directory:
@@ -20,11 +20,12 @@ Install locally from the `charts/` directory:
 ```bash
 helm install yk-dns-manager charts/yk-dns-manager \
   --namespace yk-dns-manager --create-namespace \
-  --set dnsProvider.provider=opnsense \
-  --set 'dnsProvider.settings.api_key=${OPNSENSE_API_KEY}' \
-  --set 'dnsProvider.settings.api_secret=${OPNSENSE_API_SECRET}' \
-  --set dnsProvider.existingSecret=dns-provider-credentials
+  --set dnsProviders.opnsense.provider=opnsense \
+  --set 'dnsProviders.opnsense.settings.base_url=https://opnsense.example.com/api' \
+  --set dnsProviders.opnsense.secret=opnsense-creds
 ```
+
+The app reads that Secret from the Kubernetes API at startup — credentials never appear in the config file. The chart grants the pod `get` access to exactly the Secret names referenced in `dnsProviders` (a namespace-scoped `Role` restricted via `resourceNames`).
 
 See [docs/deployment.md](docs/deployment.md) for OCI registry deployment.
 
@@ -55,10 +56,9 @@ The controller watches for the hostname `app.example.com`, looks up its IP from 
 
 ### Domain Map
 
-Define which IPs hostnames should resolve to:
+Define which IPs hostnames should resolve to (the `domainMap` section of the config file):
 
 ```yaml
-# configs/domain-map.yaml
 example.com: 10.0.0.1
 "*.homelab.local": 10.0.0.2
 "special.homelab.local": 10.0.0.3   # exact match wins over wildcard
@@ -68,37 +68,63 @@ Matching priority: **exact** > **wildcard** > **parent domain walk**.
 
 ## Configuration
 
+The app reads **one config file** containing both the domain map and the DNS provider instances:
+
+```yaml
+# examples/config.yaml
+domainMap:
+  example.com: 10.0.0.1
+
+providers:
+  opnsense:
+    provider: opnsense   # optional; defaults to the instance name
+    upsert: false
+    # Name of the Kubernetes Secret holding this instance's credentials.
+    secret: opnsense-creds
+    settings:
+      base_url: "https://opnsense.example.com/api"
+      skip_tls_verify: "false"
+      # Credentials (API_KEY, API_SECRET) are deliberately absent here —
+      # see "Secrets" below.
+```
+
+Optionally set `secretsNamespace` at the top level when the Secrets live in a
+namespace other than the app's own (mainly useful when running locally
+against a dev cluster). In-cluster, leave it unset.
+
+- **An empty `providers` map is valid:** the controller runs in no-op mode (HTTPRoutes are watched but no records are managed) and starts without failure.
+- Every configured instance is an independent backend; each managed record is applied to **all** of them (broadcast).
+- `provider` selects the backend type (see [Supported Providers](#supported-providers)); it defaults to the instance name.
+- `upsert` is per instance: `true` updates existing records on every reconcile; `false` only creates missing records.
+
+### Secrets
+
+Credentials never live in the config file — they live in a Kubernetes `Secret`, and the app reads them from the API at startup. The config only names the Secret per provider instance (`secret:`); **each provider implementation declares which keys it expects and validates them** in its constructor, failing startup with an error naming any missing key.
+
+Different providers need different credential shapes, and the mechanism is key-agnostic — it just passes the raw Secret data to the provider:
+
+| Provider | Expected Secret keys |
+|---|---|
+| OPNsense | `API_KEY`, `API_SECRET` |
+| (future) single-token | e.g. `API_TOKEN` |
+| (future) basic auth | e.g. `USERNAME`, `PASSWORD` |
+
+- **In-cluster:** the app reads the Secret from its own namespace (override with `secretsNamespace`). The Helm chart creates a namespace-scoped `Role` granting `get` on exactly the referenced Secret names.
+- **Locally:** the same code path runs against your dev cluster — create the Secret there and point `secretsNamespace` at its namespace (see [docs/local-testing.md](docs/local-testing.md)).
+
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `DOMAIN_MAP_PATH` | `configs/domain-map.yaml` | Path to the domain map YAML file |
-| `DNS_PROVIDER_PATH` | `configs/dns-provider.yaml` | Path to the DNS provider config YAML file |
+| `CONFIG_PATH` | — (required) | Path to the config YAML file |
+| `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 
 ### Command-Line Flags
 
 | Flag | Env Var Override | Default | Description |
 |---|---|---|---|
-| `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
+| `--config-path` | `CONFIG_PATH` | — (required) | Path to the config file |
 | `--zap-log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
-
-### DNS Provider Config
-
-```yaml
-# configs/dns-provider.yaml
-provider: opnsense
-upsert: false
-settings:
-  base_url: "https://opnsense.example.com/api"
-  skip_tls_verify: "false"
-  api_key: "${OPNSENSE_API_KEY}"
-  api_secret: "${OPNSENSE_API_SECRET}"
-  default_ttl: "300"
-```
-
-- `provider` selects the backend (see [Supported Providers](#supported-providers)).
-- `upsert: true` updates existing records on every reconcile; when `false`, only creates missing records.
-- Settings support `${ENV_VAR}` expansion for credential injection.
 
 Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
 
@@ -120,8 +146,8 @@ Key values:
 | Value | Description |
 |---|---|
 | `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
-| `dnsProvider.provider` | DNS provider name |
-| `dnsProvider.existingSecret` | Secret with provider credentials |
+| `dnsProviders` | Map of provider instances; each gets `provider`, `upsert`, `secret`, `settings` |
+| `secretsNamespace` | Namespace to read provider credential Secrets from (default: release namespace) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
 
 ## Testing

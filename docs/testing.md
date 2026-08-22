@@ -6,8 +6,8 @@ This document describes the test suite for yk-dns-manager. All tests run via `go
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `internal/*/` | 21 | Config parsing, provider init, controller logic |
-| Integration | `test/integration/` | 8 | OPNsense provider against an in-process fake HTTP server |
+| Unit | `internal/*/` | 59 (incl. subtests) | Config parsing, app assembly + secret loading, manager fan-out, controller logic, provider init |
+| Integration | `test/integration/` | 11 | OPNsense provider against an in-process fake HTTP server |
 | E2E | _(not yet implemented)_ | — | Full flow: K8s cluster + real/fake OPNsense appliance |
 
 ## Unit Tests
@@ -20,20 +20,52 @@ Unit tests live alongside the code they test. They use no network, no external p
 
 | Test | Description |
 |---|---|
-| `TestLoadDomainMap` | Loads a YAML domain map file and verifies entries are parsed correctly |
-| `TestLookupIP` | Verifies IP lookup for hostnames, including nested subdomains and trailing dots |
+| `TestLoadConfig` | Loads the unified config file (`domainMap` + `providers`) and checks both sections |
+| `TestLoadConfig_EmptyFile` | An empty file is a valid no-op config |
+| `TestLookupIP` (+ `Wildcard`, `WildcardWithBaseDomain`) | Verifies IP lookup: exact match, wildcard, and exact-beats-wildcard |
 
 **`provider_test.go`**
 
 | Test | Description |
 |---|---|
-| `TestLoadProviderConfig` | Loads a valid provider config and checks all fields |
-| `TestLoadProviderConfig_UpsertTrue` | Verifies `upsert: true` is parsed as a top-level bool |
-| `TestLoadProviderConfig_UpsertDefault` | Verifies upsert defaults to `false` when omitted |
-| `TestLoadProviderConfig_MissingProvider` | Expects error when `provider` field is missing |
-| `TestLoadProviderConfig_EnvVarExpansion` | Verifies `${ENV_VAR}` in settings is resolved via env |
-| `TestLoadProviderConfig_EnvVarUnset` | Verifies unset env vars expand to empty string |
-| `TestLoadProviderConfig_MissingFile` | Expects error for non-existent config file |
+| `TestLoadConfig_Providers` | Loads a multi-instance config (two types) and checks all fields |
+| `TestLoadConfig_ProvidersUpsertDefault` | Verifies per-instance `upsert` defaults to `false` when omitted |
+| `TestLoadConfig_EmptyProviders` | Empty/missing `providers` map is valid (no-op mode) |
+| `TestLoadConfig_OldFormatRejected` | The legacy two-file format (unknown top-level keys) is rejected by strict decode |
+| `TestLoadConfig_MissingFile` | Expects error for non-existent config file |
+
+Note: credential handling is tested in the provider package — the provider reads its declared keys from the `dns.Credentials` set and fails with an error naming any missing key (see `TestNew_MissingCredentialKeys` below).
+
+### App Assembly — `internal/app/`
+
+**`app_test.go`**
+
+Uses a fake Kubernetes clientset to test `app.Build` (provider construction, credential Secret resolution, namespace resolution) without a real cluster.
+
+| Test | Description |
+|---|---|
+| `TestLoadCredentials` | No `secret` field → nil; existing Secret → raw data passed through; missing Secret → error naming the Secret |
+| `TestPodNamespaceFromEnv` | `POD_NAMESPACE` env var is used for in-cluster namespace resolution |
+| `TestResolveSecretNamespace` | Explicit `secretsNamespace` wins; empty when no secret is referenced |
+| `TestBuild_NoProviders` | Zero instances → empty manager (no-op mode), no error |
+| `TestBuild_UnknownProviderType` | Unknown type → startup error |
+| `TestBuild_MissingSecret` | Referenced Secret absent from the cluster → startup error |
+| `TestBuild_ProviderNeedsSecret` | OPNsense instance without a `secret` field → startup error (provider validates its keys) |
+
+### DNS Manager — `internal/dns/`
+
+**`manager_test.go`**
+
+Uses mock `Provider` implementations to verify fan-out without any HTTP.
+
+| Test | Description |
+|---|---|
+| `TestManager_EnsureRecord_Fanout` | Record is applied to all instances (non-upsert → Create, upsert → Upsert) |
+| `TestManager_EnsureRecord_SkipsExistingNonUpsert` | Existing record + `upsert: false` → no op on that instance |
+| `TestManager_EnsureRecord_JoinsErrors` | One failing instance → joined error names it; other instances still processed |
+| `TestManager_DeleteRecord_FanoutAndJoinErrors` | Delete fans out to all instances; errors joined and named |
+| `TestManager_HealthCheck_AllMustPass` | Any failing instance fails the health check; all healthy → nil |
+| `TestManager_Len` | Instance count reporting |
 
 ### OPNsense Provider — `internal/dns/opnsense/`
 
@@ -41,27 +73,30 @@ Unit tests live alongside the code they test. They use no network, no external p
 
 | Test | Description |
 |---|---|
-| `TestNew_ValidSettings` | Creates provider with valid settings, checks defaults |
-| `TestNew_CustomTTL` | Verifies custom `default_ttl` is parsed |
-| `TestNew_InvalidTTL` | Expects error for non-numeric TTL |
+| `TestNew_ValidSettings` | Creates provider with valid settings + secret, checks parsed fields |
 | `TestNew_MissingBaseURL` | Expects error when `base_url` is missing |
-| `TestNew_MissingAPIKey` | Expects error when `api_key` is missing |
-| `TestNew_MissingAPISecret` | Expects error when `api_secret` is missing |
+| `TestNew_NoCredentials` | Expects error when no `dns.Credentials` are provided (points at the `secret` config field) |
+| `TestNew_MissingCredentialKeys` | Expects an error naming the missing Secret key (e.g. `API_SECRET`) |
+| `TestNew_CredentialKeyWithWhitespace` | Trims whitespace from Secret values (file-sourced secrets) |
 | `TestNew_SkipTLSVerify` | Verifies TLS skip config creates a valid client |
 
 ### HTTPRoute Controller — `internal/controller/`
 
 **`httproute_controller_test.go`**
 
-Uses a mock DNS provider and a fake Kubernetes client to test reconciliation logic without any real cluster or DNS calls.
+Uses a mock DNS provider (wrapped in a real `dns.Manager`) and a fake Kubernetes client to test reconciliation logic without any real cluster or DNS calls.
 
 | Test | Description |
 |---|---|
 | `TestHTTPRouteReconciler_Reconcile` | Creates a DNS record for a matching hostname (two-pass: finalizer then record) |
-| `TestHTTPRouteReconciler_ReconcileUnknownDomain` | Skips hostnames with no domain map entry |
-| `TestHTTPRouteReconciler_UpsertEnabled` | Calls `Upsert` instead of `Create` when upsert mode is on |
+| `TestHTTPRouteReconciler_ReconcileUnknownDomain` | Unmanaged routes are never touched (no records, no finalizer) |
+| `TestHTTPRouteReconciler_UpsertEnabled` | Calls `Upsert` instead of `Create` when the instance's upsert policy is on |
 | `TestHTTPRouteReconciler_CreateSkipsExisting` | Skips creation when record already exists and upsert is off |
 | `TestHTTPRouteReconciler_Deletion` | Deletes DNS records when HTTPRoute is deleted (finalizer cleanup) |
+| `TestHTTPRouteReconciler_LosesAllMappedHostnames` | A managed route whose hostnames no longer map gets its record deleted and annotation cleared |
+| `TestHTTPRouteReconciler_DeletionWithUnmappedHostnames` | Deleting a route with unmapped hostnames still removes the finalizer (never stuck in Terminating) |
+| `TestHTTPRouteReconciler_DeletionUnion` | Deletion covers annotation ∪ spec, not just the spec |
+| `TestHTTPRouteReconciler_DuplicateSpecHostnames` | Duplicate spec hostnames produce a single record |
 
 ## Integration Tests
 
@@ -79,10 +114,13 @@ go test ./test/integration/ -v
 | `TestUpdateExistingRecord` | Creates then updates a record, verifies the IP changed in the store |
 | `TestUpdateNonExistent` | Expects error when updating a record that doesn't exist |
 | `TestDeleteExistingRecord` | Creates then deletes a record, verifies it's gone |
-| `TestDeleteNonExistent` | Expects error when deleting a record that doesn't exist |
+| `TestDeleteNonExistent` | Deleting a missing record is not an error (idempotent) |
 | `TestUpsertCreatesAndUpdates` | First upsert creates, second upsert updates the same record |
 | `TestFullLifecycle` | End-to-end: Exists(false) -> Create -> Exists(true) -> Update -> verify -> Delete -> Exists(false) |
 | `TestMultipleRecords` | Creates 3 records, deletes one, verifies others remain unaffected |
+| `TestDisabledOverrideReenabled` | A manually disabled override counts as absent; `Create` re-enables it in place (no duplicate) |
+| `TestReconfigureRetriedOnTransientFailure` | Transient reconfigure failures are retried; `Create` succeeds |
+| `TestReconfigureExhausted` | Persistent reconfigure failure → error after the bounded retry count |
 
 ## E2E Tests (Planned)
 

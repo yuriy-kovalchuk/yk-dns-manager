@@ -9,28 +9,42 @@ This guide explains how to install `yk-dns-manager` in your cluster using the re
    kubectl create namespace yk-dns-manager
    ```
 
-2. **Provider Credentials**: Create a secret containing your DNS provider API keys.
+2. **Provider Credentials**: Create a Secret containing your DNS provider credentials in the release namespace. The app reads it from the API at startup, so the keys must be exactly what the provider expects — OPNsense needs `API_KEY` and `API_SECRET`.
    ```bash
-   kubectl create secret generic yk-dns-manager-opnsense-credentials 
-     --namespace yk-dns-manager 
-     --from-literal=OPNSENSE_API_KEY="your-key" 
-     --from-literal=OPNSENSE_API_SECRET="your-secret"
+   kubectl create secret generic opnsense-creds \
+     --namespace yk-dns-manager \
+     --from-literal=API_KEY="your-key" \
+     --from-literal=API_SECRET="your-secret"
    ```
 
 ## Configuration (`values.local.yaml`)
 
-Create a local override file. Below is a minimal example for an OPNsense setup:
+Create a local override file — `domainMap` and `dnsProviders` are rendered into a single `config.yaml` ConfigMap. Below is a minimal example for an OPNsense setup:
 
 ```yaml
 domainMap:
   "*.example.com": "10.0.0.100" # Replace with your LoadBalancer IP
 
-dnsProvider:
-  provider: opnsense
-  settings:
-    base_url: "https://opnsense.example.com/api" # Replace with your OPNsense URL
-    skip_tls_verify: "false"
-  existingSecret: "yk-dns-manager-opnsense-credentials"
+dnsProviders:
+  opnsense:
+    provider: opnsense
+    # Name of the Secret created above; the app reads it from the cluster.
+    secret: "opnsense-creds"
+    settings:
+      base_url: "https://opnsense.example.com/api" # Replace with your OPNsense URL
+      skip_tls_verify: "false"
+
+# Multiple instances are supported — each one receives every managed record
+# and can reference its own Secret:
+# dnsProviders:
+#   opnsense-1:
+#     secret: "opnsense-1-creds"
+#     settings:
+#       base_url: "https://opnsense-1.example.com/api"
+#   opnsense-2:
+#     secret: "opnsense-2-creds"
+#     settings:
+#       base_url: "https://opnsense-2.example.com/api"
 
 resources:
   requests:
