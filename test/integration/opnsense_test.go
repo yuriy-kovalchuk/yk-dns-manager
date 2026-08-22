@@ -19,10 +19,11 @@ import (
 
 // fakeOPNsense is a minimal in-memory OPNsense Unbound API for testing.
 type fakeOPNsense struct {
-	mu     sync.Mutex
-	store  map[string]hostOverride
-	nextID int
-	calls  []string // tracks endpoint calls in order
+	mu              sync.Mutex
+	store           map[string]hostOverride
+	nextID          int
+	calls           []string // tracks endpoint calls in order
+	failReconfigure int      // reconfigure responds 500 this many times
 }
 
 type hostOverride struct {
@@ -128,6 +129,14 @@ func (f *fakeOPNsense) handleDel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeOPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request) {
+	f.mu.Lock()
+	if f.failReconfigure > 0 {
+		f.failReconfigure--
+		f.mu.Unlock()
+		http.Error(w, "transient failure", http.StatusInternalServerError)
+		return
+	}
+	f.mu.Unlock()
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -147,9 +156,13 @@ func readJSON(r *http.Request, v interface{}) error {
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	t.Helper()
 	p, err := opnsense.New(logrtesting.NewTestLogger(t), map[string]string{
-		"base_url":   serverURL + "/api",
-		"api_key":    "test-key",
-		"api_secret": "test-secret",
+		"base_url": serverURL + "/api",
+	}, &dns.Credentials{
+		SecretName: "test-creds",
+		Data: map[string][]byte{
+			"API_KEY":    []byte("test-key"),
+			"API_SECRET": []byte("test-secret"),
+		},
 	})
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
@@ -506,5 +519,103 @@ func TestMultipleRecords(t *testing.T) {
 	exists, _ = p.Exists(ctx, "db.other.net", "A")
 	if !exists {
 		t.Error("db.other.net should still exist")
+	}
+}
+
+func TestDisabledOverrideReenabled(t *testing.T) {
+	fake := newFakeOPNsense()
+	fake.mu.Lock()
+	fake.nextID = 1
+	fake.store["uuid-1"] = hostOverride{
+		Enabled: "0", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
+	}
+	fake.mu.Unlock()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	// A disabled override does not resolve — Exists must report false.
+	exists, err := p.Exists(ctx, "app.example.com", "A")
+	if err != nil {
+		t.Fatalf("Exists: %v", err)
+	}
+	if exists {
+		t.Fatal("expected disabled override to count as absent")
+	}
+
+	// Create must re-enable the existing row in place, not add a duplicate.
+	err = p.Create(ctx, dns.Record{
+		Hostname: "app.example.com",
+		Type:     "A",
+		Value:    "10.0.0.2",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fake.mu.Lock()
+	if len(fake.store) != 1 {
+		t.Fatalf("expected 1 entry (re-enabled in place), got %d", len(fake.store))
+	}
+	for _, h := range fake.store {
+		if h.Enabled != "1" {
+			t.Errorf("expected override re-enabled, got enabled=%q", h.Enabled)
+		}
+		if h.Server != "10.0.0.2" {
+			t.Errorf("expected server '10.0.0.2' after re-enable, got %q", h.Server)
+		}
+	}
+	fake.mu.Unlock()
+
+	exists, err = p.Exists(ctx, "app.example.com", "A")
+	if err != nil {
+		t.Fatalf("Exists after Create: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected record to exist after re-enable")
+	}
+}
+
+func TestReconfigureRetriedOnTransientFailure(t *testing.T) {
+	fake := newFakeOPNsense()
+	fake.failReconfigure = 2 // first two reconfigure calls fail
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	// Create must succeed: the transient reconfigure failures are retried.
+	err := p.Create(ctx, dns.Record{
+		Hostname: "app.example.com",
+		Type:     "A",
+		Value:    "10.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Create with transient reconfigure failures should succeed: %v", err)
+	}
+}
+
+func TestReconfigureExhausted(t *testing.T) {
+	fake := newFakeOPNsense()
+	fake.failReconfigure = 100 // reconfigure never succeeds
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	err := p.Create(ctx, dns.Record{
+		Hostname: "app.example.com",
+		Type:     "A",
+		Value:    "10.0.0.1",
+	})
+	if err == nil {
+		t.Fatal("expected error when reconfigure keeps failing")
+	}
+	if !strings.Contains(err.Error(), "reconfigure failed after 3 attempts") {
+		t.Errorf("error should name the exhausted retries, got: %v", err)
 	}
 }

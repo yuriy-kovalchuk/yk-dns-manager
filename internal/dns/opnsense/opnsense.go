@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,19 +18,30 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
+// reconfigureAttempts and reconfigureDelay bound the retry around
+// unbound/service/reconfigure after each mutation.
+const (
+	reconfigureAttempts = 3
+	reconfigureDelay    = 500 * time.Millisecond
+)
+
 // Provider implements dns.Provider for OPNsense Unbound DNS.
 type Provider struct {
-	baseURL    string
-	apiKey     string
-	apiSecret  string
-	defaultTTL int
-	client     *http.Client
-	log        logr.Logger
+	baseURL   string
+	apiKey    string
+	apiSecret string
+	client    *http.Client
+	log       logr.Logger
 }
 
-// New creates an OPNsense DNS provider from the given settings map.
-// Returns (nil, err) if mandatory settings are missing.
-func New(log logr.Logger, settings map[string]string) (*Provider, error) {
+// New creates an OPNsense DNS provider from the given settings map and
+// credentials.
+//
+// Credentials: this provider expects the Kubernetes Secret (named by the
+// instance's `secret` config field) to contain the keys API_KEY and
+// API_SECRET. Returns (nil, err) if mandatory settings or credential keys
+// are missing.
+func New(log logr.Logger, settings map[string]string, creds *dns.Credentials) (*Provider, error) {
 	baseURL := settings["base_url"]
 	if baseURL == "" {
 		return nil, fmt.Errorf("opnsense: missing required setting 'base_url'")
@@ -47,22 +57,18 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 			parsedURL.Path,
 		)
 	}
-	apiKey := settings["api_key"]
-	if apiKey == "" {
-		return nil, fmt.Errorf("opnsense: missing required setting 'api_key'")
+	if creds == nil {
+		return nil, fmt.Errorf("opnsense: no credentials provided — set the instance's 'secret' field to a Kubernetes Secret containing keys API_KEY and API_SECRET")
 	}
-	apiSecret := settings["api_secret"]
-	if apiSecret == "" {
-		return nil, fmt.Errorf("opnsense: missing required setting 'api_secret'")
+	var missing []string
+	if creds.SecretKey("API_KEY") == "" {
+		missing = append(missing, "API_KEY")
 	}
-
-	defaultTTL := 300
-	if v := settings["default_ttl"]; v != "" {
-		parsed, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("opnsense: invalid default_ttl %q: %w", v, err)
-		}
-		defaultTTL = parsed
+	if creds.SecretKey("API_SECRET") == "" {
+		missing = append(missing, "API_SECRET")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("opnsense: secret %q is missing credential key(s) %s", creds.SecretName, strings.Join(missing, ", "))
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -71,12 +77,11 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 
 	return &Provider{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		apiSecret:  apiSecret,
-		defaultTTL: defaultTTL,
-		client:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:        log,
+		baseURL:   baseURL,
+		apiKey:    creds.SecretKey("API_KEY"),
+		apiSecret: creds.SecretKey("API_SECRET"),
+		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		log:       log,
 	}, nil
 }
 
@@ -132,8 +137,29 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 	}
 }
 
-// reconfigure tells OPNsense to apply DNS changes.
+// reconfigure tells OPNsense to apply the persisted DNS changes, retrying
+// on transient failures.
 func (p *Provider) reconfigure(ctx context.Context) error {
+	var lastErr error
+	for attempt := 1; attempt <= reconfigureAttempts; attempt++ {
+		lastErr = p.doReconfigure(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		p.log.Info("reconfigure attempt failed", "attempt", attempt, "error", lastErr.Error())
+		if attempt == reconfigureAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(reconfigureDelay):
+		}
+	}
+	return fmt.Errorf("opnsense: reconfigure failed after %d attempts: %w", reconfigureAttempts, lastErr)
+}
+
+func (p *Provider) doReconfigure(ctx context.Context) error {
 	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/service/reconfigure", struct{}{})
 	if err != nil {
 		return fmt.Errorf("opnsense: reconfigure: %w", err)
@@ -169,22 +195,24 @@ type hostRow struct {
 	Server   string `json:"server"`
 }
 
-// findOverride searches for an existing host override matching hostname and record type.
-// Returns the UUID if found, or empty string if not.
-func (p *Provider) findOverride(ctx context.Context, fqdn, recordType string) (string, error) {
+// findOverride searches for an existing host override matching hostname and
+// record type, returning the row's UUID and enabled state. The UUID is empty
+// when no row matches. The API has no per-hostname filter, so the full
+// table is fetched and filtered here.
+func (p *Provider) findOverride(ctx context.Context, fqdn, recordType string) (string, bool, error) {
 	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("opnsense: searchHostOverride returned status %d", resp.StatusCode)
+		return "", false, fmt.Errorf("opnsense: searchHostOverride returned status %d", resp.StatusCode)
 	}
 
 	var sr searchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return "", fmt.Errorf("opnsense: decode search response: %w", err)
+		return "", false, fmt.Errorf("opnsense: decode search response: %w", err)
 	}
 
 	host, domain := dns.SplitHostname(fqdn)
@@ -192,10 +220,10 @@ func (p *Provider) findOverride(ctx context.Context, fqdn, recordType string) (s
 		if strings.EqualFold(row.Hostname, host) &&
 			strings.EqualFold(row.Domain, domain) &&
 			strings.EqualFold(row.RR, recordType) {
-			return row.UUID, nil
+			return row.UUID, row.Enabled == "1", nil
 		}
 	}
-	return "", nil
+	return "", false, nil
 }
 
 // buildHostBody creates the JSON body for add/set host override calls.
@@ -219,52 +247,81 @@ func buildHostBody(record dns.Record) map[string]interface{} {
 	}
 }
 
-// Exists checks whether a DNS host override exists for the given hostname and record type.
+// Exists checks whether an enabled DNS host override exists for the given
+// hostname and record type. A disabled override does not resolve, so it
+// counts as absent.
 func (p *Provider) Exists(ctx context.Context, hostname, recordType string) (bool, error) {
 	p.log.V(1).Info("checking if record exists", "hostname", hostname, "type", recordType)
-	uuid, err := p.findOverride(ctx, hostname, recordType)
+	uuid, enabled, err := p.findOverride(ctx, hostname, recordType)
 	if err != nil {
 		return false, err
 	}
-	return uuid != "", nil
+	return uuid != "" && enabled, nil
 }
 
-// Create adds a new DNS host override.
+// Create adds a new DNS host override. If a disabled override for the same
+// hostname/type exists (e.g. manually disabled in the UI), it is re-enabled
+// in place instead of adding a duplicate.
 func (p *Provider) Create(ctx context.Context, record dns.Record) error {
 	p.log.V(1).Info("creating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
 
-	body := buildHostBody(record)
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/addHostOverride", body)
+	uuid, enabled, err := p.findOverride(ctx, record.Hostname, record.Type)
 	if err != nil {
 		return err
+	}
+	if uuid != "" {
+		if enabled {
+			return fmt.Errorf("opnsense: override for %s/%s already exists", record.Hostname, record.Type)
+		}
+		return p.Update(ctx, record)
+	}
+	return p.addOverride(ctx, record)
+}
+
+// callResult executes a mutation call and returns the parsed
+// {"result", "uuid"} response.
+func (p *Provider) callResult(ctx context.Context, method, path string, body interface{}) (string, string, error) {
+	resp, err := p.doRequest(ctx, method, path, body)
+	if err != nil {
+		return "", "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", fmt.Errorf("opnsense: %s returned status %d: %s", path, resp.StatusCode, string(respBody))
 	}
 
-	var result struct {
+	var out struct {
 		Result string `json:"result"`
 		UUID   string `json:"uuid"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode addHostOverride response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", fmt.Errorf("opnsense: decode %s response: %w", path, err)
 	}
-	if result.Result != "saved" {
-		return fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
+	return out.Result, out.UUID, nil
+}
+
+// addOverride performs the raw addHostOverride call and applies the change.
+func (p *Provider) addOverride(ctx context.Context, record dns.Record) error {
+	result, uuid, err := p.callResult(ctx, http.MethodPost, "unbound/settings/addHostOverride", buildHostBody(record))
+	if err != nil {
+		return err
+	}
+	if result != "saved" {
+		return fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result)
 	}
 
-	p.log.V(1).Info("record created", "uuid", result.UUID)
+	p.log.V(1).Info("record created", "uuid", uuid)
 	return p.reconfigure(ctx)
 }
 
-// Update modifies an existing DNS host override.
+// Update modifies an existing DNS host override. The full body is always
+// sent with enabled="1", so a disabled override is re-enabled by this call.
 func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 	p.log.V(1).Info("updating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
 
-	uuid, err := p.findOverride(ctx, record.Hostname, record.Type)
+	uuid, _, err := p.findOverride(ctx, record.Hostname, record.Type)
 	if err != nil {
 		return err
 	}
@@ -272,83 +329,57 @@ func (p *Provider) Update(ctx context.Context, record dns.Record) error {
 		return fmt.Errorf("opnsense: no existing override found for %s/%s", record.Hostname, record.Type)
 	}
 
-	body := buildHostBody(record)
-	resp, err := p.doRequest(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/setHostOverride/%s", uuid), body)
+	result, _, err := p.callResult(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/setHostOverride/%s", uuid), buildHostBody(record))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: setHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Result string `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode setHostOverride response: %w", err)
-	}
-	if result.Result != "saved" {
-		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result.Result)
+	if result != "saved" {
+		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result)
 	}
 
 	p.log.V(1).Info("record updated", "uuid", uuid)
 	return p.reconfigure(ctx)
 }
 
-// Delete removes a DNS host override.
+// Delete removes a DNS host override. Deleting a missing or already deleted
+// override is not an error (idempotent).
 func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error {
 	p.log.V(1).Info("deleting record", "hostname", hostname, "type", recordType)
 
-	uuid, err := p.findOverride(ctx, hostname, recordType)
+	uuid, _, err := p.findOverride(ctx, hostname, recordType)
 	if err != nil {
 		return err
 	}
 	if uuid == "" {
-		p.log.V(1).Info("opnsense: no existing override found for deletion", hostname, recordType)
+		p.log.V(1).Info("no existing override found for deletion", "hostname", hostname, "type", recordType)
 		return nil
 	}
 
-	resp, err := p.doRequest(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/delHostOverride/%s", uuid), struct{}{})
+	result, _, err := p.callResult(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/delHostOverride/%s", uuid), struct{}{})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: delHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Result string `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode delHostOverride response: %w", err)
-	}
-	switch result.Result {
+	switch result {
 	case "deleted":
 		p.log.V(1).Info("record deleted", "uuid", uuid)
 	case "not found":
 		p.log.V(1).Info("record already deleted", "uuid", uuid)
 	default:
-		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
+		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result)
 	}
 
-	p.log.V(1).Info("record deleted", "uuid", uuid)
 	return p.reconfigure(ctx)
 }
 
-// Upsert creates or updates a DNS record depending on whether it already exists.
+// Upsert creates or updates a DNS record depending on whether it already
+// exists. A disabled override is treated as absent and re-enabled.
 func (p *Provider) Upsert(ctx context.Context, record dns.Record) error {
-	exists, err := p.Exists(ctx, record.Hostname, record.Type)
+	uuid, _, err := p.findOverride(ctx, record.Hostname, record.Type)
 	if err != nil {
 		return fmt.Errorf("opnsense: upsert check: %w", err)
 	}
-	if exists {
-		return p.Update(ctx, record)
+	if uuid == "" {
+		return p.addOverride(ctx, record)
 	}
-	return p.Create(ctx, record)
+	return p.Update(ctx, record)
 }

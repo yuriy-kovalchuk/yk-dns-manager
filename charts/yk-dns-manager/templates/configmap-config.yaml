@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "yk-dns-manager.fullname" . }}-config
+  labels:
+    {{- include "yk-dns-manager.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- if .Values.secretsNamespace }}
+    secretsNamespace: {{ .Values.secretsNamespace | quote }}
+    {{- end }}
+    domainMap:
+      {{- range $domain, $ip := .Values.domainMap }}
+      {{ $domain | quote }}: {{ $ip | quote }}
+      {{- end }}
+    providers:
+      {{- range $name, $inst := .Values.dnsProviders }}
+      {{ $name | quote }}:
+        {{- if $inst.provider }}
+        provider: {{ $inst.provider | quote }}
+        {{- end }}
+        upsert: {{ if $inst.upsert }}true{{ else }}false{{ end }}
+        {{- if $inst.secret }}
+        secret: {{ $inst.secret | quote }}
+        {{- end }}
+        settings:
+          {{- range $key, $value := $inst.settings }}
+          {{ $key }}: {{ $value | quote }}
+          {{- end }}
+      {{- end }}

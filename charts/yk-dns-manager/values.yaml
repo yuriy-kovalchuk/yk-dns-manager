@@ -46,25 +46,38 @@ priorityClassName: ""
 domainMap:
   "example.com": "10.0.0.1"
 
-# -- DNS provider configuration. The controller will not manage any DNS
-# records until a provider is configured.
-dnsProvider:
-  # -- Provider name (e.g. "opnsense"). Must match a registered provider.
-  provider: "opnsense"
-  # -- If true, update existing records on every reconcile.
-  # If false, only create records that don't already exist.
-  upsert: false
-  # -- Provider-specific connection settings. Each provider defines its own keys.
-  settings:
-    base_url: "https://opnsense.example.com/api"
-    skip_tls_verify: "false"
-    api_key: "${OPNSENSE_API_KEY}"
-    api_secret: "${OPNSENSE_API_SECRET}"
-    default_ttl: "300"
-  # -- Name of an existing Secret containing provider credentials.
-  # The secret's data will be injected as environment variables, which
-  # can be referenced in settings via ${ENV_VAR} syntax.
-  existingSecret: ""
+# -- DNS provider instances. Every configured instance is an independent
+# backend that receives every managed record (broadcast).
+# Empty by default: the controller runs in no-op mode (HTTPRoutes are
+# watched but no DNS records are managed) until at least one instance
+# is configured. The map key is the instance name; `provider` selects
+# the type and defaults to the instance name.
+dnsProviders: {}
+
+# -- Namespace the app reads provider credential Secrets from. Empty = the
+# app's own (release) namespace, which is the normal case. Set this only
+# when running locally against a dev cluster, or to read Secrets from a
+# different namespace (you must grant access there with your own RBAC).
+secretsNamespace: ""
+
+# Example instance (uncomment and adapt). The app reads the named Secret
+# from the cluster at startup; the opnsense provider expects it to contain
+# the keys API_KEY and API_SECRET.
+# dnsProviders:
+#   opnsense:
+#     # -- Provider type (e.g. "opnsense"). Defaults to the instance name.
+#     provider: "opnsense"
+#     # -- If true, update existing records on every reconcile for this
+#     # instance. If false, only create records that don't already exist.
+#     upsert: false
+#     # -- Non-secret connection settings only. Credentials are NOT written
+#     # here — they live in the Secret named below.
+#     settings:
+#       base_url: "https://opnsense.example.com/api"
+#       skip_tls_verify: "false"
+#     # -- Name of the existing Secret in the cluster holding this instance's
+#     # credentials. The chart grants get access to exactly this name.
+#     secret: "opnsense-creds"
 
 metrics:
   service:
