@@ -1,0 +1,30 @@
+# Single configuration file for yk-dns-manager: domain map + DNS providers.
+
+# Maps base domains to load balancer IPs.
+# When an HTTPRoute hostname matches a subdomain (e.g. app.example.com),
+# the controller resolves the IP from the matching base domain (example.com).
+domainMap:
+  example.com: 10.0.0.1
+  example.org: 10.0.0.2
+
+# Namespace provider credential Secrets are read from. In-cluster, leave it
+# unset and the app uses its own namespace. Set it when running locally
+# against a dev cluster (the namespace where you created the Secret).
+# secretsNamespace: default
+
+# DNS provider instances. Empty (or omitted) = no-op mode: the controller
+# watches HTTPRoutes but manages no DNS records. Every configured instance
+# receives every managed record (broadcast).
+providers:
+  opnsense:
+    upsert: false
+    # Name of the Kubernetes Secret holding this instance's credentials.
+    # The app reads it via the Kubernetes API at startup. The opnsense
+    # provider expects it to contain the keys API_KEY and API_SECRET.
+    # Each provider declares the keys it needs, so different providers may
+    # need different keys (API key only, token, username/password, ...).
+    secret: opnsense-creds
+    # Non-secret connection settings only. Credentials never live here.
+    settings:
+      base_url: "https://opnsense.example.com/api"
+      skip_tls_verify: "true"

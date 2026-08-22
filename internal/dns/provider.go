@@ -2,17 +2,6 @@ package dns
 
 import (
 	"context"
-	"errors"
-)
-
-// Standard DNS provider errors.
-var (
-	ErrNotFound     = errors.New("not found")
-	ErrAuthFailed   = errors.New("authentication failed")
-	ErrConnection   = errors.New("connection failed")
-	ErrTimeout      = errors.New("request timeout")
-	ErrRetryable    = errors.New("retryable error")
-	ErrNonRetryable = errors.New("non-retryable error")
 )
 
 // Record represents a DNS record to be managed.
@@ -20,11 +9,17 @@ type Record struct {
 	Hostname string            // FQDN, e.g. "app.example.com"
 	Type     string            // "A", "AAAA", "CNAME"
 	Value    string            // IP address or target
-	TTL      int               // 0 = provider default
 	Meta     map[string]string // provider-specific fields (e.g. "description")
 }
 
 // Provider is the interface that DNS providers must implement.
+//
+// Credential contract: a provider that needs credentials receives them via
+// the *Credentials argument to its constructor — the raw data of the
+// Kubernetes Secret named by the instance's `secret` config field. Each
+// provider declares the keys it expects (e.g. "API_KEY"/"API_SECRET" or
+// "USERNAME"/"PASSWORD") and fails construction with an error naming any
+// missing key. Providers that need no credentials receive nil.
 type Provider interface {
 	Exists(ctx context.Context, hostname, recordType string) (bool, error)
 	Create(ctx context.Context, record Record) error

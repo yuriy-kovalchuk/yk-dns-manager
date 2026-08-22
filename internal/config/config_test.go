@@ -6,20 +6,47 @@ import (
 	"testing"
 )
 
-func TestLoadDomainMap(t *testing.T) {
-	content := "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n"
-	path := filepath.Join(t.TempDir(), "domain-map.yaml")
+func TestLoadConfig(t *testing.T) {
+	content := `domainMap:
+  my-domain1.com: 10.0.8.100
+  my-domain2.it: 10.0.9.50
+providers:
+  opnsense:
+    settings:
+      base_url: "https://opnsense.local/api"
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	dm, err := LoadDomainMap(path)
+	cfg, err := LoadConfigFromPath(path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(dm.Domains()) != 2 {
-		t.Fatalf("expected 2 domains, got %d", len(dm.Domains()))
+	if len(cfg.DomainMap.Domains()) != 2 {
+		t.Fatalf("expected 2 domains, got %d", len(cfg.DomainMap.Domains()))
+	}
+	if ip, ok := cfg.DomainMap.LookupIP("app.my-domain1.com"); !ok || ip != "10.0.8.100" {
+		t.Fatalf("expected LookupIP(app.my-domain1.com)=10.0.8.100, got %q ok=%v", ip, ok)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("expected 1 provider instance, got %d", len(cfg.Providers))
+	}
+}
+
+func TestLoadConfig_EmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFromPath(path)
+	if err != nil {
+		t.Fatalf("empty config must be valid, got error: %v", err)
+	}
+	if len(cfg.DomainMap.Domains()) != 0 || len(cfg.Providers) != 0 {
+		t.Fatalf("expected empty config, got %d domains and %d providers", len(cfg.DomainMap.Domains()), len(cfg.Providers))
 	}
 }
 
