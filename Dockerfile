@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     -o /yk-dns-manager ./cmd/yk-dns-manager
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
+FROM gcr.io/distroless/static@sha256:f2ea2709ac8db56323cbd7d014277f32cb572d9ea124b0076f7aafe5980678fe
 
 LABEL org.opencontainers.image.title="yk-dns-manager" \
       org.opencontainers.image.description="Kubernetes controller that manages DNS records for Gateway API HTTPRoutes" \
