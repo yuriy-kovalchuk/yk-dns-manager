@@ -13,15 +13,19 @@ dnsProvider:
   provider: opnsense
   upsert: true
   settings:
-    base_url: "https://your-opnsense.local/api"
-    # Create a ConfigMap holding the appliance CA under the key ca.pem, name it
-    # in caConfigMap below, and point ca_file at the mount. Never set
-    # skip_tls_verify: true, not even locally — the credentials go out on every
-    # request.
-    ca_file: "/etc/yk-dns-manager/ca/ca.pem"
+    # The in-memory fake that `make kind-fake-install` runs in the release
+    # namespace. It speaks plain HTTP and accepts any credentials.
+    base_url: "http://fake-opnsense.yk-dns-manager-system.svc.cluster.local:8053/api"
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
     default_ttl: "60"
+    # To deploy against a real appliance instead, drop the kind-fake-install
+    # prerequisite of kind-deploy and use:
+    #   base_url: "https://<appliance>/api"
+    #   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
+    # with the appliance CA in a ConfigMap under the key ca.pem, named in
+    # caConfigMap below. Never set skip_tls_verify: true, not even locally —
+    # the credentials go out on every request.
   existingSecret: yk-dns-manager-credentials
   # caConfigMap: opnsense-ca
 
