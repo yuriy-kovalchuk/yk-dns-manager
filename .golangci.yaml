@@ -1,18 +1,34 @@
 version: "2"
 
+run:
+  timeout: 5m
+
 linters:
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
+    # golangci defaults (errcheck, govet, staticcheck, ineffassign, unused)
+    # stay on and are not listed here.
+    - gosec
     - misspell
     - revive
     - exhaustive
     - noctx
     - bodyclose
     - unparam
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: var-naming
+          severity: warning
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - unparam
+          - exhaustive
 
 formatters:
   enable:
@@ -22,20 +38,3 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/yuriy-kovalchuk
-
-linters-settings:
-  exhaustive:
-    default-signifies-exhaustive: true
-  revive:
-    rules:
-      - name: exported
-        severity: warning
-      - name: var-naming
-        severity: warning
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - unparam
-        - exhaustive

@@ -28,7 +28,7 @@ func LoadProviderConfig() (*ProviderConfig, error) {
 // LoadProviderConfigFromPath reads the DNS provider configuration from the
 // given file path.
 func LoadProviderConfigFromPath(path string) (*ProviderConfig, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304,G703 -- path comes from an operator-set CLI flag, not request input
 	if err != nil {
 		return nil, fmt.Errorf("reading provider config file: %w", err)
 	}
