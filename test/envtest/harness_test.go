@@ -154,9 +154,10 @@ func start(t *testing.T, opts harnessOptions) *harness {
 	log := testr.NewWithOptions(t, testr.Options{Verbosity: 1})
 
 	provider, err := opnsense.New(log.WithName("dns-opnsense"), map[string]string{
-		"base_url":   srv.URL + "/api",
-		"api_key":    "envtest-key",
-		"api_secret": "envtest-secret",
+		"base_url":            srv.URL + "/api",
+		"api_key":             "envtest-key",
+		"api_secret":          "envtest-secret",
+		"allow_insecure_http": "true",
 	})
 	if err != nil {
 		t.Fatalf("creating provider: %v", err)

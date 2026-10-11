@@ -263,3 +263,44 @@ func TestNew_SkipTLSVerifyWarns(t *testing.T) {
 		t.Errorf("expected the warning to point at ca_file as the fix, got %q", joined)
 	}
 }
+
+// TestNew_Scheme covers plain HTTP. The credentials go out as basic auth on
+// every request, so http is refused unless the operator opts in, and the opt-in
+// warns on every startup.
+func TestNew_Scheme(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		allow   string
+		wantErr string
+		warns   bool
+	}{
+		{name: "https", url: "https://opnsense.local"},
+		{name: "http refused", url: "http://opnsense.local", wantErr: "cleartext"},
+		{name: "http with a value other than true", url: "http://opnsense.local", allow: "yes", wantErr: "cleartext"},
+		{name: "http allowed", url: "http://opnsense.local", allow: "true", warns: true},
+		{name: "other scheme", url: "ftp://opnsense.local", allow: "true", wantErr: "must use https"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgs := &[]string{}
+			settings := baseSettings(tc.url)
+			if tc.allow != "" {
+				settings["allow_insecure_http"] = tc.allow
+			}
+
+			_, err := New(logr.New(captureSink{msgs: msgs}), settings)
+
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("New error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			warned := strings.Contains(strings.Join(*msgs, "\n"), "allow_insecure_http")
+			if warned != tc.warns {
+				t.Errorf("warned = %v, want %v (messages %v)", warned, tc.warns, *msgs)
+			}
+		})
+	}
+}

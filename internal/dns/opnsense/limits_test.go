@@ -27,7 +27,7 @@ func TestResponseBodyLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(logr.Discard(), baseSettings(srv.URL))
+	p, err := New(logr.Discard(), httpSettings(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestErrorBodyTruncated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p, err := New(logr.Discard(), baseSettings(srv.URL))
+	p, err := New(logr.Discard(), httpSettings(srv.URL))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -66,4 +66,12 @@ func TestErrorBodyTruncated(t *testing.T) {
 	if len(err.Error()) > 2*maxErrorBodyBytes {
 		t.Errorf("error carries %d bytes, want it bounded by %d", len(err.Error()), maxErrorBodyBytes)
 	}
+}
+
+// httpSettings is baseSettings for a plain-HTTP test server, which the
+// provider only accepts with allow_insecure_http.
+func httpSettings(baseURL string) map[string]string {
+	s := baseSettings(baseURL)
+	s["allow_insecure_http"] = "true"
+	return s
 }
