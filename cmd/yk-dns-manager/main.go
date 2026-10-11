@@ -97,7 +97,7 @@ func run() error {
 	ctx := context.Background()
 	log := ctrl.Log.WithName("setup")
 
-	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level (debug, info, warn, error)")
+	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
 	flag.Parse()
 

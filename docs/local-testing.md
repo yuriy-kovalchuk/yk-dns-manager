@@ -61,8 +61,9 @@ make fake-opnsense     # foreground; listens on :8053
 In another shell:
 
 ```bash
-make kind-up           # or any cluster with the Gateway API CRDs installed
-make run               # sources .env, builds with version ldflags, logs at debug
+make kind-up           # or use any cluster you already have a context for
+make kind-crds         # the controller watches HTTPRoutes; without the CRDs it starts and then fails to sync
+make run               # prints the kubecontext it is about to reconcile against
 ```
 
 `hack/local/dns-provider.yaml` points at `http://127.0.0.1:8053/api`, which works
@@ -142,5 +143,5 @@ The controller needs:
 | Dependency | How to provide locally |
 |---|---|
 | Kubernetes cluster | kind (`make kind-up`), minikube, or any remote cluster with kubeconfig access |
-| Gateway API CRDs | Installed by `make kind-deploy`; otherwise `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml` |
+| Gateway API CRDs | `make kind-crds` for a kind cluster; `make kind-deploy` installs them as a prerequisite. Anywhere else: `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml` |
 | DNS provider (OPNsense) | `make fake-opnsense` for local work, `make kind-fake-install` inside the cluster, or a real appliance as in step 3 |

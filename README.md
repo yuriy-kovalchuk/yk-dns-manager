@@ -70,17 +70,17 @@ Matching priority: **exact** > **wildcard** > **parent domain walk**.
 
 ### Environment Variables
 
-| Variable | Default | Description |
+| Variable | Required | Description |
 |---|---|---|
-| `DOMAIN_MAP_PATH` | `configs/domain-map.yaml` | Path to the domain map YAML file |
-| `DNS_PROVIDER_PATH` | `configs/dns-provider.yaml` | Path to the DNS provider config YAML file |
+| `DOMAIN_MAP_PATH` | yes, unless `--domain-map-path` is given | Path to the domain map YAML file |
+| `DNS_PROVIDER_PATH` | yes — env only, there is no flag for it | Path to the DNS provider config YAML file |
 
 ### Command-Line Flags
 
 | Flag | Env Var Override | Default | Description |
 |---|---|---|---|
 | `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
-| `--zap-log-level` | `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `--zap-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or a numeric logr verbosity such as `-3` for `V(3)` |
 
 ### DNS Provider Config
 
@@ -134,6 +134,20 @@ make test-integration  # integration tests
 ```
 
 See [docs/testing.md](docs/testing.md) for details.
+
+## Development
+
+No appliance and no real credentials are needed locally; an in-memory fake stands
+in for OPNsense.
+
+```bash
+cp .env.example .env
+make kind-deploy   # cluster + image + fake appliance + controller
+make kind-demo     # apply a sample HTTPRoute and watch the record appear
+```
+
+See [docs/local-testing.md](docs/local-testing.md) for the standalone binary path
+and for pointing at a real appliance.
 
 ## License
 

@@ -40,7 +40,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -191,8 +191,11 @@ kind-secret:
 # kind-deploy installs the in-memory fake so the local path works with no
 # appliance. To deploy against a real one, edit hack/local-values.yaml and drop
 # the kind-fake-install prerequisite.
-kind-deploy: kind-up kind-load kind-secret kind-fake-install
+## kind-crds: install the Gateway API CRDs the controller watches
+kind-crds:
 	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+
+kind-deploy: kind-up kind-crds kind-load kind-secret kind-fake-install
 	helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
 		--namespace $(KIND_NAMESPACE) \
 		--create-namespace \
