@@ -6,9 +6,9 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 45 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
-| Integration | `test/integration/` | 14 | The real OPNsense provider against an in-process fake appliance API over HTTP |
-| Envtest | `test/envtest/` | 5 + 8 pending | The real manager, predicates and provider against a real API server and the fake appliance |
+| Unit | `cmd/`, `internal/` | 47 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Integration | `test/integration/` | 16 | The real OPNsense provider against an in-process fake appliance API over HTTP |
+| Envtest | `test/envtest/` | 9 + 5 pending | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
 
 There are no mocking frameworks. Tests use plain structs implementing `dns.Provider` and `sigs.k8s.io/controller-runtime/pkg/client/fake`.
@@ -22,8 +22,9 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestParseLogLevel` | Named levels, numeric logr verbosity (`-3` means `V(3)`), and rejects garbage |
 | `TestDebugLevelEnablesVerbosity` | `debug` actually turns `V(1)` output on |
 | `TestDebugLevelKeepsProductionEncoder` | Debug does not switch zap to development mode |
-| `TestSelectProviderSkipsFailedFactories` | A failing factory does not stop a later one from being chosen |
-| `TestSelectProviderFailsWhenNoneInitialize` | No provider selected returns an error and a nil interface |
+| `TestSelectProviderPicksByName` | Only the provider the config names is initialized |
+| `TestSelectProviderRejectsUnknownName` | A misspelled name fails and lists the available providers |
+| `TestSelectProviderReturnsInitError` | The named provider's own error is the startup error |
 | `TestSelectProviderDoesNotKeepTypedNilProvider` | A factory returning `(nil, err)` must not leave a typed-nil provider behind — this is what used to panic on startup |
 
 ### Config — `internal/config/`
@@ -49,15 +50,16 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | Test | Description |
 |---|---|
 | `TestNew_ValidSettings` | Builds a client from valid settings |
-| `TestNew_CustomTTL` | `default_ttl` is parsed |
-| `TestNew_InvalidTTL` | Non-numeric TTL is an error |
+| `TestNew_DefaultTTLIgnored` | `default_ttl` is accepted for compatibility but warns that it has no effect |
 | `TestNew_MissingBaseURL` / `_MissingAPIKey` / `_MissingAPISecret` | Required settings are enforced |
 | `TestNew_SkipTLSVerify` | `skip_tls_verify` produces a client with verification off and the TLS floor set |
 | `TestNew_SkipTLSVerifyWarns` | Enabling it logs a warning naming `ca_file` as the fix; a default config must not warn |
 | `TestNew_TLSVerification` | Stands up HTTPS on a throwaway CA: system roots reject it, `ca_file` accepts it, `skip_tls_verify` accepts it |
 | `TestNew_TLSConfigErrors` | Missing `ca_file`, non-PEM file, and `ca_file` together with `skip_tls_verify` |
+| `TestNew_Scheme` | `http` is refused without `allow_insecure_http: "true"`, warns with it, and other schemes are refused |
 | `TestResponseBodyLimit` | A body over the cap is reported as a limit error, not as truncated JSON |
 | `TestErrorBodyTruncated` | Error bodies are capped rather than dumped whole into the log |
+| `TestCommitChecksReconfigureStatus` | A reconfigure answering a status other than `ok` fails the commit, and the publish stays owed |
 
 ### Fake appliance — `internal/testenv/`
 
@@ -80,12 +82,12 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 |---|---|
 | `TestHTTPRouteReconciler_Reconcile` | Adds the finalizer, then creates a record for a matching hostname |
 | `TestHTTPRouteReconciler_ReconcileUnknownDomain` | Hostnames with no domain map entry are skipped |
-| `TestHTTPRouteReconciler_UpsertEnabled` | Calls `Upsert` instead of `Create` when upsert is on |
-| `TestHTTPRouteReconciler_CreateSkipsExisting` | Skips existing records when upsert is off |
+| `TestHTTPRouteReconciler_UpsertEnabled` | Ensures records with overwrite on when upsert is on |
+| `TestHTTPRouteReconciler_CreateSkipsExisting` | Leaves existing records alone when upsert is off |
 | `TestHTTPRouteReconciler_Deletion` | Finalizer cleanup deletes the records |
 | `TestHTTPRouteReconciler_DeletionWithoutMatchingHostname` | A route whose hostnames no longer match the domain map is still deletable — the orphaned-finalizer bug |
-| `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec or from the domain map are cleaned up from the ownership annotation; corrupt annotations do not wedge the route |
-| `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed `Flush` is returned so controller-runtime requeues instead of silently dropping the change |
+| `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec are deleted; names outside the domain map are never deleted through the annotation; corrupt annotations do not wedge the route |
+| `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
 ## Integration tests
 
@@ -99,20 +101,22 @@ make test-integration
 
 | Test | Description |
 |---|---|
-| `TestCreateAndExists` | Create, then `Exists`, then inspect every stored field |
-| `TestUpdateExistingRecord` | Update changes the IP in place |
-| `TestUpdateNonExistent` | Updating a missing record is an error |
-| `TestDeleteExistingRecord` | Delete removes it and `Exists` goes false |
-| `TestDeleteNonExistent` | Deleting a missing record is **not** an error |
-| `TestUpsertCreatesAndUpdates` | First upsert creates, second updates the same row |
-| `TestFullLifecycle` | Exists → Create → Exists → Update → verify → Delete → Exists |
-| `TestMultipleRecords` | Independent records stay independent through a delete |
-| `TestDeleteRemovesAllDuplicates` | Every duplicate override for a hostname is deleted, not just the first |
-| `TestUpsertConvergesDuplicates` | Writing to a hostname with duplicates leaves exactly one row, holding the new value |
-| `TestUpsertUpdatePathCallCount` | An update-path `Upsert` costs one list fetch plus one write, and `Flush` issues exactly one `reconfigure`; an idle `Flush` issues none |
+| `TestEnsureCreatesRecord` | A new record is added, published on commit, and every stored field is right |
+| `TestEnsureOverwriteUpdatesInPlace` | With overwrite on, a changed value updates the existing row |
+| `TestEnsureWithoutOverwriteKeepsExistingValue` | With overwrite off, a live record holding another value is left alone |
+| `TestEnsureUnchangedWritesNothing` | A matching record costs one list, no write and no reconfigure (B2) |
+| `TestEnsureReenablesDisabledRecord` | A disabled override is re-enabled even with overwrite off (B8) |
+| `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error, not a success |
+| `TestEnsureConvergesDuplicates` | Writing to a hostname with duplicates leaves exactly one row, holding the new value |
+| `TestRemoveDeletesEveryDuplicate` | Every override for the hostname is deleted, and others are untouched |
+| `TestRemoveMissingRecordIsNotAnError` | Removing a record that does not exist issues no delete |
+| `TestRemoveToleratesVanishedRecord` | A row deleted by someone else since the batch listed is not an error |
+| `TestBatchListsOnce` | A batch lists once however many records it touches, sees its own writes, and commits with one reconfigure (D4) |
+| `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
+| `TestFirstCommitPublishes` | A new provider's first used batch publishes, in case an earlier process left changes staged (B10) |
+| `TestFailedPublishStaysOwed` | After a failed reconfigure, a later batch that writes nothing still publishes (B10) |
+| `TestWriteDuringPublishStaysOwed` | A write made during another batch's reconfigure is still published by its own commit (D3) |
 | `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
-| `TestCreateSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error, not a success |
-| `TestFlushPublishes` | Writes go live only on `Flush`; a failed `Flush` stays pending and a retry publishes |
 
 ## Envtest
 
@@ -131,6 +135,10 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestDeleteRemovesRecordAndReleasesRoute` | Deleting the route unpublishes the record and releases the finalizer |
 | `TestUnmatchedRouteIsIgnored` | A route the domain map does not cover gets no finalizer and no appliance writes |
 | `TestRouteIsDeletableWhileApplianceFails` | A route is still deleted while every appliance call fails |
+| `TestRecordPublishedAfterReconfigureRecovers` | A record staged while reconfigure fails is published once it recovers |
+| `TestAnnotationCannotDeleteForeignRecords` | Names written into the ownership annotation outside the domain map are never deleted (S1) |
+| `TestUnchangedRouteCausesNoWrites` | Reconciling an unchanged route makes no writes and no reconfigure (B2) |
+| `TestDisabledManagedRecordIsReenabled` | A disabled managed override is re-enabled (B8) |
 
 ### Pending findings
 
@@ -142,9 +150,6 @@ ENVTEST_RUN_PENDING=1 make test-envtest
 
 | Test | Finding | Roadmap phase |
 |---|---|---|
-| `TestAnnotationCannotDeleteForeignRecords` | S1 | 0 |
-| `TestUnchangedRouteCausesNoWrites` | B2 | 2 |
-| `TestDisabledManagedRecordIsReenabled` | B8 | 2 |
 | `TestUnmanagedRecordIsNotOverwritten` | S2 | 3 |
 | `TestUnmanagedRecordSurvivesRouteDeletion` | S2 | 3 |
 | `TestSharedHostnameSurvivesOneRouteDeletion` | B1 | 3 |
