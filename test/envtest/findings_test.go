@@ -66,8 +66,6 @@ func handMade(hostname, domain, ip string) testenv.HostOverride {
 // writable by anyone who can edit the route, and every name in it is deleted
 // from the appliance, whether or not the domain map covers it.
 func TestAnnotationCannotDeleteForeignRecords(t *testing.T) {
-	pending(t, "audit S1, roadmap phase 0")
-
 	tamper := func(r *gatewayv1.HTTPRoute) {
 		r.Annotations[managedHostnamesAnnotation] = `["app.example.com","vpn.corp.example"]`
 	}

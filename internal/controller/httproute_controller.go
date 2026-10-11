@@ -87,10 +87,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 			// Delete everything the annotation claims we own, plus everything the
 			// live spec still maps. The union covers routes written before the
-			// annotation existed; without the annotation half, records whose
-			// hostname no longer resolves through the map would be orphaned.
+			// annotation existed, and hostnames that left the spec but are still
+			// in the map.
 			var deleteErr error
-			for _, hostname := range union(owned, specHostnames) {
+			for _, hostname := range union(r.deletable(owned), specHostnames) {
 				if err := r.DNS.Delete(ctx, hostname, "A"); err != nil {
 					r.Log.Error(err, "failed to delete DNS record", "hostname", hostname)
 					deleteErr = fmt.Errorf("at least one DNS record deletion failed")
@@ -135,10 +135,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Delete records we own that are no longer wanted. The domain map is the
-	// declared desired state, so a hostname that left the map is as unwanted as
-	// one that left the spec.
-	for _, oldHost := range owned {
+	// Delete records we own that are no longer in the spec.
+	for _, oldHost := range r.deletable(owned) {
 		if !Contains(specHostnames, oldHost) {
 			r.Log.Info("hostname no longer managed, deleting DNS record", "hostname", oldHost)
 			if err := r.DNS.Delete(ctx, oldHost, "A"); err != nil {
@@ -221,6 +219,26 @@ func (r *HTTPRouteReconciler) readOwned(route *gatewayv1.HTTPRoute) []string {
 		return nil
 	}
 	return owned
+}
+
+// deletable returns the owned hostnames the controller may delete: those the
+// domain map covers. The annotation is writable by anyone who can edit the
+// route, so on its own it cannot authorize a delete; without this check any
+// route editor could remove any override on the appliance, in any domain.
+//
+// The cost is that a hostname whose domain was dropped from the map is no
+// longer cleaned up. It is logged so an operator can remove it by hand.
+func (r *HTTPRouteReconciler) deletable(owned []string) []string {
+	out := make([]string, 0, len(owned))
+	for _, h := range owned {
+		if _, ok := r.DomainMap.LookupIP(h); ok {
+			out = append(out, h)
+			continue
+		}
+		r.Log.Info("not deleting DNS record outside the domain map; the ownership annotation cannot authorize it, so remove it by hand if this controller created it",
+			"hostname", h)
+	}
+	return out
 }
 
 // union returns the elements of a then b, deduplicated, preserving order.
