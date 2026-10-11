@@ -1,134 +1,155 @@
 name: CI
 
+# CI runs checks on every push/PR. On a green push to master it additionally
+# publishes the :master image (job below); releases — tagged image + helm chart
+# — live in cd.yml on tag pushes, so :latest always means newest release.
+
 on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
 
-permissions:
-  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Target of the publish job (master pushes only). GHCR auth uses the
+  # workflow's own GITHUB_TOKEN — no repo secrets to configure.
+  REGISTRY: ghcr.io
+  IMAGE:    ghcr.io/yuriy-kovalchuk/yk-dns-manager
 
 jobs:
-  # ── Go: vet, lint, test ──────────────────────────────────────────────────────
-  go:
-    name: Go lint & test
+  checks:
+    name: Code checks + helm lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags are needed for git describe in `make build`
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # Pinned to a patch, not "1.27": setup-go runs with GOTOOLCHAIN=local, so the
+          # toolchain installed here is the standard library govulncheck judges, and a
+          # floating minor is just whatever the runner image happens to carry ("1.26"
+          # resolved to go1.26.8, which predates the net/http, net/textproto, crypto/tls
+          # and html/template fixes go1.26.9 carries). Keep this equal to the go.mod go
+          # directive and the Dockerfile base image, and keep golangci-lint below built
+          # with at least this Go — it refuses modules newer than its own build.
+          go-version: "1.27.2"
           cache: true
 
-      - name: go vet
-        run: go vet ./...
+      - name: Install golangci-lint
+        # golangci-lint refuses to load a module whose Go version is newer than the Go
+        # it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright. v2.14.0
+        # is built with go1.27.0. Install script pinned to the same tag — `master`
+        # install.sh also mis-greps the .sbom.json checksum and fails the install.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.14.0/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
+          golangci-lint version
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        continue-on-error: true
-        with:
-          version: v2.x
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -s needed for: $unformatted"
+            exit 1
+          fi
 
-      - name: Run unit tests
-        run: make test-unit
+      - name: Vet, build, test, lint
+        # `make test` is unit + integration; integration never ran here before, and
+        # lint is blocking now (it used to carry continue-on-error: true).
+        run: make vet build test lint
 
-      - name: Upload coverage report
-        uses: codecov/codecov-action@v7
-        with:
-          files: coverage.txt
-          fail_ci_if_error: false
+      - name: Vulnerability scan
+        # Blocking. Replaces the Trivy fs/image SARIF uploads, which ran after the
+        # image was already published and gated nothing.
+        run: make vuln
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Lint chart (strict)
-        run: helm lint charts/yk-dns-manager --strict
-
-      - name: Template render (smoke test)
-        run: helm template smoke charts/yk-dns-manager
-
-  # ── Go: build binary ─────────────────────────────────────────────────────────
-  build:
-    name: Build binary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        run: make build
-
-  # ── Docker: build image + Trivy image scan ───────────────────────────────────
-  docker:
-    name: Docker build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build image
-        uses: docker/build-push-action@v7
+      - name: Build image (amd64, no push)
+        # Deliberate deviation from the reference, which has no Dockerfile check in
+        # CI: this catches Dockerfile/.dockerignore breakage on the PR instead of
+        # after merge. Single platform and no --load, so it cannot hit the
+        # multi-platform-export failure that `make docker-build` used to.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
-          load: true
-          tags: yk-dns-manager:${{ github.sha }}
+          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run Trivy image scanner
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: yk-dns-manager:${{ github.sha }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
-          limit-severities-for-sarif: true
+      - name: Install helm
+        run: |
+          curl -fsSL "https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz" | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
 
-      - name: Upload results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
+      - name: Helm lint
+        run: make helm-lint
 
+      - name: Helm template render (default values)
+        run: make helm-template
 
-
-  # ── Security: Trivy filesystem scan ──────────────────────────────────────────
-  security:
-    name: Trivy scan
+  publish:
+    name: Publish :master image
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
+      packages: write
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          scan-type: fs
-          scan-ref: .
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
-          limit-severities-for-sarif: true
+          fetch-depth: 0 # tags are needed for git describe (VERSION)
 
-      - name: Upload results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
+      - name: Set up QEMU
+        # Needed for the arm64 leg of the multi-platform build; the amd64 leg runs
+        # natively. QEMU emulation is why this job is slower than the checks job.
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          sarif_file: trivy-results.sarif
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version and tags
+        id: version
+        run: |
+          {
+            echo "VERSION=$(git describe --tags --match 'v[0-9]*' 2>/dev/null || echo master)"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILDDATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo 'TAGS<<EOF'
+            echo "${IMAGE}:master"
+            echo "${IMAGE}:master-${GITHUB_SHA}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT=${{ steps.version.outputs.COMMIT }}
+            BUILD_DATE=${{ steps.version.outputs.BUILDDATE }}
+          tags: ${{ steps.version.outputs.TAGS }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

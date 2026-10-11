@@ -1,161 +1,139 @@
 name: CD
 
+# A `v*` tag is the release trigger and the version. This workflow builds and
+# publishes the release image and the Helm chart, then turns the tag into a
+# GitHub Release. `:latest` is only ever moved here, never by a master push.
+
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
-permissions:
-  contents: write
-  packages: write
-  security-events: write
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  REGISTRY:   ghcr.io
-  IMAGE:      ghcr.io/yuriy-kovalchuk/yk-dns-manager
-  CHART_NAME: yk-dns-manager
-  CHART_DIR:  charts/yk-dns-manager
+  # Artifact registry: GHCR serves both the docker image and the helm chart
+  # (pushed as an OCI artifact), so one login covers both. Auth uses the
+  # workflow's own GITHUB_TOKEN — no repo secrets to configure.
+  REGISTRY:    ghcr.io
+  IMAGE:       ghcr.io/yuriy-kovalchuk/yk-dns-manager
+  CHART_NAME:  yk-dns-manager
+  CHART_DIR:   charts/yk-dns-manager
 
 jobs:
-  # ── Derive version once, share across jobs ────────────────────────────────────
-  version:
-    name: Extract version
+  publish:
+    name: Publish image + helm chart
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag:     ${{ steps.version.outputs.tag }}
-      date:    ${{ steps.date.outputs.date }}
+    permissions:
+      contents: write
+      packages: write
     steps:
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Capture build date
-        id: date
-        run: echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
-
-  # ── Build and push image ──────────────────────────────────────────────────────
-  build-image:
-    name: Build & push image
-    needs: version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags are needed for version stamping
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - name: Compute version and tags
+        id: version
+        # The tag keeps its v prefix for the git ref; image and chart versions drop
+        # it, and appVersion == image tag so the chart helper's
+        # `default .Chart.AppVersion .Values.image.tag` resolves without an override.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "VERSION=${version}"
+            echo "COMMIT=$(git rev-parse --short HEAD)"
+            echo "BUILDDATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo 'TAGS<<EOF'
+            echo "${IMAGE}:latest"
+            echo "${IMAGE}:${version}"
+            echo "${IMAGE}:${GITHUB_SHA}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
-            ${{ env.IMAGE }}:latest
+          push: true
           build-args: |
-            VERSION=${{ needs.version.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ needs.version.outputs.date }}
+            VERSION=${{ steps.version.outputs.VERSION }}
+            COMMIT=${{ steps.version.outputs.COMMIT }}
+            BUILD_DATE=${{ steps.version.outputs.BUILDDATE }}
+          tags: ${{ steps.version.outputs.TAGS }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Security: Trivy image scan ────────────────────────────────────────────────
-  scan-image:
-    name: Trivy image scan
-    needs: [version, build-image]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run Trivy image scanner
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
-          limit-severities-for-sarif: true
-
-      - name: Upload results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
-
-  # ── Package Helm chart and create GitHub Release ──────────────────────────────
-  release:
-    name: Package chart & release
-    needs: [version, build-image]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
-
-      - name: Log in to Helm OCI registry (GHCR)
+      # The chart is a release artifact: chart versions must be unique semver (there is
+      # no "latest"), so the chart publishes only on tag pushes, and the tag is
+      # the version. `helm package --version/--app-version` stamps the packaged
+      # copy; the in-tree Chart.yaml stays a placeholder for local development.
+      - name: Install helm
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            helm registry login ${{ env.REGISTRY }} \
-              --username ${{ github.actor }} \
-              --password-stdin
+          curl -fsSL "https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz" | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
 
-      - name: Package Helm chart
+      - name: Package helm chart
+        run: |
+          mkdir -p dist
+          helm package "$CHART_DIR" \
+            --version "${{ steps.version.outputs.VERSION }}" \
+            --app-version "${{ steps.version.outputs.VERSION }}" \
+            --destination dist
+          echo "tgz=dist/${CHART_NAME}-${{ steps.version.outputs.VERSION }}.tgz" >> "$GITHUB_OUTPUT"
         id: helm-package
+
+      - name: Publish helm chart (OCI artifact)
+        # helm push authenticates through the docker config the login step
+        # wrote, so no separate credentials are needed here.
         run: |
-          helm package ${{ env.CHART_DIR }} \
-            --version "${{ needs.version.outputs.version }}" \
-            --app-version "${{ needs.version.outputs.version }}" \
-            --destination .
-          echo "tgz=${{ env.CHART_NAME }}-${{ needs.version.outputs.version }}.tgz" >> "$GITHUB_OUTPUT"
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          helm push "${{ steps.helm-package.outputs.tgz }}" "oci://${REGISTRY}/${owner}/charts"
+          echo "Pushed ${{ steps.helm-package.outputs.tgz }}"
 
-      - name: Push Helm chart to GHCR
+      # A tag push builds and publishes artifacts but never touches the
+      # Releases API on its own — this is the step that actually turns the
+      # tag into a GitHub Release, with the packaged chart attached so it's
+      # downloadable without an OCI-capable Helm.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          helm push ${{ steps.helm-package.outputs.tgz }} \
-            oci://${{ env.REGISTRY }}/yuriy-kovalchuk/charts
+          version="${{ steps.version.outputs.VERSION }}"
+          cat > notes.md <<EOF
+          ## Docker image
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: ${{ needs.version.outputs.tag }}
-          generate_release_notes: true
-          files: ${{ steps.helm-package.outputs.tgz }}
-          body: |
-            ## Docker image
+          \`\`\`bash
+          docker pull ${IMAGE}:${version}
+          \`\`\`
 
-            ```bash
-            docker pull ${{ env.IMAGE }}:${{ needs.version.outputs.version }}
-            ```
+          ## Helm chart
 
-            ## Helm chart
-
-            ```bash
-            helm install yk-dns-manager \
-              oci://ghcr.io/yuriy-kovalchuk/charts/yk-dns-manager \
-              --version ${{ needs.version.outputs.version }} \
-              --namespace yk-dns-manager-system --create-namespace
-            ```
+          \`\`\`bash
+          helm install yk-dns-manager \\
+            oci://ghcr.io/yuriy-kovalchuk/charts/yk-dns-manager \\
+            --version ${version} \\
+            --namespace yk-dns-manager-system --create-namespace
+          \`\`\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes-file notes.md \
+            "${{ steps.helm-package.outputs.tgz }}"
