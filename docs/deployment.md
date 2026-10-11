@@ -11,9 +11,9 @@ This guide explains how to install `yk-dns-manager` in your cluster using the re
 
 2. **Provider Credentials**: Create a secret containing your DNS provider API keys.
    ```bash
-   kubectl create secret generic yk-dns-manager-opnsense-credentials 
-     --namespace yk-dns-manager 
-     --from-literal=OPNSENSE_API_KEY="your-key" 
+   kubectl create secret generic yk-dns-manager-opnsense-credentials \
+     --namespace yk-dns-manager \
+     --from-literal=OPNSENSE_API_KEY="your-key" \
      --from-literal=OPNSENSE_API_SECRET="your-secret"
    ```
 

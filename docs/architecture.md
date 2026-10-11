@@ -41,10 +41,12 @@ type Provider interface {
     Update(ctx context.Context, record Record) error
     Delete(ctx context.Context, hostname, recordType string) error
     Upsert(ctx context.Context, record Record) error
+    HealthCheck(ctx context.Context) error
+    Flush(ctx context.Context) error
 }
 ```
 
-Each provider implements all five methods. The controller delegates DNS CRUD entirely to the selected provider — it never knows which backend is in use.
+Each provider implements all seven methods. `Create`, `Update`, `Delete` and `Upsert` may stage their changes; `Flush` publishes them, and the controller calls it once at the end of every reconcile. The controller delegates DNS CRUD entirely to the selected provider — it never knows which backend is in use.
 
 ## Data Flow
 
@@ -57,25 +59,30 @@ Each provider implements all five methods. The controller delegates DNS CRUD ent
 5. **If new or updated:** add finalizer (first reconcile), then create/update DNS records for matching hostnames via `DNS.Create`/`DNS.Upsert`.
 6. **Update annotation** (`dns.yk/managed-hostnames`) tracks which hostnames have actual DNS records for comparison on subsequent reconciles.
 
+Anyone who can edit a route can write that annotation, so on its own it never authorizes a delete. Both cleanup paths only delete annotated hostnames the domain map covers. As a result, when a domain is dropped from the map, records already created under it are left in place and logged, to be removed by hand.
+
 ### Domain Map Lookup
 
-The domain map uses a walk-up strategy with priority ordering:
+The domain map walks up the hostname one label at a time. At each level it checks for an exact entry, then for a wildcard covering that level, and returns the first hit:
 
 ```
 Hostname: sub.app.example.com
-  1. Exact match: "sub.app.example.com" → if found, return IP
-  2. Parent:    "app.example.com"       → check for wildcard "*.app.example.com"
-  3. Parent:    "example.com"           → check for wildcard "*.example.com"
-  4. Return nil (no match)
+  1. "sub.app.example.com", then "*.app.example.com"
+  2. "app.example.com",     then "*.example.com"
+  3. "example.com",         then "*.com"
+  4. "com"
+  5. no match
 ```
 
-Exact matches always win over wildcards. Wildcard entries only match at their own level — `"*.example.com"` matches `anything.example.com` but not `a.b.example.com` directly.
+The most specific entry wins, and an exact entry beats a wildcard at the same level. Because the walk continues upward, an exact entry such as `example.com` also covers every name under it, and `*.example.com` covers `a.b.example.com` as well as `anything.example.com`.
 
 ### DNS Provider Selection
 
-At startup in `main()`, the controller builds an ordered list of available providers via `newProviders()`. It iterates through them, attempting to initialize each with the configured settings. The first one whose mandatory fields are present and who passes `HealthCheck()` wins. This sequential fallback pattern means:
-- Only one provider can be active at a time (the `provider` field selects *which* one to try first).
+At startup in `main()`, the controller looks up the factory named by the provider config's `provider` field in `newProviders()` and initializes it with the configured settings. There is no fallback: an unknown name, or settings the provider rejects, fails startup with that provider's own error. This means:
+- Only one provider is active at a time.
 - Adding a new provider is as simple as returning a factory from `newProviders()`.
+
+After initialization the controller runs `HealthCheck()` once. A failure is logged but does not stop startup: every reconcile reports the same failure and retries with backoff, so a provider that comes back recovers without a restart.
 
 ## Boundary Rules
 
@@ -102,7 +109,7 @@ The original design used `init()` + a registry (standard pluggable Go pattern), 
 
 ### Why checksum annotations on ConfigMaps?
 
-The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap content hashes. This triggers a rolling restart whenever domain-map or provider-config changes — essential because the controller reads config only at startup (no hot-reload, see BUG.md M1).
+The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap content hashes. This triggers a rolling restart whenever domain-map or provider-config changes — essential because the controller reads config only at startup (no hot-reload).
 
 ## Adding a New Provider
 
@@ -117,7 +124,7 @@ import (
     "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
-func New(settings map[string]string) (*Provider, error) { /* ... */ }
+func New(log logr.Logger, settings map[string]string) (*Provider, error) { /* ... */ }
 
 type Provider struct { /* ... */ }
 
@@ -126,6 +133,8 @@ func (p *Provider) Create(ctx context.Context, record dns.Record) error         
 func (p *Provider) Update(ctx context.Context, record dns.Record) error                   { /* ... */ }
 func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error          { /* ... */ }
 func (p *Provider) Upsert(ctx context.Context, record dns.Record) error                   { /* ... */ }
+func (p *Provider) HealthCheck(ctx context.Context) error                                 { /* ... */ }
+func (p *Provider) Flush(ctx context.Context) error                                       { /* ... */ }
 ```
 
 **2. Register it in `main()`:**
@@ -133,10 +142,10 @@ func (p *Provider) Upsert(ctx context.Context, record dns.Record) error         
 func newProviders() []providerFactory {
     return []providerFactory{
         {"opnsense", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-            return opnsense.New(settings)
+            return opnsense.New(log, settings)
         }},
         {"myprovider", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-            return myprovider.New(settings)
+            return myprovider.New(log, settings)
         }},
     }
 }
