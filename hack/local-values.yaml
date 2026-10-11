@@ -20,7 +20,6 @@ dnsProvider:
     allow_insecure_http: "true"
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
-    default_ttl: "60"
     # To deploy against a real appliance instead, drop the kind-fake-install
     # prerequisite of kind-deploy and use:
     #   base_url: "https://<appliance>/api"
