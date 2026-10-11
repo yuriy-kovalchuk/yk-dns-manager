@@ -86,9 +86,12 @@ test-cover:
 test-integration:
 	go test -race -timeout 120s -v -count=1 ./test/integration/
 
-## vuln: check for known vulnerabilities (manual/CI only)
+## vuln: check for known vulnerabilities (also runs in CI)
+# `go run` resolves through this module's toolchain, so govulncheck is built
+# with the go.mod go version. A globally installed govulncheck is pinned to
+# whatever Go built it and refuses to load a newer module.
 vuln:
-	govulncheck ./...
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 ## docker-build: multi-platform build via buildx (no push)
