@@ -2,5 +2,9 @@ apiVersion: v2
 name: yk-dns-manager
 description: A Kubernetes controller that manages DNS records for Gateway API HTTPRoutes
 type: application
-version: 0.0.0
-appVersion: "0.0.0"
+# CD stamps both of these from the `v*` release tag (`helm package
+# --version/--app-version`), so the values here only matter for local installs
+# from this directory. They must name an image tag that actually exists in GHCR,
+# because the templates default the tag to `.Chart.AppVersion`.
+version: 0.1.1-dev
+appVersion: "0.1.1-dev"
