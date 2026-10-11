@@ -116,44 +116,60 @@ type stubProvider struct {
 	dns.Provider
 }
 
-func TestSelectProviderSkipsFailedFactories(t *testing.T) {
+func TestSelectProviderPicksByName(t *testing.T) {
+	var called []string
+	factory := func(name string) providerFactory {
+		return providerFactory{name, func(logr.Logger, map[string]string) (dns.Provider, error) {
+			called = append(called, name)
+			return stubProvider{}, nil
+		}}
+	}
+
+	p, err := selectProvider(logr.Discard(), []providerFactory{factory("first"), factory("second")}, "second", nil)
+	if err != nil {
+		t.Fatalf("selectProvider: %v", err)
+	}
+	if p == nil {
+		t.Fatal("provider is nil despite a working factory")
+	}
+	if len(called) != 1 || called[0] != "second" {
+		t.Errorf("initialized %v, want only the named provider", called)
+	}
+}
+
+// A misspelled provider name used to start whichever provider came first and
+// accepted the settings.
+func TestSelectProviderRejectsUnknownName(t *testing.T) {
 	factories := []providerFactory{
-		{"broken", func(logr.Logger, map[string]string) (dns.Provider, error) {
-			return nil, errors.New("bad settings")
-		}},
-		{"good", func(logr.Logger, map[string]string) (dns.Provider, error) {
+		{"opnsense", func(logr.Logger, map[string]string) (dns.Provider, error) {
 			return stubProvider{}, nil
 		}},
 	}
 
-	p, name, err := selectProvider(logr.Discard(), factories, nil)
-	if err != nil {
-		t.Fatalf("selectProvider: %v", err)
-	}
-	if name != "good" {
-		t.Errorf("selected %q, want %q", name, "good")
-	}
-	if p == nil {
-		t.Error("provider is nil despite a working factory")
-	}
-}
-
-func TestSelectProviderFailsWhenNoneInitialize(t *testing.T) {
-	factories := []providerFactory{
-		{"broken", func(logr.Logger, map[string]string) (dns.Provider, error) {
-			return nil, errors.New("bad settings")
-		}},
-	}
-
-	p, name, err := selectProvider(logr.Discard(), factories, nil)
+	p, err := selectProvider(logr.Discard(), factories, "opnsens", nil)
 	if err == nil {
-		t.Fatal("expected an error when every factory fails")
+		t.Fatal("expected an error for an unknown provider name")
 	}
-	if name != "" {
-		t.Errorf("selected %q, want no provider", name)
+	if !strings.Contains(err.Error(), `"opnsens"`) || !strings.Contains(err.Error(), "opnsense") {
+		t.Errorf("error = %v, want it to name the bad value and the available providers", err)
 	}
 	if p != nil {
 		t.Error("provider must be nil so callers can guard on it")
+	}
+}
+
+// The named provider's own error is the startup error. It used to be logged at
+// info level while startup failed with a generic "no DNS provider" message.
+func TestSelectProviderReturnsInitError(t *testing.T) {
+	factories := []providerFactory{
+		{"opnsense", func(logr.Logger, map[string]string) (dns.Provider, error) {
+			return nil, errors.New("missing required setting 'api_key'")
+		}},
+	}
+
+	_, err := selectProvider(logr.Discard(), factories, "opnsense", nil)
+	if err == nil || !strings.Contains(err.Error(), "api_key") {
+		t.Fatalf("error = %v, want the provider's own error", err)
 	}
 }
 
@@ -169,7 +185,7 @@ func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
 		}},
 	}
 
-	p, _, err := selectProvider(logr.Discard(), factories, nil)
+	p, err := selectProvider(logr.Discard(), factories, "typednil", nil)
 	if err == nil {
 		t.Fatal("expected the factory error to be returned")
 	}

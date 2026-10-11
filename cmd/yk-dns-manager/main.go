@@ -37,9 +37,9 @@ type providerFactory struct {
 	fn   func(logr.Logger, map[string]string) (dns.Provider, error)
 }
 
-// newProviders returns the ordered list of available DNS providers. The first
-// one whose mandatory config fields are satisfied wins. Add entries here when
-// a new provider is added.
+// newProviders returns the available DNS providers. The provider config's
+// `provider` field picks one by name. Add entries here when a new provider is
+// added.
 func newProviders() []providerFactory {
 	return []providerFactory{
 		{"opnsense", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
@@ -52,25 +52,29 @@ func newProviders() []providerFactory {
 	//   }},
 }
 
-// selectProvider walks the factory list in order and returns the first provider
-// that initializes.
+// selectProvider initializes the provider the config names. It does not fall
+// back to another one: a typo in the name, or settings the named provider
+// rejects, is a configuration error and is reported as one.
 //
-// The provider is assigned only after the error is checked. A factory such as
+// The provider is returned only after the error is checked. A factory such as
 // opnsense.New returns a concrete *Provider; when it fails that pointer is nil,
 // and converting it to the dns.Provider interface produces an interface that is
-// not == nil. Storing it and calling a method later panics with a nil dereference
-// instead of reporting the configuration error.
-func selectProvider(log logr.Logger, factories []providerFactory, settings map[string]string) (dns.Provider, string, error) {
+// not == nil. Returning it and calling a method later panics with a nil
+// dereference instead of reporting the configuration error.
+func selectProvider(log logr.Logger, factories []providerFactory, name string, settings map[string]string) (dns.Provider, error) {
+	known := make([]string, 0, len(factories))
 	for _, pf := range factories {
-		log.Info("trying to initialize provider", "name", pf.name)
-		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
-		if err != nil {
-			log.Info("provider initialization failed, trying next", "name", pf.name, "error", err)
+		if pf.name != name {
+			known = append(known, pf.name)
 			continue
 		}
-		return p, pf.name, nil
+		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
+		if err != nil {
+			return nil, fmt.Errorf("initializing DNS provider %q: %w", name, err)
+		}
+		return p, nil
 	}
-	return nil, "", fmt.Errorf("no DNS provider could be initialized from config")
+	return nil, fmt.Errorf("unknown DNS provider %q; available: %s", name, strings.Join(known, ", "))
 }
 
 var scheme = runtime.NewScheme()
@@ -138,11 +142,11 @@ func run() error {
 	}
 	log.Info("loaded provider config", "provider", providerCfg.Provider, "upsert", providerCfg.Upsert)
 
-	dnsProvider, selectedProvider, err := selectProvider(log, newProviders(), providerCfg.Settings)
+	dnsProvider, err := selectProvider(ctrl.Log, newProviders(), providerCfg.Provider, providerCfg.Settings)
 	if err != nil {
 		return err
 	}
-	log.Info("initialized DNS provider", "name", selectedProvider)
+	log.Info("initialized DNS provider", "name", providerCfg.Provider)
 
 	log.Info("checking DNS provider connectivity")
 	if err := dnsProvider.HealthCheck(ctx); err != nil {
@@ -151,7 +155,7 @@ func run() error {
 		// reason through the reconciler. Every reconcile reports the same failure
 		// and requeues with backoff, so a provider that comes back recovers on its
 		// own without a restart.
-		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", selectedProvider)
+		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", providerCfg.Provider)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
