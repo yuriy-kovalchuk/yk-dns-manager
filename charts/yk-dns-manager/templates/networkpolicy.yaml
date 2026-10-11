@@ -36,9 +36,8 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # The appliance API over TLS, and the Kubernetes API server the controller
-    # watches HTTPRoutes through.
-    - ports:
-        - port: 443
-          protocol: TCP
+    # The Kubernetes API server the controller watches HTTPRoutes through.
+    {{- include "yk-dns-manager.egressRule" .Values.networkPolicy.apiServer | nindent 4 }}
+    # The DNS provider API.
+    {{- include "yk-dns-manager.egressRule" .Values.networkPolicy.provider | nindent 4 }}
 {{- end }}

@@ -58,3 +58,22 @@ Create the name of the service account to use.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+One NetworkPolicy egress rule from a {ports, cidrs} value. No cidrs means any
+destination on those ports.
+*/}}
+{{- define "yk-dns-manager.egressRule" -}}
+- ports:
+    {{- range .ports }}
+    - port: {{ . }}
+      protocol: TCP
+    {{- end }}
+  {{- with .cidrs }}
+  to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
+  {{- end }}
+{{- end }}
