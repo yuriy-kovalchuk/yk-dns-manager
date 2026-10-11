@@ -38,6 +38,9 @@ dist/
 # Developer notes
 .developer/
 
+# Audit / working reports — local only, never committed
+docs/audit-*.md
+
 # Editor/IDE
 .idea/
 .vscode/
