@@ -165,6 +165,39 @@ func (p *Provider) doRequest(ctx context.Context, method, path string, body inte
 	return resp, nil
 }
 
+// Bounds on how much of an OPNsense response body is read. Every read here was
+// unbounded while the pod carries a 256Mi memory limit, so a hostile or
+// misbehaving appliance could exhaust it. 8MiB is generous for the override
+// list — a row is roughly 200 bytes of JSON, so this covers tens of thousands
+// of entries — while still failing fast on a runaway response.
+const (
+	maxResponseBytes = 8 << 20
+	// Error bodies are only ever logged, so a short snippet is enough.
+	maxErrorBodyBytes = 1 << 10
+)
+
+// decodeJSON reads at most maxResponseBytes of the response body into target.
+// A body that hits the limit is reported as such instead of surfacing a
+// confusing truncated-JSON error.
+func decodeJSON(resp *http.Response, target any, what string) error {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return fmt.Errorf("opnsense: read %s response: %w", what, err)
+	}
+	if len(data) == maxResponseBytes {
+		return fmt.Errorf("opnsense: %s response exceeded the %d byte limit", what, maxResponseBytes)
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("opnsense: decode %s response: %w", what, err)
+	}
+	return nil
+}
+
+func readErrorBody(resp *http.Response) string {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	return string(body)
+}
+
 // HealthCheck verifies the OPNsense API is reachable and credentials are valid.
 func (p *Provider) HealthCheck(ctx context.Context) error {
 	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
@@ -198,8 +231,8 @@ func (p *Provider) reconfigure(ctx context.Context) error {
 	var result struct {
 		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode reconfigure response: %w", err)
+	if err := decodeJSON(resp, &result, "reconfigure"); err != nil {
+		return err
 	}
 	p.log.V(1).Info("reconfigure completed", "status", result.Status)
 	return nil
@@ -235,8 +268,8 @@ func (p *Provider) findOverrides(ctx context.Context, fqdn, recordType string) (
 	}
 
 	var sr searchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, fmt.Errorf("opnsense: decode search response: %w", err)
+	if err := decodeJSON(resp, &sr, "search"); err != nil {
+		return nil, err
 	}
 
 	host, domain := dns.SplitHostname(fqdn)
@@ -317,16 +350,15 @@ func (p *Provider) createOverride(ctx context.Context, record dns.Record) error 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
 	var result struct {
 		Result string `json:"result"`
 		UUID   string `json:"uuid"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode addHostOverride response: %w", err)
+	if err := decodeJSON(resp, &result, "addHostOverride"); err != nil {
+		return err
 	}
 	if result.Result != "saved" {
 		return fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
@@ -367,15 +399,14 @@ func (p *Provider) updateOverride(ctx context.Context, uuid string, record dns.R
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: setHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("opnsense: setHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
 	var result struct {
 		Result string `json:"result"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode setHostOverride response: %w", err)
+	if err := decodeJSON(resp, &result, "setHostOverride"); err != nil {
+		return err
 	}
 	if result.Result != "saved" {
 		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result.Result)
@@ -420,15 +451,14 @@ func (p *Provider) deleteOverride(ctx context.Context, uuid string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("opnsense: delHostOverride returned status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("opnsense: delHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
 	var result struct {
 		Result string `json:"result"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("opnsense: decode delHostOverride response: %w", err)
+	if err := decodeJSON(resp, &result, "delHostOverride"); err != nil {
+		return err
 	}
 	switch result.Result {
 	case "deleted":
