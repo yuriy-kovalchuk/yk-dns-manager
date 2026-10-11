@@ -26,9 +26,10 @@ func newFake() *testenv.OPNsense {
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	t.Helper()
 	p, err := opnsense.New(logrtesting.NewTestLogger(t), map[string]string{
-		"base_url":   serverURL + "/api",
-		"api_key":    "test-key",
-		"api_secret": "test-secret",
+		"base_url":            serverURL + "/api",
+		"api_key":             "test-key",
+		"api_secret":          "test-secret",
+		"allow_insecure_http": "true",
 	})
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)

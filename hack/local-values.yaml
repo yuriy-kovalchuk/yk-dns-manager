@@ -16,6 +16,8 @@ dnsProvider:
     # The in-memory fake that `make kind-fake-install` runs in the release
     # namespace. It speaks plain HTTP and accepts any credentials.
     base_url: "http://fake-opnsense.yk-dns-manager-system.svc.cluster.local:8053/api"
+    # The fake speaks plain HTTP. Never set this for a real appliance.
+    allow_insecure_http: "true"
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
     default_ttl: "60"

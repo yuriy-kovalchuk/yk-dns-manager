@@ -56,6 +56,9 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 			parsedURL.Path,
 		)
 	}
+	if err := checkScheme(parsedURL, settings, log); err != nil {
+		return nil, err
+	}
 	apiKey := settings["api_key"]
 	if apiKey == "" {
 		return nil, fmt.Errorf("opnsense: missing required setting 'api_key'")
@@ -87,6 +90,25 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		client:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:        log,
 	}, nil
+}
+
+// checkScheme refuses plain HTTP unless the operator opts in. The API key and
+// secret go out as basic auth on every request, so over http they cross the
+// network in cleartext. The opt-in exists for the in-memory fake used in local
+// development.
+func checkScheme(u *url.URL, settings map[string]string, log logr.Logger) error {
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if settings["allow_insecure_http"] != "true" {
+			return fmt.Errorf("opnsense: base_url %q uses http, which sends the API credentials in cleartext; use https, or set allow_insecure_http: \"true\" for a local test appliance", u.Redacted())
+		}
+		log.Info("opnsense: allow_insecure_http is ENABLED - the API credentials are sent in cleartext. Use it only for a local test appliance.")
+		return nil
+	default:
+		return fmt.Errorf("opnsense: base_url %q must use https", u.Redacted())
+	}
 }
 
 // applyTLSConfig wires the two TLS knobs an operator controls.

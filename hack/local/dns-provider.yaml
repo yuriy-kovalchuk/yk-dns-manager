@@ -10,6 +10,9 @@ upsert: true
 
 settings:
   base_url: "http://127.0.0.1:8053/api"
+  # The fake speaks plain HTTP. Never set this for a real appliance: the
+  # credentials would cross the network in cleartext.
+  allow_insecure_http: "true"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
   default_ttl: "60"

@@ -65,6 +65,7 @@ func main() {
 
 	fmt.Printf("fake OPNsense listening on %s\n", *addr)
 	fmt.Printf("  provider settings.base_url: http://localhost%s/api\n", *addr)
+	fmt.Printf("  plain HTTP also needs:      allow_insecure_http: \"true\"\n")
 	fmt.Printf("  current overrides:          http://localhost%s/records\n", *addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
