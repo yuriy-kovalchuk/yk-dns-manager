@@ -146,7 +146,12 @@ func run() error {
 
 	log.Info("checking DNS provider connectivity")
 	if err := dnsProvider.HealthCheck(ctx); err != nil {
-		return fmt.Errorf("DNS provider health check failed: %w", err)
+		// Non-fatal on purpose. The appliance may be down or the credentials may
+		// be wrong, and exiting here CrashLoops the pod without ever surfacing the
+		// reason through the reconciler. Every reconcile reports the same failure
+		// and requeues with backoff, so a provider that comes back recovers on its
+		// own without a restart.
+		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", selectedProvider)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
