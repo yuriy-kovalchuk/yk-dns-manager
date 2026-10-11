@@ -1,3 +1,14 @@
+{{/*
+Credentials must reach the pod from a Secret via ${ENV_VAR} expansion, never as a
+literal in values.yaml. Values land in the release manifest, in `helm get values`,
+and in the logs of whatever CI system rendered them.
+*/}}
+{{- range $key := list "api_key" "api_secret" "password" "token" }}
+{{-   $value := index $.Values.dnsProvider.settings $key }}
+{{-   if and $value (not (hasPrefix "${" $value)) }}
+{{-     fail (printf "dnsProvider.settings.%s looks like a literal credential. Put it in a Secret, name that Secret in dnsProvider.existingSecret, and reference it as ${ENV_VAR} instead." $key) }}
+{{-   end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

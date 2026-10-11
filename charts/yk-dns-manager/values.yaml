@@ -83,6 +83,20 @@ metrics:
     # -- Metrics endpoint port.
     port: 9090
 
+networkPolicy:
+  # -- Restrict pod traffic. Needs a CNI that enforces NetworkPolicy; on a
+  # cluster without one the resource is accepted and silently ignored.
+  enabled: false
+  # -- from rules (podSelector / namespaceSelector / ipBlock) allowed to reach
+  # /metrics. Empty means any source in the cluster, which is the same as having
+  # no policy for that port.
+  # Example:
+  #   metricsIngress:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  metricsIngress: []
+
 serviceMonitor:
   # -- If true, create a Prometheus ServiceMonitor resource.
   enabled: false

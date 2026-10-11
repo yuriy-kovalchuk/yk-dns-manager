@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "yk-dns-manager.fullname" . }}
+  labels:
+    {{- include "yk-dns-manager.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "yk-dns-manager.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Metrics scrape. With metricsIngress empty any in-cluster source reaches
+    # /metrics; set it to a podSelector/namespaceSelector so it is not open to
+    # every pod in the cluster.
+    - ports:
+        - port: metrics
+          protocol: TCP
+      {{- with .Values.networkPolicy.metricsIngress }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    # Liveness and readiness probes come from the kubelet on the node, which no
+    # pod or namespace selector can express. Listing the port with no from rule
+    # keeps probes working while every other port stays denied.
+    - ports:
+        - port: health
+          protocol: TCP
+  egress:
+    # Resolve the appliance hostname.
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The appliance API over TLS, and the Kubernetes API server the controller
+    # watches HTTPRoutes through.
+    - ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
