@@ -66,7 +66,11 @@ func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
 
 func newTestDomainMap(t *testing.T) *config.DomainMap {
 	t.Helper()
-	content := "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n"
+	return newTestDomainMapWith(t, "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n")
+}
+
+func newTestDomainMapWith(t *testing.T, content string) *config.DomainMap {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "domain-map.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -372,5 +376,236 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 	}
 	if mock.deletedHosts[1] != "api.my-domain2.it" {
 		t.Errorf("expected second deleted host 'api.my-domain2.it', got %q", mock.deletedHosts[1])
+	}
+}
+
+// TestHTTPRouteReconciler_DeletionWithoutMatchingHostname is the C1 regression
+// test. The early return for "no hostname matches the domain map" used to sit
+// above the deletion branch, so a route carrying our finalizer whose hostnames
+// no longer match the map could never leave Terminating.
+func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatalf("failed to install gateway-api scheme: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		hostnames   []string
+		annotation  string
+		wantDeleted []string
+	}{
+		{
+			// The annotation is the record of what we created; it must drive
+			// cleanup even when the live spec matches nothing.
+			name:        "owned hostname recovered from annotation",
+			hostnames:   []string{"gone.example.net"},
+			annotation:  `["app.my-domain1.com"]`,
+			wantDeleted: []string{"app.my-domain1.com"},
+		},
+		{
+			// No spec hostnames at all: the route must still become deletable.
+			name:        "no hostnames in spec",
+			hostnames:   nil,
+			annotation:  `["app.my-domain1.com", "api.my-domain2.it"]`,
+			wantDeleted: []string{"app.my-domain1.com", "api.my-domain2.it"},
+		},
+		{
+			// Finalizer present but nothing ever recorded as owned: nothing to
+			// delete, but the finalizer must still come off.
+			name:        "finalizer with no annotation",
+			hostnames:   []string{"gone.example.net"},
+			annotation:  "",
+			wantDeleted: nil,
+		},
+		{
+			// A hostname that left the domain map is invisible to the spec path,
+			// so only the annotation can find it.
+			name:        "spec and annotation disagree",
+			hostnames:   []string{"app.my-domain1.com", "gone.example.net"},
+			annotation:  `["app.my-domain1.com", "api.my-domain2.it"]`,
+			wantDeleted: []string{"app.my-domain1.com", "api.my-domain2.it"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := metav1.Now()
+			route := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "orphan-route",
+					Namespace:         "default",
+					Finalizers:        []string{finalizerName},
+					DeletionTimestamp: &now,
+				},
+				Spec: gatewayv1.HTTPRouteSpec{},
+			}
+			for _, h := range tc.hostnames {
+				route.Spec.Hostnames = append(route.Spec.Hostnames, gatewayv1.Hostname(h))
+			}
+			if tc.annotation != "" {
+				route.Annotations = map[string]string{managedHostnamesAnnotation: tc.annotation}
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(route).
+				Build()
+
+			mock := &mockDNSProvider{}
+			reconciler := &HTTPRouteReconciler{
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Log:       zap.New(zap.UseDevMode(true)),
+				DomainMap: newTestDomainMap(t),
+				DNS:       mock,
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "orphan-route", Namespace: "default"}}
+			if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var updated gatewayv1.HTTPRoute
+			key := types.NamespacedName{Name: "orphan-route", Namespace: "default"}
+			if err := fakeClient.Get(context.Background(), key, &updated); err == nil {
+				for _, f := range updated.Finalizers {
+					if f == finalizerName {
+						t.Fatalf("finalizer %q still present: route is stuck in Terminating", finalizerName)
+					}
+				}
+			}
+
+			if len(mock.deletedHosts) != len(tc.wantDeleted) {
+				t.Fatalf("expected %d deleted hosts %v, got %d %v", len(tc.wantDeleted), tc.wantDeleted, len(mock.deletedHosts), mock.deletedHosts)
+			}
+			for i, want := range tc.wantDeleted {
+				if mock.deletedHosts[i] != want {
+					t.Errorf("deleted[%d] = %q, want %q", i, mock.deletedHosts[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestHTTPRouteReconciler_CleanupOfUnownedHostnames covers the live (non-deleting)
+// path: records the controller owns must be removed when the hostname stops being
+// managed, whether it left the spec or the domain map.
+func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatalf("failed to install gateway-api scheme: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		domainMap   string
+		hostnames   []string
+		annotation  string
+		wantDeleted []string
+		wantOwned   string
+		wantNoWrite bool
+	}{
+		{
+			name:        "hostname removed from spec",
+			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			hostnames:   []string{"app.my-domain1.com"},
+			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
+			wantDeleted: []string{"api.my-domain2.it"},
+			wantOwned:   `["app.my-domain1.com"]`,
+		},
+		{
+			name: "hostname removed from domain map",
+			// The spec still names api.my-domain2.it, but the map no longer
+			// resolves it, so the record is no longer wanted.
+			domainMap:   "my-domain1.com: 10.0.8.100\n",
+			hostnames:   []string{"app.my-domain1.com", "api.my-domain2.it"},
+			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
+			wantDeleted: []string{"api.my-domain2.it"},
+			wantOwned:   `["app.my-domain1.com"]`,
+		},
+		{
+			// Guard: a reconcile that changes nothing must not write the route.
+			// The old comparison mixed an unfiltered list with a filtered one, so
+			// an annotation holding a hostname that dropped out of the map forced
+			// one extra write — and that write silently rewrote the annotation to
+			// hide the divergence while the record itself was never deleted.
+			name:        "nothing changed, no annotation write",
+			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			hostnames:   []string{"app.my-domain1.com"},
+			annotation:  `["app.my-domain1.com"]`,
+			wantDeleted: nil,
+			wantOwned:   `["app.my-domain1.com"]`,
+			wantNoWrite: true,
+		},
+		{
+			name:        "corrupt annotation is rewritten, not fatal",
+			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			hostnames:   []string{"app.my-domain1.com"},
+			annotation:  `{not json`,
+			wantDeleted: nil,
+			wantOwned:   `["app.my-domain1.com"]`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			route := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "live-route",
+					Namespace:  "default",
+					Finalizers: []string{finalizerName},
+					Annotations: map[string]string{
+						managedHostnamesAnnotation: tc.annotation,
+					},
+				},
+				Spec: gatewayv1.HTTPRouteSpec{},
+			}
+			for _, h := range tc.hostnames {
+				route.Spec.Hostnames = append(route.Spec.Hostnames, gatewayv1.Hostname(h))
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(route).
+				Build()
+
+			mock := &mockDNSProvider{}
+			reconciler := &HTTPRouteReconciler{
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Log:       zap.New(zap.UseDevMode(true)),
+				DomainMap: newTestDomainMapWith(t, tc.domainMap),
+				DNS:       mock,
+				Upsert:    true,
+			}
+
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "live-route", Namespace: "default"}}
+			before := route.ResourceVersion
+			if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(mock.deletedHosts) != len(tc.wantDeleted) {
+				t.Fatalf("expected %d deleted hosts %v, got %d %v", len(tc.wantDeleted), tc.wantDeleted, len(mock.deletedHosts), mock.deletedHosts)
+			}
+			for i, want := range tc.wantDeleted {
+				if mock.deletedHosts[i] != want {
+					t.Errorf("deleted[%d] = %q, want %q", i, mock.deletedHosts[i], want)
+				}
+			}
+
+			var updated gatewayv1.HTTPRoute
+			key := types.NamespacedName{Name: "live-route", Namespace: "default"}
+			if err := fakeClient.Get(context.Background(), key, &updated); err != nil {
+				t.Fatalf("route should still exist: %v", err)
+			}
+			if got := updated.Annotations[managedHostnamesAnnotation]; got != tc.wantOwned {
+				t.Errorf("annotation = %q, want %q", got, tc.wantOwned)
+			}
+			if tc.wantNoWrite && updated.ResourceVersion != before {
+				t.Errorf("reconcile wrote the route (%s -> %s) despite nothing having changed", before, updated.ResourceVersion)
+			}
+		})
 	}
 }
