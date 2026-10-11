@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -79,9 +80,10 @@ func TestUnmatchedRouteIsIgnored(t *testing.T) {
 }
 
 // TestRouteIsDeletableWhileApplianceFails pins the "always deletable"
-// guarantee: a failing appliance must never leave a route stuck in Terminating.
+// guarantee: a failing appliance must never leave a route stuck in
+// Terminating. Cleanup is retried for the grace period, then the route goes.
 func TestRouteIsDeletableWhileApplianceFails(t *testing.T) {
-	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, cleanupGrace: 2 * time.Second})
 
 	h.createRoute("app", []string{"app.example.com"})
 	h.waitOwned("app", `["app.example.com"]`)

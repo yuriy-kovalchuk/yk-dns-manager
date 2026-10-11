@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,6 +38,7 @@ type mockDNSProvider struct {
 	adoptedRemovals []string // hostnames removed with adoptLegacy set
 	flushes         int
 	flushErr        error
+	removeErr       error
 }
 
 func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
@@ -73,6 +75,9 @@ func (b mockBatch) Ensure(_ context.Context, record dns.Record, opts dns.EnsureO
 func (b mockBatch) Remove(_ context.Context, hostname, _ string, adoptLegacy bool) error {
 	b.m.mu.Lock()
 	defer b.m.mu.Unlock()
+	if b.m.removeErr != nil {
+		return b.m.removeErr
+	}
 	b.m.deletedHosts = append(b.m.deletedHosts, hostname)
 	if adoptLegacy {
 		b.m.adoptedRemovals = append(b.m.adoptedRemovals, hostname)
@@ -810,5 +815,56 @@ func TestHTTPRouteReconciler_SharedHostnameIsKept(t *testing.T) {
 
 	if len(mock.deletedHosts) != 0 {
 		t.Errorf("deleted %v while green still claims it", mock.deletedHosts)
+	}
+}
+
+// TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod is audit B9 and D10:
+// a failing cleanup holds the finalizer and retries until the grace period
+// after the deletion request runs out, then releases the route anyway.
+func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
+	cases := []struct {
+		name          string
+		mock          *mockDNSProvider
+		deletedAgo    time.Duration
+		wantFinalizer bool
+	}{
+		{"delete fails within grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Minute, true},
+		{"publish fails within grace", &mockDNSProvider{flushErr: errors.New("reconfigure failed")}, time.Minute, true},
+		{"delete fails after grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Hour, false},
+		{"cleanup succeeds", &mockDNSProvider{}, time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted := metav1.NewTime(time.Now().Add(-tc.deletedAgo))
+			route := managedRoute("route", `["app.my-domain1.com"]`, "app.my-domain1.com")
+			route.DeletionTimestamp = &deleted
+
+			scheme := runtime.NewScheme()
+			if err := gatewayv1.Install(scheme); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+				WithObjects(route).Build()
+			r := &HTTPRouteReconciler{
+				Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
+				DomainMap: newTestDomainMap(t), DNS: tc.mock, CleanupGracePeriod: 5 * time.Minute,
+			}
+
+			key := types.NamespacedName{Name: "route", Namespace: "default"}
+			res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			var got gatewayv1.HTTPRoute
+			held := c.Get(context.Background(), key, &got) == nil && slices.Contains(got.Finalizers, finalizerName)
+			if held != tc.wantFinalizer {
+				t.Fatalf("finalizer held = %v, want %v", held, tc.wantFinalizer)
+			}
+			if held && (res.RequeueAfter <= 0 || res.RequeueAfter > cleanupRetryInterval) {
+				t.Errorf("RequeueAfter = %s, want a retry within %s", res.RequeueAfter, cleanupRetryInterval)
+			}
+		})
 	}
 }

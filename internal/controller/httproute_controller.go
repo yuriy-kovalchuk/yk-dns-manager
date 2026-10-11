@@ -4,9 +4,11 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,7 +41,13 @@ type HTTPRouteReconciler struct {
 	DomainMap *config.DomainMap
 	DNS       dns.Provider
 	Upsert    bool // when true, update existing records; when false, only create missing ones
+	// CleanupGracePeriod is how long after a route's deletion was requested a
+	// failing DNS cleanup is retried before the finalizer is removed anyway.
+	CleanupGracePeriod time.Duration
 }
+
+// cleanupRetryInterval spaces out retries of a failing DNS cleanup.
+const cleanupRetryInterval = 10 * time.Second
 
 // Reconcile implements controller-runtime's Reconciler interface.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -47,23 +55,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	// One batch per reconcile: the provider reads its records once, and the
-	// changes are published in a single commit at the end, so a route with N
-	// hostnames costs one read and at most one publish. Committing on the
-	// error path as well keeps staged work from being stranded.
-	batch := r.DNS.Batch()
-	defer func() {
-		if cerr := batch.Commit(ctx); cerr != nil {
-			r.Log.Error(cerr, "failed to publish staged DNS changes")
-			// Surfacing the failure is what makes controller-runtime requeue with
-			// backoff; logging it alone would leave the DNS change unpublished
-			// with no retry. An existing error already guarantees a requeue.
-			if err == nil {
-				err = cerr
-			}
-		}
-	}()
 
 	// The annotation records the hostnames this controller created DNS records
 	// for. It is the only source of truth that survives a hostname being edited
@@ -89,37 +80,28 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// finalizer must always become deletable, whatever its spec or the domain
 	// map currently look like.
 	if !route.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&route, finalizerName) {
-			r.Log.Info("deleting DNS records for HTTPRoute", "name", req.NamespacedName)
+		if !controllerutil.ContainsFinalizer(&route, finalizerName) {
+			return ctrl.Result{}, nil
+		}
+		return r.finalize(ctx, &route, owned, specHostnames)
+	}
 
-			// Release everything the annotation claims we own, plus everything
-			// the live spec still maps. The union covers routes written before
-			// the annotation existed.
-			var deleteErr error
-			for _, hostname := range union(owned, specHostnames) {
-				if err := r.release(ctx, batch, req.NamespacedName, hostname, owned); err != nil {
-					r.Log.Error(err, "failed to delete DNS record", "hostname", hostname)
-					deleteErr = fmt.Errorf("at least one DNS record deletion failed")
-				}
-			}
-
-			err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
-					return err
-				}
-				controllerutil.RemoveFinalizer(&route, finalizerName)
-				return r.Update(ctx, &route)
-			})
-			if err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
-			}
-			// Best-effort cleanup: log errors but always succeed so the route is removed.
-			if deleteErr != nil {
-				r.Log.Error(deleteErr, "one or more DNS record deletions failed during cleanup")
+	// One batch per reconcile: the provider reads its records once, and the
+	// changes are published in a single commit at the end, so a route with N
+	// hostnames costs one read and at most one publish. Committing on the
+	// error path as well keeps staged work from being stranded.
+	batch := r.DNS.Batch()
+	defer func() {
+		if cerr := batch.Commit(ctx); cerr != nil {
+			r.Log.Error(cerr, "failed to publish staged DNS changes")
+			// Surfacing the failure is what makes controller-runtime requeue with
+			// backoff; logging it alone would leave the DNS change unpublished
+			// with no retry. An existing error already guarantees a requeue.
+			if err == nil {
+				err = cerr
 			}
 		}
-		return ctrl.Result{}, nil
-	}
+	}()
 
 	if !controllerutil.ContainsFinalizer(&route, finalizerName) {
 		// Don't take ownership of routes we have nothing to manage.
@@ -225,6 +207,52 @@ func (r *HTTPRouteReconciler) readOwned(route *gatewayv1.HTTPRoute) []string {
 		return nil
 	}
 	return owned
+}
+
+// finalize releases a deleted route's DNS records and publishes the change
+// before removing the finalizer, so the records are gone from DNS by the time
+// the route is. A failing cleanup is retried until CleanupGracePeriod after
+// the deletion was requested; after that the finalizer is removed anyway,
+// because a route must always be deletable, and the records may be left
+// behind.
+func (r *HTTPRouteReconciler) finalize(ctx context.Context, route *gatewayv1.HTTPRoute, owned, specHostnames []string) (ctrl.Result, error) {
+	key := client.ObjectKeyFromObject(route)
+	r.Log.Info("deleting DNS records for HTTPRoute", "name", key)
+
+	// Release everything the annotation claims we own, plus everything the
+	// live spec still maps. The union covers routes written before the
+	// annotation existed.
+	batch := r.DNS.Batch()
+	var cleanupErr error
+	for _, hostname := range union(owned, specHostnames) {
+		if err := r.release(ctx, batch, key, hostname, owned); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", hostname, err))
+		}
+	}
+	if err := batch.Commit(ctx); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("publishing: %w", err))
+	}
+
+	if cleanupErr != nil {
+		deadline := route.DeletionTimestamp.Add(r.CleanupGracePeriod)
+		if remaining := time.Until(deadline); remaining > 0 {
+			r.Log.Error(cleanupErr, "DNS cleanup failed; retrying before releasing the route", "giveUpAt", deadline)
+			return ctrl.Result{RequeueAfter: min(remaining, cleanupRetryInterval)}, nil
+		}
+		r.Log.Error(cleanupErr, "DNS cleanup still failing after the grace period; releasing the route anyway, so DNS records may be left behind")
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := r.APIReader.Get(ctx, key, route); err != nil {
+			return err
+		}
+		controllerutil.RemoveFinalizer(route, finalizerName)
+		return r.Update(ctx, route)
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+	}
+	return ctrl.Result{}, nil
 }
 
 // release removes the managed DNS record for hostname, unless another live
