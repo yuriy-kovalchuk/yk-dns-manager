@@ -142,12 +142,15 @@ in for OPNsense.
 
 ```bash
 cp .env.example .env
-make kind-deploy   # cluster + image + fake appliance + controller
+make kind-deploy   # cluster + CRDs + image + fake appliance + controller
 make kind-demo     # apply a sample HTTPRoute and watch the record appear
+make kind-status   # what is running, and what is missing
 ```
 
-See [docs/local-testing.md](docs/local-testing.md) for the standalone binary path
-and for pointing at a real appliance.
+Most changes need neither of those — `make test` covers the reconciler and the
+provider without a cluster. See
+[docs/local-testing.md](docs/local-testing.md) for which loop to use, the
+standalone binary path, and pointing at a real appliance.
 
 ## License
 
