@@ -3,7 +3,9 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	logrtesting "github.com/go-logr/logr/testing"
@@ -12,6 +14,14 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
+
+// newFake returns a fake appliance that only accepts the credentials
+// newProvider sends, so every test also proves the provider authenticates.
+func newFake() *testenv.OPNsense {
+	fake := testenv.NewOPNsense()
+	fake.RequireCredentials("test-key", "test-secret")
+	return fake
+}
 
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	t.Helper()
@@ -27,7 +37,7 @@ func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 }
 
 func TestCreateAndExists(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -91,7 +101,7 @@ func TestCreateAndExists(t *testing.T) {
 }
 
 func TestUpdateExistingRecord(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -128,7 +138,7 @@ func TestUpdateExistingRecord(t *testing.T) {
 }
 
 func TestUpdateNonExistent(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -146,7 +156,7 @@ func TestUpdateNonExistent(t *testing.T) {
 }
 
 func TestDeleteExistingRecord(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -184,7 +194,7 @@ func TestDeleteExistingRecord(t *testing.T) {
 }
 
 func TestDeleteNonExistent(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -198,7 +208,7 @@ func TestDeleteNonExistent(t *testing.T) {
 }
 
 func TestUpsertCreatesAndUpdates(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -242,7 +252,7 @@ func TestUpsertCreatesAndUpdates(t *testing.T) {
 }
 
 func TestFullLifecycle(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -317,7 +327,7 @@ func TestFullLifecycle(t *testing.T) {
 }
 
 func TestMultipleRecords(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -375,7 +385,7 @@ func TestMultipleRecords(t *testing.T) {
 // overrides for the same hostname/RR. Deleting only the first left the rest
 // answering with stale values and nothing else ever removed them.
 func TestDeleteRemovesAllDuplicates(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -411,7 +421,7 @@ func TestDeleteRemovesAllDuplicates(t *testing.T) {
 // TestUpsertConvergesDuplicates checks that writing to a hostname that has
 // duplicate overrides leaves exactly one row behind, holding the new value.
 func TestUpsertConvergesDuplicates(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -448,7 +458,7 @@ func TestUpsertConvergesDuplicates(t *testing.T) {
 // again, then setHostOverride and a per-record reconfigure. It is now one list
 // fetch plus one write, with reconfigure deferred to Flush.
 func TestUpsertUpdatePathCallCount(t *testing.T) {
-	fake := testenv.NewOPNsense()
+	fake := newFake()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -493,5 +503,72 @@ func TestUpsertUpdatePathCallCount(t *testing.T) {
 	n := len(fake.Calls())
 	if n != len(want)+1 {
 		t.Fatalf("idle Flush issued extra calls: total %d, want %d", n, len(want)+1)
+	}
+}
+
+func TestHealthCheckRejectsWrongCredentials(t *testing.T) {
+	fake := testenv.NewOPNsense()
+	fake.RequireCredentials("other-key", "other-secret")
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	err := newProvider(t, srv.URL).HealthCheck(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("HealthCheck = %v, want an authentication failure", err)
+	}
+}
+
+// TestCreateSurfacesValidationFailure proves a row the appliance rejects comes
+// back as an error. The appliance answers HTTP 200 with result "failed", so a
+// provider that only checked the status code would report success.
+func TestCreateSurfacesValidationFailure(t *testing.T) {
+	fake := newFake()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	err := newProvider(t, srv.URL).Create(context.Background(), dns.Record{
+		Hostname: "app.example.com",
+		Type:     "A",
+		Value:    "not-an-ip",
+	})
+	if err == nil {
+		t.Fatal("expected Create to fail for a row the appliance rejects")
+	}
+	if n := len(fake.Snapshot()); n != 0 {
+		t.Errorf("rejected row was stored: %d rows", n)
+	}
+}
+
+// TestFlushPublishes pins that writes are staged and only Flush makes Unbound
+// answer with them, and that a failed Flush stays pending and is retried.
+func TestFlushPublishes(t *testing.T) {
+	fake := newFake()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	if err := p.Create(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if n := len(fake.Published()); n != 0 {
+		t.Fatalf("published %d rows before Flush, want 0", n)
+	}
+
+	fake.SetFailure(testenv.EndpointReconfigure, http.StatusInternalServerError)
+	if err := p.Flush(ctx); err == nil {
+		t.Fatal("expected Flush to fail while reconfigure fails")
+	}
+	if n := len(fake.Published()); n != 0 {
+		t.Fatalf("published %d rows after a failed Flush, want 0", n)
+	}
+
+	fake.SetFailure(testenv.EndpointReconfigure, 0)
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("retried Flush: %v", err)
+	}
+	if n := len(fake.Published()); n != 1 {
+		t.Fatalf("published %d rows after a retried Flush, want 1", n)
 	}
 }
