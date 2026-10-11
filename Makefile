@@ -34,7 +34,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -98,6 +98,9 @@ vuln:
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 ## docker-build: multi-platform build via buildx (no push)
+# No --load: buildx cannot export a multi-platform image into the local docker
+# image store. The result lands in the builder cache, which is what a
+# build-only check needs. For a locally loadable image use docker-build-local.
 docker-build:
 	$(MAKE) buildx-setup
 	docker buildx build \
@@ -105,15 +108,30 @@ docker-build:
 		--build-arg VERSION=$(VERSION) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		-t $(IMG) \
-		--load
+		-t $(IMG)
 
 ## docker-push: multi-platform build and push to registry
+# One buildx step: `docker push` cannot publish the multi-arch manifest that
+# a multi-platform build produces.
 docker-push:
-	$(MAKE) docker-build
-	docker push $(IMG)
+	$(MAKE) buildx-setup
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		-t $(IMG) \
+		--push
 
 # ── Helm ───────────────────────────────────────────────────────────────────────
+## helm-lint: lint the chart (strict)
+helm-lint:
+	helm lint --strict $(CHART_DIR)
+
+## helm-template: render the chart with default values as a smoke test
+helm-template:
+	helm template smoke $(CHART_DIR)
+
 ## helm-package: package the Helm chart
 helm-package:
 	helm package $(CHART_DIR)
