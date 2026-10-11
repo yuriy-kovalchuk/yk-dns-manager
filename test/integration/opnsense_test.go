@@ -508,3 +508,139 @@ func TestMultipleRecords(t *testing.T) {
 		t.Error("db.other.net should still exist")
 	}
 }
+
+// TestDeleteRemovesAllDuplicates covers the case where OPNsense holds several
+// overrides for the same hostname/RR. Deleting only the first left the rest
+// answering with stale values and nothing else ever removed them.
+func TestDeleteRemovesAllDuplicates(t *testing.T) {
+	fake := newFakeOPNsense()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := p.Create(ctx, dns.Record{
+			Hostname: "dup.example.com",
+			Type:     "A",
+			Value:    fmt.Sprintf("10.0.0.%d", i+1),
+		}); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	fake.mu.Lock()
+	seeded := len(fake.store)
+	fake.mu.Unlock()
+	if seeded != 2 {
+		t.Fatalf("expected 2 duplicate overrides seeded, got %d", seeded)
+	}
+
+	if err := p.Delete(ctx, "dup.example.com", "A"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.store) != 0 {
+		t.Fatalf("expected 0 overrides after Delete, got %d: %+v", len(fake.store), fake.store)
+	}
+}
+
+// TestUpsertConvergesDuplicates checks that writing to a hostname that has
+// duplicate overrides leaves exactly one row behind, holding the new value.
+func TestUpsertConvergesDuplicates(t *testing.T) {
+	fake := newFakeOPNsense()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := p.Create(ctx, dns.Record{
+			Hostname: "dup.example.com",
+			Type:     "A",
+			Value:    fmt.Sprintf("10.0.0.%d", i+1),
+		}); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+
+	if err := p.Upsert(ctx, dns.Record{Hostname: "dup.example.com", Type: "A", Value: "10.0.0.99"}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.store) != 1 {
+		t.Fatalf("expected 1 override after Upsert, got %d: %+v", len(fake.store), fake.store)
+	}
+	for _, h := range fake.store {
+		if h.Server != "10.0.0.99" {
+			t.Errorf("surviving override has server %q, want 10.0.0.99", h.Server)
+		}
+	}
+}
+
+// TestUpsertUpdatePathCallCount pins the API cost of an update-path Upsert.
+// It used to be four calls: Exists fetched the full list, Update fetched it
+// again, then setHostOverride and a per-record reconfigure. It is now one list
+// fetch plus one write, with reconfigure deferred to Flush.
+func TestUpsertUpdatePathCallCount(t *testing.T) {
+	fake := newFakeOPNsense()
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL)
+	ctx := context.Background()
+
+	if err := p.Create(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	fake.mu.Lock()
+	fake.calls = nil
+	fake.mu.Unlock()
+
+	if err := p.Upsert(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.2"}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	fake.mu.Lock()
+	got := append([]string(nil), fake.calls...)
+	fake.mu.Unlock()
+
+	want := []string{
+		"GET /api/unbound/settings/searchHostOverride",
+		"POST /api/unbound/settings/setHostOverride/uuid-1",
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("update-path Upsert made %d calls %v, want %v", len(got), got, want)
+	}
+
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	fake.mu.Lock()
+	got = append([]string(nil), fake.calls[len(want):]...)
+	fake.mu.Unlock()
+	if len(got) != 1 || got[0] != "POST /api/unbound/service/reconfigure" {
+		t.Fatalf("Flush issued %v, want exactly one reconfigure", got)
+	}
+
+	// A second Flush with nothing staged must not reconfigure again.
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("second Flush: %v", err)
+	}
+	fake.mu.Lock()
+	n := len(fake.calls)
+	fake.mu.Unlock()
+	if n != len(want)+1 {
+		t.Fatalf("idle Flush issued extra calls: total %d, want %d", n, len(want)+1)
+	}
+}

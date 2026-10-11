@@ -36,11 +36,27 @@ type HTTPRouteReconciler struct {
 }
 
 // Reconcile implements controller-runtime's Reconciler interface.
-func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	var route gatewayv1.HTTPRoute
 	if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// The provider stages override changes and publishes them in a single apply
+	// at the end of the reconcile, so a route with N hostnames costs one
+	// reconfigure instead of N. Flushing on the error path as well keeps staged
+	// work from being stranded.
+	defer func() {
+		if ferr := r.DNS.Flush(ctx); ferr != nil {
+			r.Log.Error(ferr, "failed to publish staged DNS changes")
+			// Surfacing the failure is what makes controller-runtime requeue with
+			// backoff; logging it alone would leave the DNS change unpublished
+			// with no retry. An existing error already guarantees a requeue.
+			if err == nil {
+				err = ferr
+			}
+		}
+	}()
 
 	// The annotation records the hostnames this controller created DNS records
 	// for. It is the only source of truth that survives a hostname being edited

@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -26,6 +28,8 @@ type mockDNSProvider struct {
 	createdRecords  []dns.Record
 	upsertedRecords []dns.Record
 	deletedHosts    []string
+	flushes         int
+	flushErr        error
 }
 
 func (m *mockDNSProvider) Exists(_ context.Context, hostname, _ string) (bool, error) {
@@ -62,6 +66,13 @@ func (m *mockDNSProvider) Upsert(_ context.Context, record dns.Record) error {
 
 func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
 	return nil
+}
+
+func (m *mockDNSProvider) Flush(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.flushes++
+	return m.flushErr
 }
 
 func newTestDomainMap(t *testing.T) *config.DomainMap {
@@ -485,6 +496,52 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHTTPRouteReconciler_FlushFailureRequeues proves a failed apply is returned
+// rather than swallowed. Logging it alone would leave the override staged in
+// OPNsense's config, never published, with nothing to retry it.
+func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatalf("failed to install gateway-api scheme: %v", err)
+	}
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "flush-route",
+			Namespace:  "default",
+			Finalizers: []string{finalizerName},
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Hostnames: []gatewayv1.Hostname{"app.my-domain1.com"},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(route).
+		Build()
+
+	mock := &mockDNSProvider{flushErr: errors.New("reconfigure failed")}
+	reconciler := &HTTPRouteReconciler{
+		Client:    fakeClient,
+		APIReader: fakeClient,
+		Log:       zap.New(zap.UseDevMode(true)),
+		DomainMap: newTestDomainMap(t),
+		DNS:       mock,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "flush-route", Namespace: "default"},
+	}
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected the flush failure to be returned so the reconcile requeues")
+	}
+	if !strings.Contains(err.Error(), "reconfigure failed") {
+		t.Errorf("error = %v, want it to carry the flush failure", err)
 	}
 }
 
