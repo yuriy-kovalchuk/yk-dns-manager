@@ -57,7 +57,15 @@ dnsProvider:
   # -- Provider-specific connection settings. Each provider defines its own keys.
   settings:
     base_url: "https://opnsense.example.com/api"
+    # -- Disables TLS certificate verification. Keep this false: the API key and
+    # secret go out on every request, so an unverified TLS connection hands them
+    # to anyone who answers on the network path. For a self-signed appliance, pin
+    # its CA with ca_file below instead.
     skip_tls_verify: "false"
+    # -- Path inside the pod to a PEM CA bundle that signed the appliance
+    # certificate. Set it together with dnsProvider.caConfigMap, or mount your
+    # own volume. Mutually exclusive with skip_tls_verify.
+    ca_file: ""
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
     default_ttl: "300"
@@ -65,6 +73,10 @@ dnsProvider:
   # The secret's data will be injected as environment variables, which
   # can be referenced in settings via ${ENV_VAR} syntax.
   existingSecret: ""
+  # -- Name of an existing ConfigMap holding the appliance CA bundle under the
+  # key ca.pem. It is mounted read-only at /etc/yk-dns-manager/ca, so set
+  # settings.ca_file to /etc/yk-dns-manager/ca/ca.pem to use it.
+  caConfigMap: ""
 
 metrics:
   service:

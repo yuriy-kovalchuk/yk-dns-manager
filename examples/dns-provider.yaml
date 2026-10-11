@@ -2,7 +2,11 @@ provider: opnsense
 upsert: false
 settings:
   base_url: "https://opnsense.example.com/api"
-  skip_tls_verify: "true"
+  # Pin the appliance CA instead of turning verification off. The API key and
+  # secret go out on every request, so skip_tls_verify hands them to anyone who
+  # answers on the network path. In-cluster, set dnsProvider.caConfigMap in the
+  # chart and point ca_file at /etc/yk-dns-manager/ca/ca.pem.
+  ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
   default_ttl: "300"
