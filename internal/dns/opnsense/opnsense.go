@@ -155,7 +155,7 @@ func applyTLSConfig(transport *http.Transport, settings map[string]string, log l
 
 // doRequest builds and executes an HTTP request against the OPNsense API.
 func (p *Provider) doRequest(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
-	// Context cancellation is not an error — return nil immediately.
+	// Fail fast on a cancelled context instead of building a request.
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -438,7 +438,6 @@ func (p *Provider) updateOverride(ctx context.Context, uuid string, record dns.R
 	return nil
 }
 
-// Delete removes a DNS host override.
 // Delete removes every DNS host override matching hostname/recordType. The
 // changes are staged; call Flush to publish them.
 func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error {

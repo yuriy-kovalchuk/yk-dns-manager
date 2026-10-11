@@ -15,7 +15,8 @@ imagePullSecrets: []
 
 replicaCount: 1
 
-# -- Log level for the controller. Valid values are 'info' or 'debug'.
+# -- Log level for the controller: debug, info, warn, error, or a numeric logr
+# verbosity such as -3 for V(3).
 logLevel: info
 
 strategy:

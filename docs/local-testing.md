@@ -147,7 +147,7 @@ Copy the local profile and change only the backend:
 
 ```bash
 cp hack/local/dns-provider.yaml .developer/dns-provider.yaml
-# set settings.base_url to https://<appliance>/api
+# set settings.base_url to https://<appliance>/api and delete allow_insecure_http
 ```
 
 If the appliance uses a self-signed certificate, put its CA in a ConfigMap under

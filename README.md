@@ -58,13 +58,13 @@ The controller watches for the hostname `app.example.com`, looks up its IP from 
 Define which IPs hostnames should resolve to:
 
 ```yaml
-# configs/domain-map.yaml
+# examples/domain-map.yaml
 example.com: 10.0.0.1
 "*.homelab.local": 10.0.0.2
 "special.homelab.local": 10.0.0.3   # exact match wins over wildcard
 ```
 
-Matching priority: **exact** > **wildcard** > **parent domain walk**.
+Matching walks up the hostname one label at a time and returns the first hit. At each level an exact entry beats a wildcard, so the most specific entry wins. Two consequences: an entry such as `example.com` also covers every name under it, and `*.example.com` covers names at any depth (`a.b.example.com` too), unless something more specific matches first.
 
 ## Configuration
 
@@ -85,7 +85,7 @@ Matching priority: **exact** > **wildcard** > **parent domain walk**.
 ### DNS Provider Config
 
 ```yaml
-# configs/dns-provider.yaml
+# examples/dns-provider.yaml
 provider: opnsense
 upsert: false
 settings:
@@ -99,6 +99,7 @@ settings:
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
 - `upsert: true` updates existing records on every reconcile; when `false`, only creates missing records.
 - Settings support `${ENV_VAR}` expansion for credential injection. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
+- `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for the local fake.
 - `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
 
 Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
