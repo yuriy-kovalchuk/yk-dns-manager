@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,10 +75,8 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if v := settings["skip_tls_verify"]; v == "true" {
-		// Deliberate operator opt-in for OPNsense instances with self-signed certs.
-		// The chart must not default this to true; see the security hardening work.
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402
+	if err := applyTLSConfig(transport, settings, log); err != nil {
+		return nil, err
 	}
 
 	return &Provider{
@@ -87,6 +87,48 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		client:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:        log,
 	}, nil
+}
+
+// applyTLSConfig wires the two TLS knobs an operator controls.
+//
+// ca_file pins a private CA, which is the safe answer to a self-signed
+// appliance. skip_tls_verify switches verification off entirely and is loudly
+// discouraged: it removes the only defence against anyone on the network path
+// reading or forging the basic-auth credentials sent with every request.
+func applyTLSConfig(transport *http.Transport, settings map[string]string, log logr.Logger) error {
+	caFile := settings["ca_file"]
+	skipVerify := settings["skip_tls_verify"] == "true"
+
+	if caFile != "" && skipVerify {
+		return fmt.Errorf("opnsense: ca_file and skip_tls_verify are mutually exclusive; pin the CA with ca_file instead of disabling verification")
+	}
+	if caFile == "" && !skipVerify {
+		return nil
+	}
+
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if caFile != "" {
+		// #nosec G304 -- path comes from operator-set provider config, not request input
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return fmt.Errorf("opnsense: reading ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("opnsense: ca_file %q contains no valid PEM certificate", caFile)
+		}
+		cfg.RootCAs = pool
+		log.V(1).Info("opnsense: pinning appliance CA", "ca_file", caFile)
+	}
+
+	if skipVerify {
+		log.Info("opnsense: skip_tls_verify is ENABLED - TLS certificates are not verified, so the API credentials are sent to anyone who answers on the network path. Set ca_file to pin the appliance CA instead.")
+		cfg.InsecureSkipVerify = true // #nosec G402 -- deliberate operator opt-in, warned on every startup
+	}
+
+	transport.TLSClientConfig = cfg
+	return nil
 }
 
 // doRequest builds and executes an HTTP request against the OPNsense API.
@@ -178,8 +220,6 @@ type hostRow struct {
 	Server   string `json:"server"`
 }
 
-// findOverride searches for an existing host override matching hostname and record type.
-// Returns the UUID if found, or empty string if not.
 // findOverrides returns the UUID of every host override matching fqdn/recordType.
 // OPNsense accepts several overrides for the same name, so more than one is
 // possible and every caller has to account for it.

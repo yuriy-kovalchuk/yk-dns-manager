@@ -87,6 +87,11 @@ spec:
             - name: dns-provider
               mountPath: /etc/yk-dns-manager/dns-provider
               readOnly: true
+            {{- if .Values.dnsProvider.caConfigMap }}
+            - name: dns-ca
+              mountPath: /etc/yk-dns-manager/ca
+              readOnly: true
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -98,6 +103,11 @@ spec:
         - name: dns-provider
           configMap:
             name: {{ include "yk-dns-manager.fullname" . }}-dns-provider
+        {{- if .Values.dnsProvider.caConfigMap }}
+        - name: dns-ca
+          configMap:
+            name: {{ .Values.dnsProvider.caConfigMap }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

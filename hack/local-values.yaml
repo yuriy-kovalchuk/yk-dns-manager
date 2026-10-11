@@ -12,11 +12,16 @@ dnsProvider:
   upsert: true
   settings:
     base_url: "https://your-opnsense.local/api"
-    skip_tls_verify: "true"
+    # Create a ConfigMap holding the appliance CA under the key ca.pem, name it
+    # in caConfigMap below, and point ca_file at the mount. Never set
+    # skip_tls_verify: true, not even locally — the credentials go out on every
+    # request.
+    ca_file: "/etc/yk-dns-manager/ca/ca.pem"
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
     default_ttl: "60"
   existingSecret: yk-dns-manager-credentials
+  # caConfigMap: opnsense-ca
 
 resources:
   limits:

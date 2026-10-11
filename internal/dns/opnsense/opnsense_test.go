@@ -1,6 +1,8 @@
 package opnsense
 
 import (
+	"crypto/tls"
+	"net/http"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -104,7 +106,30 @@ func TestNew_SkipTLSVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.client == nil {
-		t.Fatal("expected non-nil HTTP client")
+	transport, ok := p.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", p.client.Transport)
+	}
+	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("expected InsecureSkipVerify to be set on the transport")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion = %d, want TLS 1.2 (%d)", transport.TLSClientConfig.MinVersion, tls.VersionTLS12)
+	}
+
+	// A default configuration must leave verification untouched, so the system
+	// root pool stays in play. Clone() always yields a non-nil TLSClientConfig,
+	// so assert on the fields rather than the pointer.
+	delete(settings, "skip_tls_verify")
+	p, err = New(logr.Discard(), settings)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	transport = p.client.Transport.(*http.Transport)
+	if transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify must be false by default")
+	}
+	if transport.TLSClientConfig.RootCAs != nil {
+		t.Error("RootCAs must be nil by default so the system roots are used")
 	}
 }
