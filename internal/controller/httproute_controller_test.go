@@ -430,8 +430,16 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 			wantDeleted: nil,
 		},
 		{
-			// A hostname that left the domain map is invisible to the spec path,
-			// so only the annotation can find it.
+			// A hostname written into the annotation that the domain map does
+			// not cover is not deleted, but the finalizer still comes off.
+			name:        "annotation names a hostname outside the domain map",
+			hostnames:   []string{"app.my-domain1.com"},
+			annotation:  `["app.my-domain1.com", "vpn.corp.example"]`,
+			wantDeleted: []string{"app.my-domain1.com"},
+		},
+		{
+			// A hostname that left the spec is invisible to the spec path, so
+			// only the annotation can find it.
 			name:        "spec and annotation disagree",
 			hostnames:   []string{"app.my-domain1.com", "gone.example.net"},
 			annotation:  `["app.my-domain1.com", "api.my-domain2.it"]`,
@@ -574,11 +582,23 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 		{
 			name: "hostname removed from domain map",
 			// The spec still names api.my-domain2.it, but the map no longer
-			// resolves it, so the record is no longer wanted.
+			// resolves it. The annotation alone cannot authorize deleting a
+			// name outside the map, so the record is left for the operator
+			// and the route stops claiming it.
 			domainMap:   "my-domain1.com: 10.0.8.100\n",
 			hostnames:   []string{"app.my-domain1.com", "api.my-domain2.it"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
-			wantDeleted: []string{"api.my-domain2.it"},
+			wantDeleted: nil,
+			wantOwned:   `["app.my-domain1.com"]`,
+		},
+		{
+			// Anyone who can edit the route can write the annotation, so a name
+			// the domain map does not cover must never be deleted through it.
+			name:        "annotation names a hostname outside the domain map",
+			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			hostnames:   []string{"app.my-domain1.com"},
+			annotation:  `["app.my-domain1.com","vpn.corp.example"]`,
+			wantDeleted: nil,
 			wantOwned:   `["app.my-domain1.com"]`,
 		},
 		{
