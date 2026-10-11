@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # ─── Build ────────────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+# Go patch pin must stay equal to the go.mod `go` directive and the CI setup-go
+# `go-version`: govulncheck judges the stdlib of the toolchain that builds the
+# image, so a floating minor silently reintroduces fixed CVEs. Keep the
+# golangci-lint pin in the Makefile built with at least this Go — it refuses
+# modules newer than its own build.
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS builder
 
 WORKDIR /src
 

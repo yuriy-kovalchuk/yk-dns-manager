@@ -16,7 +16,10 @@ KIND_CONFIG         := hack/kind-config.yaml
 GATEWAY_API_VERSION ?= v1.4.1
 
 LOCALBIN              ?= $(shell pwd)/bin
-GOLANGCI_LINT_VERSION ?= v2.11.4
+# golangci-lint refuses to load a module whose Go version is newer than the Go
+# it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright.
+# v2.14.0 is built with go1.27.0. Keep this >= the go.mod go directive.
+GOLANGCI_LINT_VERSION ?= v2.14.0
 
 VERSION_PKG := github.com/yuriy-kovalchuk/yk-dns-manager/internal/version
 
@@ -181,7 +184,10 @@ $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
 $(LOCALBIN)/golangci-lint: $(LOCALBIN)
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | \
+	# Install script pinned to the same tag as the binary. `master/install.sh`
+	# is both unpinned (supply chain) and broken for v2.14.0: its checksum grep
+	# also matches the `.sbom.json` asset and then compares the wrong hash.
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/$(GOLANGCI_LINT_VERSION)/install.sh | \
 		sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION)
 
 ## help: print this help text

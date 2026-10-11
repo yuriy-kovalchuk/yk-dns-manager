@@ -1,6 +1,6 @@
 module github.com/yuriy-kovalchuk/yk-dns-manager
 
-go 1.26.0
+go 1.27.2
 
 require (
 	github.com/go-logr/logr v1.4.3
