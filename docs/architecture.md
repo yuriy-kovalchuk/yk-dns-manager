@@ -36,17 +36,18 @@ The controller is a **single-reconciler** design: one `HTTPRouteReconciler` hand
 **Provider interface** (in `internal/dns/provider.go`):
 ```go
 type Provider interface {
-    Exists(ctx context.Context, hostname, recordType string) (bool, error)
-    Create(ctx context.Context, record Record) error
-    Update(ctx context.Context, record Record) error
-    Delete(ctx context.Context, hostname, recordType string) error
-    Upsert(ctx context.Context, record Record) error
     HealthCheck(ctx context.Context) error
-    Flush(ctx context.Context) error
+    Batch() Batch
+}
+
+type Batch interface {
+    Ensure(ctx context.Context, record Record, overwrite bool) (Result, error)
+    Remove(ctx context.Context, hostname, recordType string) error
+    Commit(ctx context.Context) error
 }
 ```
 
-Each provider implements all seven methods. `Create`, `Update`, `Delete` and `Upsert` may stage their changes; `Flush` publishes them, and the controller calls it once at the end of every reconcile. The controller delegates DNS CRUD entirely to the selected provider — it never knows which backend is in use.
+The controller starts one `Batch` per reconcile. A batch reads the backend's records once, on first use, and works from that view, so a route with any number of hostnames costs one read. `Ensure` makes a hostname resolve to a value. It returns `Created`, `Updated`, `Unchanged` (nothing written) or `Kept` (a live record with another value, left alone because `overwrite` is off), and it writes nothing when the record already matches. `Commit` publishes whatever is staged and not yet published, including changes from earlier batches whose publish failed. The controller delegates DNS entirely to the selected provider — it never knows which backend is in use.
 
 ## Data Flow
 
@@ -56,7 +57,7 @@ Each provider implements all seven methods. `Create`, `Update`, `Delete` and `Up
 2. **Read route** — uses `APIReader` (bypasses cache) for read-after-write consistency during conflict retries.
 3. **Filter by domain map** — hostnames that have no entry in the domain map are silently skipped. This lets a single controller serve multiple load balancers via different domain maps.
 4. **If deletion timestamp set:** remove DNS records, then remove the finalizer (`dns.yk/cleanup`). If record deletion fails, errors are logged but never block the finalizer — the route must always be removed.
-5. **If new or updated:** add finalizer (first reconcile), then create/update DNS records for matching hostnames via `DNS.Create`/`DNS.Upsert`.
+5. **If new or updated:** add finalizer (first reconcile), then `Ensure` a record for each matching hostname, with overwrite set from `upsert`, and `Commit` the batch at the end of the reconcile.
 6. **Update annotation** (`dns.yk/managed-hostnames`) tracks which hostnames have actual DNS records for comparison on subsequent reconciles.
 
 Anyone who can edit a route can write that annotation, so on its own it never authorizes a delete. Both cleanup paths only delete annotated hostnames the domain map covers. As a result, when a domain is dropped from the map, records already created under it are left in place and logged, to be removed by hand.
@@ -115,12 +116,14 @@ The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap c
 
 Three steps, no changes to the controller needed:
 
-**1. Implement the `Provider` interface:**
+**1. Implement the `Provider` and `Batch` interfaces:**
 ```go
 package myprovider
 
 import (
     "context"
+
+    "github.com/go-logr/logr"
     "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
@@ -128,14 +131,17 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) { /* ..
 
 type Provider struct { /* ... */ }
 
-func (p *Provider) Exists(ctx context.Context, hostname, recordType string) (bool, error) { /* ... */ }
-func (p *Provider) Create(ctx context.Context, record dns.Record) error                   { /* ... */ }
-func (p *Provider) Update(ctx context.Context, record dns.Record) error                   { /* ... */ }
-func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error          { /* ... */ }
-func (p *Provider) Upsert(ctx context.Context, record dns.Record) error                   { /* ... */ }
-func (p *Provider) HealthCheck(ctx context.Context) error                                 { /* ... */ }
-func (p *Provider) Flush(ctx context.Context) error                                       { /* ... */ }
+func (p *Provider) HealthCheck(ctx context.Context) error { /* ... */ }
+func (p *Provider) Batch() dns.Batch                      { /* ... */ }
+
+type batch struct { /* ... */ }
+
+func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (dns.Result, error) { /* ... */ }
+func (b *batch) Remove(ctx context.Context, hostname, recordType string) error                    { /* ... */ }
+func (b *batch) Commit(ctx context.Context) error                                                 { /* ... */ }
 ```
+
+A backend that applies every write immediately can make `Commit` a no-op. `test/integration` shows the behaviour a provider is expected to have.
 
 **2. Register it in `main()`:**
 ```go
