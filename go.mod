@@ -3,12 +3,12 @@ module github.com/yuriy-kovalchuk/yk-dns-manager
 go 1.27.2
 
 require (
-	github.com/go-logr/logr v1.4.3
-	go.yaml.in/yaml/v3 v3.0.4
+	github.com/go-logr/logr v1.4.4
+	go.yaml.in/yaml/v3 v3.0.5
 	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.1
 	sigs.k8s.io/controller-runtime v0.25.2
-	sigs.k8s.io/gateway-api v1.5.1
+	sigs.k8s.io/gateway-api v1.6.3
 )
 
 require (
@@ -26,7 +26,6 @@ require (
 	github.com/go-openapi/swag/cmdutils v0.27.1 // indirect
 	github.com/go-openapi/swag/conv v0.27.1 // indirect
 	github.com/go-openapi/swag/fileutils v0.27.1 // indirect
-	github.com/go-openapi/swag/jsonname v0.25.4 // indirect
 	github.com/go-openapi/swag/jsonutils v0.27.1 // indirect
 	github.com/go-openapi/swag/loading v0.27.1 // indirect
 	github.com/go-openapi/swag/mangling v0.27.1 // indirect

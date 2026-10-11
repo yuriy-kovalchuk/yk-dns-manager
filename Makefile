@@ -13,7 +13,10 @@ CHART_DIR  := charts/$(APP_NAME)
 
 KIND_CLUSTER        ?= yk-dns-manager-dev
 KIND_CONFIG         := hack/kind-config.yaml
-GATEWAY_API_VERSION ?= v1.4.1
+# Must match the sigs.k8s.io/gateway-api version in go.mod: the controller is
+# compiled against these types, and CRDs two minor versions behind silently
+# prune fields the reconciler reads.
+GATEWAY_API_VERSION ?= v1.6.3
 
 LOCALBIN              ?= $(shell pwd)/bin
 # golangci-lint refuses to load a module whose Go version is newer than the Go
