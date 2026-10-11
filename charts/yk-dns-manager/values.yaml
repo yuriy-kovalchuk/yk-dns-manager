@@ -96,6 +96,19 @@ networkPolicy:
   #         matchLabels:
   #           kubernetes.io/metadata.name: monitoring
   metricsIngress: []
+  # -- Egress to the Kubernetes API server. Most CNIs (Calico, Cilium) evaluate
+  # egress after the kubernetes Service is translated to its endpoint, so the
+  # endpoint port has to be allowed, not just the Service port 443: kubeadm,
+  # k3s and Talos serve on 6443. cidrs narrows the destination; empty means any.
+  apiServer:
+    ports: [443, 6443]
+    cidrs: []
+  # -- Egress to the DNS provider API. Set ports to the port in
+  # dnsProvider.settings.base_url when the appliance does not serve on 443, and
+  # cidrs to its address to keep the controller from reaching anything else.
+  provider:
+    ports: [443]
+    cidrs: []
 
 serviceMonitor:
   # -- If true, create a Prometheus ServiceMonitor resource.
