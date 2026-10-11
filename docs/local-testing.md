@@ -35,8 +35,21 @@ in-memory appliance both paths below use. That is most of the surface area.
 
 ## When something is not doing what you expect
 
-```bash
-make kind-status
+Example provider config:
+
+```yaml
+# examples/dns-provider.yaml
+provider: opnsense
+upsert: true
+settings:
+  base_url: "https://opnsense.example.com/api"
+  # Point this at the appliance's CA bundle; running locally it can be a file on
+  # your own machine. Do not reach for skip_tls_verify to work around a
+  # self-signed certificate — the API credentials go out on every request.
+  ca_file: "./opnsense-ca.pem"
+  api_key: ""       # or hardcode for local dev
+  api_secret: ""
+  default_ttl: "60"
 ```
 
 ```

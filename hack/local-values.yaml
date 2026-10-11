@@ -13,18 +13,16 @@ dnsProvider:
   provider: opnsense
   upsert: true
   settings:
-    # `make kind-fake-install` runs the in-memory fake inside the cluster. A pod
-    # cannot reach the host's 127.0.0.1, so use the Service DNS name.
-    base_url: "http://fake-opnsense.yk-dns-manager-system.svc.cluster.local:8053/api"
+    base_url: "https://your-opnsense.local/api"
+    # Create a ConfigMap holding the appliance CA under the key ca.pem, name it
+    # in caConfigMap below, and point ca_file at the mount. Never set
+    # skip_tls_verify: true, not even locally — the credentials go out on every
+    # request.
+    ca_file: "/etc/yk-dns-manager/ca/ca.pem"
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
     default_ttl: "60"
   existingSecret: yk-dns-manager-credentials
-  # Against a real appliance with a self-signed certificate, put its CA in a
-  # ConfigMap under the key ca.pem, name that ConfigMap here, and add
-  # ca_file: "/etc/yk-dns-manager/ca/ca.pem" to settings above. Never set
-  # skip_tls_verify: true, not even locally — the credentials go out on every
-  # request.
   # caConfigMap: opnsense-ca
 
 resources:
