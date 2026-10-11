@@ -9,6 +9,7 @@
 package envtest
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -117,6 +118,9 @@ func gatewayCRDDir() (string, error) {
 type harnessOptions struct {
 	domainMap string
 	upsert    bool
+	// cleanupGrace defaults to 30s, long enough for any test that waits for
+	// a failing cleanup to recover.
+	cleanupGrace time.Duration
 }
 
 // harness is one running controller, watching its own namespace and talking to
@@ -192,6 +196,8 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		DomainMap: domainMap,
 		DNS:       provider,
 		Upsert:    opts.upsert,
+
+		CleanupGracePeriod: cmp.Or(opts.cleanupGrace, 30*time.Second),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		t.Fatalf("setting up reconciler: %v", err)

@@ -97,9 +97,10 @@ func main() {
 
 func run() error {
 	var (
-		logLevel      string
-		domainMapPath string
-		domainMap     *config.DomainMap
+		logLevel           string
+		domainMapPath      string
+		domainMap          *config.DomainMap
+		cleanupGracePeriod time.Duration
 	)
 
 	ctx := context.Background()
@@ -107,6 +108,7 @@ func run() error {
 
 	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
+	flag.DurationVar(&cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
 	flag.Parse()
 
 	level, err := parseLogLevel(logLevel)
@@ -190,6 +192,8 @@ func run() error {
 		DomainMap: domainMap,
 		DNS:       dnsProvider,
 		Upsert:    providerCfg.Upsert,
+
+		CleanupGracePeriod: cleanupGracePeriod,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to set up HTTPRoute controller: %w", err)

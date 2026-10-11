@@ -191,12 +191,10 @@ func TestDisabledManagedRecordIsReenabled(t *testing.T) {
 	})
 }
 
-// TestDeleteIsPublishedAfterReconfigureRecovers: when reconfigure fails during
-// route deletion the finalizer is already gone, the retry finds no route and
-// returns before flushing, and the deleted record keeps resolving.
+// TestDeleteIsPublishedAfterReconfigureRecovers is audit B9: when reconfigure
+// fails during route deletion, the route is held until the deletion is
+// published, instead of disappearing while its record keeps resolving.
 func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
-	pending(t, "audit B9, roadmap phase 4")
-
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("app", []string{"app.example.com"})
 	h.eventually("app.example.com published", func() bool {
@@ -205,12 +203,15 @@ func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 
 	h.fake.SetFailure(testenv.EndpointReconfigure, http.StatusServiceUnavailable)
 	h.deleteRoute("app")
-	h.waitRouteGone("app")
+	h.consistently("the route is held while the deletion cannot be published", func() bool {
+		return h.getRoute("app") != nil
+	})
 	h.fake.SetFailure(testenv.EndpointReconfigure, 0)
 
-	h.eventually("app.example.com unpublished once reconfigure recovers", func() bool {
-		return len(rows(h.fake.Published(), "app.example.com")) == 0
-	})
+	h.waitRouteGone("app")
+	if len(rows(h.fake.Published(), "app.example.com")) != 0 {
+		t.Fatal("the route is gone but its record is still published")
+	}
 }
 
 // TestUnacceptedRouteGetsNoRecord: a route no Gateway admitted still gets DNS,
