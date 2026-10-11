@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,6 +96,20 @@ func run() error {
 	domainMap, err = config.LoadDomainMap(domainMapPath)
 	if err != nil {
 		return fmt.Errorf("unable to load domain map: %w", err)
+	}
+
+	// Log what the controller will actually manage. A domain map that silently
+	// matches nothing is the most common way this controller appears to do
+	// nothing, so the count goes at info level and the pairs at debug.
+	entries := domainMap.Entries()
+	log.Info("loaded domain map", "path", domainMapPath, "entries", len(entries))
+	domains := make([]string, 0, len(entries))
+	for d := range entries {
+		domains = append(domains, d)
+	}
+	sort.Strings(domains)
+	for _, d := range domains {
+		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
 	}
 
 	providerCfg, err := config.LoadProviderConfig()

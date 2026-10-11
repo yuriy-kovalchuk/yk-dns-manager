@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,8 +19,101 @@ func TestLoadDomainMap(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(dm.Domains()) != 2 {
-		t.Fatalf("expected 2 domains, got %d", len(dm.Domains()))
+	if len(dm.Entries()) != 2 {
+		t.Fatalf("expected 2 domains, got %d", len(dm.Entries()))
+	}
+}
+
+// TestLoadDomainMapValidation pins the startup checks. Every case below used to
+// load successfully and then either produce a broken DNS record or leave a
+// controller running that manages nothing.
+func TestLoadDomainMapValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		contains string
+	}{
+		{
+			name:     "empty file",
+			content:  "",
+			contains: "no entries",
+		},
+		{
+			name:     "null document",
+			content:  "null\n",
+			contains: "no entries",
+		},
+		{
+			name:     "not a mapping",
+			content:  "- a\n- b\n",
+			contains: "parsing domain map file",
+		},
+		{
+			// yaml.v3 rejects this already; asserted so a dependency change
+			// cannot quietly start letting the last entry win.
+			name:     "duplicate keys",
+			content:  "\"a.com\": \"10.0.0.1\"\n\"a.com\": \"10.0.0.2\"\n",
+			contains: "already defined",
+		},
+		{
+			name:     "value is not an IP",
+			content:  "a.com: not-an-ip\n",
+			contains: "not a valid IP address",
+		},
+		{
+			name:     "value is a hostname",
+			content:  "a.com: lb.example.com\n",
+			contains: "not a valid IP address",
+		},
+		{
+			name:     "value is empty",
+			content:  "a.com: \"\"\n",
+			contains: "not a valid IP address",
+		},
+		{
+			// The record type is hardcoded to A, so an IPv6 value would be
+			// written into an A record.
+			name:     "IPv6 value",
+			content:  "a.com: 2001:db8::1\n",
+			contains: "not IPv4",
+		},
+		{
+			name:     "empty domain key",
+			content:  "\"\": \"10.0.0.1\"\n",
+			contains: "empty domain key",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "domain-map.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadDomainMap(path)
+			if err == nil {
+				t.Fatalf("expected %s to be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.contains) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.contains)
+			}
+		})
+	}
+}
+
+func TestLoadDomainMapNormalizesValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domain-map.yaml")
+	if err := os.WriteFile(path, []byte("a.com: \" 10.0.8.100 \"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dm, err := LoadDomainMap(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := dm.Entries()["a.com"]; got != "10.0.8.100" {
+		t.Errorf("value = %q, want the canonical 10.0.8.100", got)
 	}
 }
 
