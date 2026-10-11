@@ -2,10 +2,12 @@ package envtest
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
@@ -111,4 +113,58 @@ func TestRecordPublishedAfterReconfigureRecovers(t *testing.T) {
 	h.eventually("app.example.com published after recovery", func() bool {
 		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
 	})
+}
+
+// legacy is an override written by a controller version from before
+// ownership was marked.
+func legacy(hostname, domain, ip string) testenv.HostOverride {
+	return testenv.HostOverride{
+		Enabled: "1", Hostname: hostname, Domain: domain, RR: "A", Server: ip,
+		Description: opnsense.LegacyDescription,
+	}
+}
+
+// TestLegacyRecordIsAdoptedByItsRoute covers the upgrade path: a route that
+// recorded owning a name before ownership was marked adopts its record, which
+// is rewritten with the ownership marker.
+func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.fake.Seed(legacy("app", "example.com", "10.0.0.1"))
+
+	h.createRoute("app", []string{"app.example.com"})
+	h.updateRoute("app", func(r *gatewayv1.HTTPRoute) {
+		r.Finalizers = append(r.Finalizers, finalizerName)
+		r.Annotations = map[string]string{managedHostnamesAnnotation: `["app.example.com"]`}
+	})
+
+	h.eventually("app.example.com adopted with the ownership marker", func() bool {
+		r := rows(h.fake.Published(), "app.example.com")
+		return len(r) == 1 && r[0].Description == opnsense.ManagedDescription
+	})
+	h.waitOwned("app", `["app.example.com"]`)
+}
+
+// TestLegacyRecordIsNotAdoptedByANewRoute: a route that never recorded owning
+// a name cannot take over a legacy record for it. It is a conflict, and the
+// name stays out of the route's annotation so no later reconcile adopts it.
+func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.fake.Seed(legacy("app", "example.com", "10.0.0.50"))
+
+	h.createRoute("app", []string{"app.example.com"})
+	h.waitFinalizer("app")
+	h.waitReconciled()
+
+	h.consistently("the legacy record is untouched and not claimed", func() bool {
+		r := rows(h.fake.Snapshot(), "app.example.com")
+		route := h.getRoute("app")
+		return len(r) == 1 && r[0].Server == "10.0.0.50" && r[0].Description == opnsense.LegacyDescription &&
+			route != nil && !strings.Contains(route.Annotations[managedHostnamesAnnotation], "app.example.com")
+	})
+
+	h.deleteRoute("app")
+	h.waitRouteGone("app")
+	if len(rows(h.fake.Snapshot(), "app.example.com")) != 1 {
+		t.Fatal("deleting the route removed a legacy record it never owned")
+	}
 }

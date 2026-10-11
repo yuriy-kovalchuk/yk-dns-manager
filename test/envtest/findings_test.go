@@ -8,6 +8,7 @@ import (
 	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
@@ -105,8 +106,6 @@ func TestAnnotationCannotDeleteForeignRecords(t *testing.T) {
 // TestUnmanagedRecordIsNotOverwritten: in upsert mode a route claiming a name
 // that already has a hand-made override repoints it at the gateway.
 func TestUnmanagedRecordIsNotOverwritten(t *testing.T) {
-	pending(t, "audit S2, roadmap phase 3")
-
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(handMade("nas", "example.com", "10.0.0.50"))
 
@@ -122,8 +121,6 @@ func TestUnmanagedRecordIsNotOverwritten(t *testing.T) {
 // override is left alone, but the name is still recorded as owned, so deleting
 // the route deletes the hand-made override.
 func TestUnmanagedRecordSurvivesRouteDeletion(t *testing.T) {
-	pending(t, "audit S2, roadmap phase 3")
-
 	h := start(t, harnessOptions{domainMap: exampleMap})
 	h.fake.Seed(handMade("nas", "example.com", "10.0.0.50"))
 
@@ -143,8 +140,6 @@ func TestUnmanagedRecordSurvivesRouteDeletion(t *testing.T) {
 // each record it as owned, and deleting either removes the record the other
 // still needs.
 func TestSharedHostnameSurvivesOneRouteDeletion(t *testing.T) {
-	pending(t, "audit B1, roadmap phase 3")
-
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("blue", []string{"app.example.com"})
 	h.createRoute("green", []string{"app.example.com"})
@@ -186,7 +181,7 @@ func TestDisabledManagedRecordIsReenabled(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap})
 	h.fake.Seed(testenv.HostOverride{
 		Enabled: "0", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
-		Description: "managed by yk-dns-manager",
+		Description: opnsense.ManagedDescription,
 	})
 
 	h.createRoute("app", []string{"app.example.com"})

@@ -1,0 +1,271 @@
+// Package dnstest is the conformance suite for dns.Provider implementations.
+// A provider's tests call Run with an adapter over a test backend; the suite
+// pins the behaviour the controller relies on, ownership above all: a
+// provider must never change or delete a record it does not manage.
+package dnstest
+
+import (
+	"context"
+	"testing"
+
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+)
+
+// Origin says who a record belongs to.
+type Origin int
+
+const (
+	// Managed records carry the provider's ownership marker.
+	Managed Origin = iota
+	// Legacy records were written by a controller version that did not mark
+	// ownership.
+	Legacy
+	// Foreign records belong to someone else.
+	Foreign
+)
+
+// Record is an A record as the suite sees it on the backend.
+type Record struct {
+	FQDN     string
+	Value    string
+	Origin   Origin
+	Disabled bool
+}
+
+// Backend is the provider-specific side of the suite: direct access to the
+// test backend the provider under test talks to.
+type Backend interface {
+	// Seed writes a record straight to the backend, already live, as if it
+	// was there before the test.
+	Seed(t *testing.T, r Record)
+	// Stored returns every record for fqdn, published or not.
+	Stored(t *testing.T, fqdn string) []Record
+	// Live returns the records for fqdn the backend is currently serving,
+	// disabled ones included.
+	Live(t *testing.T, fqdn string) []Record
+}
+
+// Factory returns a provider and the empty backend it talks to.
+type Factory func(t *testing.T) (dns.Provider, Backend)
+
+const (
+	host  = "app.example.com"
+	other = "other.example.com"
+	ip    = "10.0.0.1"
+	newIP = "10.0.0.2"
+)
+
+// Run runs the conformance suite against the provider newBackend builds.
+func Run(t *testing.T, newBackend Factory) {
+	overwrite := dns.EnsureOptions{Overwrite: true}
+	createOnly := dns.EnsureOptions{}
+
+	t.Run("Ensure creates a managed record", func(t *testing.T) {
+		p, be := newBackend(t)
+		ensure(t, p, A(host, ip), createOnly, dns.Created)
+		expectLive(t, be, host, Record{FQDN: host, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Ensure on a matching record writes nothing", func(t *testing.T) {
+		for _, opts := range []dns.EnsureOptions{createOnly, overwrite} {
+			p, be := newBackend(t)
+			be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+			ensure(t, p, A(host, ip), opts, dns.Unchanged)
+		}
+	})
+
+	t.Run("Ensure with overwrite updates a managed record", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+		ensure(t, p, A(host, newIP), overwrite, dns.Updated)
+		expectLive(t, be, host, Record{FQDN: host, Value: newIP, Origin: Managed})
+	})
+
+	t.Run("Ensure without overwrite keeps a managed record's value", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+		ensure(t, p, A(host, newIP), createOnly, dns.Kept)
+		expectLive(t, be, host, Record{FQDN: host, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Ensure re-enables a disabled managed record", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed, Disabled: true})
+		ensure(t, p, A(host, ip), createOnly, dns.Updated)
+		expectLive(t, be, host, Record{FQDN: host, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Ensure never touches a live foreign record", func(t *testing.T) {
+		for _, opts := range []dns.EnsureOptions{createOnly, overwrite, {Overwrite: true, AdoptLegacy: true}} {
+			p, be := newBackend(t)
+			be.Seed(t, Record{FQDN: host, Value: newIP, Origin: Foreign})
+			ensure(t, p, A(host, ip), opts, dns.Conflict)
+			expectStored(t, be, Record{FQDN: host, Value: newIP, Origin: Foreign})
+		}
+	})
+
+	t.Run("Ensure ignores a disabled foreign record", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: newIP, Origin: Foreign, Disabled: true})
+		ensure(t, p, A(host, ip), createOnly, dns.Created)
+		expectLive(t, be, host,
+			Record{FQDN: host, Value: newIP, Origin: Foreign, Disabled: true},
+			Record{FQDN: host, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Ensure treats a legacy record as foreign unless adopting", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Legacy})
+		ensure(t, p, A(host, ip), overwrite, dns.Conflict)
+		expectStored(t, be, Record{FQDN: host, Value: ip, Origin: Legacy})
+	})
+
+	t.Run("Ensure adopts a legacy record when asked", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Legacy})
+		ensure(t, p, A(host, ip), dns.EnsureOptions{AdoptLegacy: true}, dns.Updated)
+		expectLive(t, be, host, Record{FQDN: host, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Ensure converges duplicate managed records", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+		be.Seed(t, Record{FQDN: host, Value: newIP, Origin: Managed})
+		ensure(t, p, A(host, newIP), overwrite, dns.Updated)
+		expectLive(t, be, host, Record{FQDN: host, Value: newIP, Origin: Managed})
+	})
+
+	t.Run("Remove deletes managed records only", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
+		be.Seed(t, Record{FQDN: host, Value: newIP, Origin: Foreign, Disabled: true})
+		be.Seed(t, Record{FQDN: other, Value: ip, Origin: Managed})
+		remove(t, p, false)
+		expectLive(t, be, host, Record{FQDN: host, Value: newIP, Origin: Foreign, Disabled: true})
+		expectLive(t, be, other, Record{FQDN: other, Value: ip, Origin: Managed})
+	})
+
+	t.Run("Remove leaves a foreign record", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Foreign})
+		remove(t, p, true)
+		expectStored(t, be, Record{FQDN: host, Value: ip, Origin: Foreign})
+	})
+
+	t.Run("Remove deletes a legacy record only when adopting", func(t *testing.T) {
+		p, be := newBackend(t)
+		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Legacy})
+		remove(t, p, false)
+		expectStored(t, be, Record{FQDN: host, Value: ip, Origin: Legacy})
+		remove(t, p, true)
+		expectLive(t, be, host)
+	})
+
+	t.Run("Remove of a missing record is not an error", func(t *testing.T) {
+		p, be := newBackend(t)
+		remove(t, p, true)
+		expectLive(t, be, host)
+	})
+
+	t.Run("A batch sees its own writes", func(t *testing.T) {
+		p, be := newBackend(t)
+		ctx := context.Background()
+		b := p.Batch()
+		steps := []func() error{
+			func() error { return expectResult(b.Ensure(ctx, A(host, ip), createOnly))(dns.Created) },
+			func() error { return expectResult(b.Ensure(ctx, A(host, ip), createOnly))(dns.Unchanged) },
+			func() error { return b.Remove(ctx, host, "A", false) },
+			func() error { return expectResult(b.Ensure(ctx, A(host, newIP), createOnly))(dns.Created) },
+		}
+		for i, step := range steps {
+			if err := step(); err != nil {
+				t.Fatalf("step %d: %v", i, err)
+			}
+		}
+		if err := b.Commit(ctx); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		expectLive(t, be, host, Record{FQDN: host, Value: newIP, Origin: Managed})
+	})
+}
+
+// A is an A record for fqdn.
+func A(fqdn, value string) dns.Record {
+	return dns.Record{Hostname: fqdn, Type: "A", Value: value}
+}
+
+// ensure runs Ensure in its own committed batch and checks the result.
+func ensure(t *testing.T, p dns.Provider, rec dns.Record, opts dns.EnsureOptions, want dns.Result) {
+	t.Helper()
+	ctx := context.Background()
+	b := p.Batch()
+	if err := expectResult(b.Ensure(ctx, rec, opts))(want); err != nil {
+		t.Fatalf("Ensure(%s, %+v): %v", rec.Hostname, opts, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+// remove runs Remove for host in its own committed batch.
+func remove(t *testing.T, p dns.Provider, adoptLegacy bool) {
+	t.Helper()
+	ctx := context.Background()
+	b := p.Batch()
+	if err := b.Remove(ctx, host, "A", adoptLegacy); err != nil {
+		t.Fatalf("Remove(%s): %v", host, err)
+	}
+	if err := b.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+type resultError struct{ got, want dns.Result }
+
+func (e resultError) Error() string { return "result " + e.got.String() + ", want " + e.want.String() }
+
+func expectResult(got dns.Result, err error) func(dns.Result) error {
+	return func(want dns.Result) error {
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return resultError{got, want}
+		}
+		return nil
+	}
+}
+
+func expectLive(t *testing.T, be Backend, fqdn string, want ...Record) {
+	t.Helper()
+	expectSet(t, "live", be.Live(t, fqdn), want)
+}
+
+// expectStored checks every record for host, published or not.
+func expectStored(t *testing.T, be Backend, want ...Record) {
+	t.Helper()
+	expectSet(t, "stored", be.Stored(t, host), want)
+}
+
+// expectSet compares records ignoring order.
+func expectSet(t *testing.T, what string, got, want []Record) {
+	t.Helper()
+	remaining := append([]Record(nil), got...)
+	for _, w := range want {
+		found := false
+		for i, g := range remaining {
+			if g == w {
+				remaining = append(remaining[:i], remaining[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s records = %+v, want %+v", what, got, want)
+		}
+	}
+	if len(remaining) > 0 {
+		t.Fatalf("%s records = %+v, want %+v", what, got, want)
+	}
+}
