@@ -30,6 +30,17 @@ const (
 	reconfigurePath = "unbound/service/reconfigure"
 )
 
+// Descriptions that mark an override as the controller's. The description is
+// the only field OPNsense lets the controller tag a row with, and route
+// editors cannot write it, so it is what decides which rows may be changed.
+const (
+	// ManagedDescription is written on every override the controller manages.
+	ManagedDescription = "yk-dns-manager: managed record, do not edit"
+	// LegacyDescription is what versions before ownership marking wrote. A row
+	// carrying it is only treated as managed when the caller adopts it.
+	LegacyDescription = "managed by yk-dns-manager"
+)
+
 // Bounds on how much of an OPNsense response body is read, so a hostile or
 // misbehaving appliance cannot exhaust the pod's memory. 8MiB covers tens of
 // thousands of override rows at roughly 200 bytes each.
@@ -281,12 +292,12 @@ type hostRow struct {
 	MX          string `json:"mx"`
 }
 
-// rowFor is the override record asks for.
+// rowFor is the managed override record asks for.
 func rowFor(record dns.Record) hostRow {
 	host, domain := splitHostname(record.Hostname)
 	return hostRow{
 		Enabled: "1", Hostname: host, Domain: domain, RR: record.Type,
-		Server: record.Value, Description: record.Meta["description"],
+		Server: record.Value, Description: ManagedDescription,
 	}
 }
 
@@ -298,6 +309,11 @@ func splitHostname(fqdn string) (hostname, domain string) {
 }
 
 func (r hostRow) enabled() bool { return r.Enabled == "1" }
+
+// ours reports whether the controller may change or delete the row.
+func (r hostRow) ours(adoptLegacy bool) bool {
+	return r.Description == ManagedDescription || (adoptLegacy && r.Description == LegacyDescription)
+}
 
 // is reports whether the row is the override want names.
 func (r hostRow) is(want hostRow) bool {
@@ -363,17 +379,30 @@ func (b *batch) remove(ctx context.Context, uuid string) error {
 
 // Ensure implements dns.Batch.
 //
+// Only rows carrying the managed marker (or the legacy one, when adopted) are
+// ever changed. An enabled row without it is someone else's record for the
+// name, and Ensure reports a conflict rather than shadow or replace it.
+//
 // OPNsense accepts several overrides for one name, and a stale duplicate keeps
 // answering after the live one is updated. Whenever Ensure writes, it first
-// removes every override for the name except the one it keeps.
-func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (dns.Result, error) {
+// removes every managed override for the name except the one it keeps.
+func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) {
 	if err := b.load(ctx); err != nil {
 		return 0, err
 	}
 	want := rowFor(record)
 
-	existing := b.find(want)
-	if len(existing) == 0 {
+	var ours []hostRow
+	for _, r := range b.find(want) {
+		switch {
+		case r.ours(opts.AdoptLegacy):
+			ours = append(ours, r)
+		case r.enabled():
+			return dns.Conflict, nil
+		}
+	}
+
+	if len(ours) == 0 {
 		res, err := b.p.write(ctx, addPath, map[string]hostRow{"host": want}, "saved")
 		if err != nil {
 			return 0, err
@@ -384,33 +413,30 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (
 		return dns.Created, nil
 	}
 
-	keep := existing[0]
-	if i := slices.IndexFunc(existing, hostRow.enabled); i >= 0 {
-		keep = existing[i]
+	keep := ours[0]
+	if i := slices.IndexFunc(ours, hostRow.enabled); i >= 0 {
+		keep = ours[i]
 	}
 
-	// A disabled override answers nothing, so it does not count as a live
-	// record that create-only mode must leave alone.
-	if !overwrite && keep.enabled() {
-		if keep.matches(want) {
-			return dns.Unchanged, nil
-		}
+	// A disabled override answers nothing, so only a live one holding another
+	// value is something create-only mode must leave alone.
+	if !opts.Overwrite && keep.enabled() && keep.Server != want.Server {
 		return dns.Kept, nil
 	}
 
-	for _, r := range existing {
+	for _, r := range ours {
 		if r.UUID != keep.UUID {
 			if err := b.remove(ctx, r.UUID); err != nil {
 				return 0, err
 			}
 		}
 	}
-	if removed := len(existing) - 1; removed > 0 {
+	if removed := len(ours) - 1; removed > 0 {
 		b.p.log.Info("removed duplicate host overrides", "hostname", record.Hostname, "removed", removed)
 	}
 
 	if keep.matches(want) {
-		if len(existing) > 1 {
+		if len(ours) > 1 {
 			return dns.Updated, nil
 		}
 		return dns.Unchanged, nil
@@ -425,11 +451,14 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (
 }
 
 // Remove implements dns.Batch.
-func (b *batch) Remove(ctx context.Context, hostname, recordType string) error {
+func (b *batch) Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error {
 	if err := b.load(ctx); err != nil {
 		return err
 	}
 	for _, r := range b.find(rowFor(dns.Record{Hostname: hostname, Type: recordType})) {
+		if !r.ours(adoptLegacy) {
+			continue
+		}
 		if err := b.remove(ctx, r.UUID); err != nil {
 			return err
 		}

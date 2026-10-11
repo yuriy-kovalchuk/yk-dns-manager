@@ -15,6 +15,10 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
+// These tests pin what is specific to OPNsense: the wire format, how many
+// calls a batch makes, and publishing through reconfigure. The provider
+// contract itself is covered by the conformance suite (conformance_test.go).
+
 // newFake returns a fake appliance that only accepts the credentials
 // newProvider sends, so every test also proves the provider authenticates.
 func newFake(t *testing.T) (*testenv.OPNsense, string) {
@@ -41,12 +45,19 @@ func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 }
 
 func record(fqdn, ip string) dns.Record {
-	return dns.Record{
-		Hostname: fqdn,
-		Type:     "A",
-		Value:    ip,
-		Meta:     map[string]string{"description": "managed by yk-dns-manager"},
-	}
+	return dns.Record{Hostname: fqdn, Type: "A", Value: ip}
+}
+
+// managed is an override row the controller wrote, as seeded on the fake.
+func managed(fqdn, ip string) testenv.HostOverride {
+	host, domain := splitFQDN(fqdn)
+	return testenv.HostOverride{Enabled: "1", Hostname: host, Domain: domain, RR: "A", Server: ip,
+		Description: opnsense.ManagedDescription}
+}
+
+func splitFQDN(fqdn string) (host, domain string) {
+	host, domain, _ = strings.Cut(fqdn, ".")
+	return host, domain
 }
 
 func rowsFor(store map[string]testenv.HostOverride, fqdn string) []testenv.HostOverride {
@@ -82,7 +93,7 @@ func countCalls(fake *testenv.OPNsense, endpoint string) int {
 
 func ensure(t *testing.T, b dns.Batch, rec dns.Record, overwrite bool) dns.Result {
 	t.Helper()
-	res, err := b.Ensure(context.Background(), rec, overwrite)
+	res, err := b.Ensure(context.Background(), rec, dns.EnsureOptions{Overwrite: overwrite})
 	if err != nil {
 		t.Fatalf("Ensure %s: %v", rec.Hostname, err)
 	}
@@ -96,14 +107,14 @@ func commit(t *testing.T, b dns.Batch) {
 	}
 }
 
-func TestEnsureCreatesRecord(t *testing.T) {
+// TestEnsureWritesTheOverrideFields pins the row OPNsense receives: the FQDN
+// split into hostname and domain, and the ownership marker as description.
+func TestEnsureWritesTheOverrideFields(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
 
 	b := p.Batch()
-	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Created {
-		t.Fatalf("Ensure = %s, want created", res)
-	}
+	ensure(t, b, record("app.example.com", "10.0.0.1"), false)
 	commit(t, b)
 
 	h := only(t, fake.Published(), "app.example.com")
@@ -113,49 +124,14 @@ func TestEnsureCreatesRecord(t *testing.T) {
 	if h.Server != "10.0.0.1" || h.RR != "A" || h.Enabled != "1" {
 		t.Errorf("row = %+v, want an enabled A record for 10.0.0.1", h)
 	}
-	if h.Description != "managed by yk-dns-manager" {
-		t.Errorf("description = %q", h.Description)
+	if h.Description != opnsense.ManagedDescription {
+		t.Errorf("description = %q, want the ownership marker", h.Description)
 	}
 }
 
-func TestEnsureOverwriteUpdatesInPlace(t *testing.T) {
-	fake, url := newFake(t)
-	p := newProvider(t, url)
-
-	b := p.Batch()
-	ensure(t, b, record("app.example.com", "10.0.0.1"), true)
-	commit(t, b)
-
-	b = p.Batch()
-	if res := ensure(t, b, record("app.example.com", "10.0.0.99"), true); res != dns.Updated {
-		t.Fatalf("Ensure = %s, want updated", res)
-	}
-	commit(t, b)
-
-	if h := only(t, fake.Published(), "app.example.com"); h.Server != "10.0.0.99" {
-		t.Errorf("server = %s, want 10.0.0.99", h.Server)
-	}
-}
-
-func TestEnsureWithoutOverwriteKeepsExistingValue(t *testing.T) {
-	fake, url := newFake(t)
-	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.50"})
-	p := newProvider(t, url)
-
-	b := p.Batch()
-	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Kept {
-		t.Fatalf("Ensure = %s, want kept", res)
-	}
-	commit(t, b)
-
-	if h := only(t, fake.Snapshot(), "app.example.com"); h.Server != "10.0.0.50" {
-		t.Errorf("server = %s, want the existing 10.0.0.50", h.Server)
-	}
-}
-
-// TestEnsureUnchangedWritesNothing is audit B2 at the provider: a record that
-// already matches costs one list and no write, and with nothing owed the
-// commit does not reconfigure.
+// TestEnsureUnchangedWritesNothing is audit B2: a record that already matches
+// costs one list and no write, and with nothing owed the commit does not
+// reconfigure.
 func TestEnsureUnchangedWritesNothing(t *testing.T) {
 	for _, overwrite := range []bool{false, true} {
 		t.Run(fmt.Sprintf("overwrite=%v", overwrite), func(t *testing.T) {
@@ -181,33 +157,13 @@ func TestEnsureUnchangedWritesNothing(t *testing.T) {
 	}
 }
 
-// TestEnsureReenablesDisabledRecord is audit B8 at the provider: a disabled
-// override answers nothing, so create-only mode must not treat it as an
-// existing record to leave alone.
-func TestEnsureReenablesDisabledRecord(t *testing.T) {
-	fake, url := newFake(t)
-	fake.Seed(testenv.HostOverride{Enabled: "0", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
-		Description: "managed by yk-dns-manager"})
-	p := newProvider(t, url)
-
-	b := p.Batch()
-	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Updated {
-		t.Fatalf("Ensure = %s, want updated", res)
-	}
-	commit(t, b)
-
-	if h := only(t, fake.Published(), "app.example.com"); h.Enabled != "1" {
-		t.Errorf("enabled = %q, want 1", h.Enabled)
-	}
-}
-
 func TestEnsureSurfacesValidationFailure(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
 
 	// The appliance answers HTTP 200 with result "failed", so a provider that
 	// only checked the status code would report success.
-	if _, err := p.Batch().Ensure(context.Background(), record("app.example.com", "not-an-ip"), false); err == nil {
+	if _, err := p.Batch().Ensure(context.Background(), record("app.example.com", "not-an-ip"), dns.EnsureOptions{}); err == nil {
 		t.Fatal("expected Ensure to fail for a row the appliance rejects")
 	}
 	if n := len(fake.Snapshot()); n != 0 {
@@ -215,50 +171,11 @@ func TestEnsureSurfacesValidationFailure(t *testing.T) {
 	}
 }
 
-func TestEnsureConvergesDuplicates(t *testing.T) {
-	fake, url := newFake(t)
-	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
-		fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: ip})
-	}
-	p := newProvider(t, url)
-
-	b := p.Batch()
-	ensure(t, b, record("app.example.com", "10.0.0.99"), true)
-	commit(t, b)
-
-	// A stale duplicate keeps answering after the live one is updated.
-	if h := only(t, fake.Published(), "app.example.com"); h.Server != "10.0.0.99" {
-		t.Errorf("surviving override has server %q, want 10.0.0.99", h.Server)
-	}
-}
-
-func TestRemoveDeletesEveryDuplicate(t *testing.T) {
-	fake, url := newFake(t)
-	for _, ip := range []string{"10.0.0.1", "10.0.0.2"} {
-		fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: ip})
-	}
-	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "other", Domain: "example.com", RR: "A", Server: "10.0.0.3"})
-	p := newProvider(t, url)
-
-	b := p.Batch()
-	if err := b.Remove(context.Background(), "app.example.com", "A"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	commit(t, b)
-
-	published := fake.Published()
-	if n := len(rowsFor(published, "app.example.com")); n != 0 {
-		t.Errorf("%d app.example.com rows left, want 0", n)
-	}
-	only(t, published, "other.example.com")
-}
-
-func TestRemoveMissingRecordIsNotAnError(t *testing.T) {
+func TestRemoveOfMissingRecordIssuesNoDelete(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
 
-	b := p.Batch()
-	if err := b.Remove(context.Background(), "ghost.example.com", "A"); err != nil {
+	if err := p.Batch().Remove(context.Background(), "ghost.example.com", "A", true); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if n := countCalls(fake, testenv.EndpointDel); n != 0 {
@@ -271,22 +188,19 @@ func TestRemoveMissingRecordIsNotAnError(t *testing.T) {
 // "not found", which is what Remove wanted anyway.
 func TestRemoveToleratesVanishedRecord(t *testing.T) {
 	fake, url := newFake(t)
-	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1"})
-	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "web", Domain: "example.com", RR: "A", Server: "10.0.0.1"})
+	fake.Seed(managed("app.example.com", "10.0.0.1"))
+	fake.Seed(managed("web.example.com", "10.0.0.1"))
 	p := newProvider(t, url)
 	ctx := context.Background()
 
 	stale := p.Batch()
-	if err := stale.Remove(ctx, "web.example.com", "A"); err != nil { // loads the list
+	if err := stale.Remove(ctx, "web.example.com", "A", false); err != nil { // loads the list
 		t.Fatalf("Remove web: %v", err)
 	}
-
-	other := p.Batch()
-	if err := other.Remove(ctx, "app.example.com", "A"); err != nil {
+	if err := p.Batch().Remove(ctx, "app.example.com", "A", false); err != nil {
 		t.Fatalf("Remove app in another batch: %v", err)
 	}
-
-	if err := stale.Remove(ctx, "app.example.com", "A"); err != nil {
+	if err := stale.Remove(ctx, "app.example.com", "A", false); err != nil {
 		t.Fatalf("Remove of an already deleted row: %v", err)
 	}
 }
@@ -301,7 +215,7 @@ func TestBatchListsOnce(t *testing.T) {
 	ensure(t, b, record("a.example.com", "10.0.0.1"), true)
 	ensure(t, b, record("b.example.com", "10.0.0.1"), true)
 	ensure(t, b, record("a.example.com", "10.0.0.2"), true)
-	if err := b.Remove(context.Background(), "b.example.com", "A"); err != nil {
+	if err := b.Remove(context.Background(), "b.example.com", "A", false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	commit(t, b)
@@ -311,13 +225,6 @@ func TestBatchListsOnce(t *testing.T) {
 	}
 	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
 		t.Errorf("reconfigured %d times, want 1", n)
-	}
-	published := fake.Published()
-	if h := only(t, published, "a.example.com"); h.Server != "10.0.0.2" {
-		t.Errorf("a.example.com = %s, want 10.0.0.2 (the batch must see its own writes)", h.Server)
-	}
-	if n := len(rowsFor(published, "b.example.com")); n != 0 {
-		t.Errorf("b.example.com still has %d rows", n)
 	}
 }
 
@@ -339,24 +246,16 @@ func TestUnusedBatchCommitsNothing(t *testing.T) {
 // publishes even when it changed nothing.
 func TestFirstCommitPublishes(t *testing.T) {
 	fake, url := newFake(t)
-	// Staged on the appliance by an earlier process that died before
-	// publishing it.
-	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
-		Description: "managed by yk-dns-manager"})
+	fake.Seed(managed("app.example.com", "10.0.0.1"))
 	p := newProvider(t, url)
 
-	b := p.Batch()
-	ensure(t, b, record("app.example.com", "10.0.0.1"), false)
-	commit(t, b)
-	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
-		t.Fatalf("first commit reconfigured %d times, want 1", n)
+	for range 2 {
+		b := p.Batch()
+		ensure(t, b, record("app.example.com", "10.0.0.1"), false)
+		commit(t, b)
 	}
-
-	b = p.Batch()
-	ensure(t, b, record("app.example.com", "10.0.0.1"), false)
-	commit(t, b)
 	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
-		t.Errorf("a commit with nothing owed reconfigured; total %d, want 1", n)
+		t.Errorf("reconfigured %d times, want exactly the one publish a new provider owes", n)
 	}
 }
 
@@ -366,12 +265,11 @@ func TestFirstCommitPublishes(t *testing.T) {
 func TestFailedPublishStaysOwed(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
-	ctx := context.Background()
 
 	b := p.Batch()
 	ensure(t, b, record("app.example.com", "10.0.0.1"), true)
 	fake.SetFailure(testenv.EndpointReconfigure, http.StatusInternalServerError)
-	if err := b.Commit(ctx); err == nil {
+	if err := b.Commit(context.Background()); err == nil {
 		t.Fatal("expected Commit to fail while reconfigure fails")
 	}
 	if n := len(fake.Published()); n != 0 {

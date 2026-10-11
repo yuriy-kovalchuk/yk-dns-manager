@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,13 +24,17 @@ import (
 
 // mockDNSProvider records DNS operations for test assertions. Ensure with
 // overwrite on is recorded as an upsert, with overwrite off as a create, which
-// is skipped for hostnames in existingHosts.
+// is skipped for hostnames in existingHosts. Hostnames in conflictHosts hold a
+// record the controller does not manage.
 type mockDNSProvider struct {
 	mu              sync.Mutex
-	existingHosts   map[string]bool // hostnames that already hold a live record
+	existingHosts   map[string]bool
+	conflictHosts   map[string]bool
 	createdRecords  []dns.Record
 	upsertedRecords []dns.Record
+	ensureOpts      map[string]dns.EnsureOptions
 	deletedHosts    []string
+	adoptedRemovals []string // hostnames removed with adoptLegacy set
 	flushes         int
 	flushErr        error
 }
@@ -44,10 +49,17 @@ func (m *mockDNSProvider) Batch() dns.Batch {
 
 type mockBatch struct{ m *mockDNSProvider }
 
-func (b mockBatch) Ensure(_ context.Context, record dns.Record, overwrite bool) (dns.Result, error) {
+func (b mockBatch) Ensure(_ context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) {
 	b.m.mu.Lock()
 	defer b.m.mu.Unlock()
-	if overwrite {
+	if b.m.ensureOpts == nil {
+		b.m.ensureOpts = map[string]dns.EnsureOptions{}
+	}
+	b.m.ensureOpts[record.Hostname] = opts
+	if b.m.conflictHosts[record.Hostname] {
+		return dns.Conflict, nil
+	}
+	if opts.Overwrite {
 		b.m.upsertedRecords = append(b.m.upsertedRecords, record)
 		return dns.Updated, nil
 	}
@@ -58,10 +70,13 @@ func (b mockBatch) Ensure(_ context.Context, record dns.Record, overwrite bool) 
 	return dns.Created, nil
 }
 
-func (b mockBatch) Remove(_ context.Context, hostname, _ string) error {
+func (b mockBatch) Remove(_ context.Context, hostname, _ string, adoptLegacy bool) error {
 	b.m.mu.Lock()
 	defer b.m.mu.Unlock()
 	b.m.deletedHosts = append(b.m.deletedHosts, hostname)
+	if adoptLegacy {
+		b.m.adoptedRemovals = append(b.m.adoptedRemovals, hostname)
+	}
 	return nil
 }
 
@@ -108,6 +123,7 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -178,6 +194,7 @@ func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -235,6 +252,7 @@ func TestHTTPRouteReconciler_UpsertEnabled(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -291,6 +309,7 @@ func TestHTTPRouteReconciler_CreateSkipsExisting(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -349,6 +368,7 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -402,6 +422,7 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 		hostnames   []string
 		annotation  string
 		wantDeleted []string
+		wantAdopted []string // removals allowed to take legacy records
 	}{
 		{
 			// The annotation is the record of what we created; it must drive
@@ -410,6 +431,7 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 			hostnames:   []string{"gone.example.net"},
 			annotation:  `["app.my-domain1.com"]`,
 			wantDeleted: []string{"app.my-domain1.com"},
+			wantAdopted: []string{"app.my-domain1.com"},
 		},
 		{
 			// No spec hostnames at all: the route must still become deletable.
@@ -417,6 +439,7 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 			hostnames:   nil,
 			annotation:  `["app.my-domain1.com", "api.my-domain2.it"]`,
 			wantDeleted: []string{"app.my-domain1.com", "api.my-domain2.it"},
+			wantAdopted: []string{"app.my-domain1.com", "api.my-domain2.it"},
 		},
 		{
 			// Finalizer present but nothing ever recorded as owned: nothing to
@@ -428,11 +451,14 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 		},
 		{
 			// A hostname written into the annotation that the domain map does
-			// not cover is not deleted, but the finalizer still comes off.
+			// not cover is released like any other, but without adopting a
+			// legacy record: the provider only deletes rows carrying its
+			// ownership marker, which a route editor cannot write.
 			name:        "annotation names a hostname outside the domain map",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com", "vpn.corp.example"]`,
-			wantDeleted: []string{"app.my-domain1.com"},
+			wantDeleted: []string{"app.my-domain1.com", "vpn.corp.example"},
+			wantAdopted: []string{"app.my-domain1.com"},
 		},
 		{
 			// A hostname that left the spec is invisible to the spec path, so
@@ -441,6 +467,7 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 			hostnames:   []string{"app.my-domain1.com", "gone.example.net"},
 			annotation:  `["app.my-domain1.com", "api.my-domain2.it"]`,
 			wantDeleted: []string{"app.my-domain1.com", "api.my-domain2.it"},
+			wantAdopted: []string{"app.my-domain1.com", "api.my-domain2.it"},
 		},
 	}
 
@@ -465,6 +492,7 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 				WithObjects(route).
 				Build()
 
@@ -500,6 +528,9 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 					t.Errorf("deleted[%d] = %q, want %q", i, mock.deletedHosts[i], want)
 				}
 			}
+			if !slices.Equal(mock.adoptedRemovals, tc.wantAdopted) {
+				t.Errorf("legacy-adopting removals = %v, want %v", mock.adoptedRemovals, tc.wantAdopted)
+			}
 		})
 	}
 }
@@ -526,6 +557,7 @@ func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 		WithObjects(route).
 		Build()
 
@@ -565,6 +597,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 		hostnames   []string
 		annotation  string
 		wantDeleted []string
+		wantAdopted []string // removals allowed to take legacy records
 		wantOwned   string
 		wantNoWrite bool
 	}{
@@ -574,28 +607,29 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
 			wantDeleted: []string{"api.my-domain2.it"},
+			wantAdopted: []string{"api.my-domain2.it"},
 			wantOwned:   `["app.my-domain1.com"]`,
 		},
 		{
 			name: "hostname removed from domain map",
 			// The spec still names api.my-domain2.it, but the map no longer
-			// resolves it. The annotation alone cannot authorize deleting a
-			// name outside the map, so the record is left for the operator
-			// and the route stops claiming it.
+			// resolves it, so the managed record is released. A legacy record
+			// is not adopted for a name outside the map.
 			domainMap:   "my-domain1.com: 10.0.8.100\n",
 			hostnames:   []string{"app.my-domain1.com", "api.my-domain2.it"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
-			wantDeleted: nil,
+			wantDeleted: []string{"api.my-domain2.it"},
 			wantOwned:   `["app.my-domain1.com"]`,
 		},
 		{
-			// Anyone who can edit the route can write the annotation, so a name
-			// the domain map does not cover must never be deleted through it.
+			// Anyone who can edit the route can write the annotation. The name
+			// is released, but only managed rows can go, and a legacy record is
+			// never adopted for a name the domain map does not cover.
 			name:        "annotation names a hostname outside the domain map",
 			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com","vpn.corp.example"]`,
-			wantDeleted: nil,
+			wantDeleted: []string{"vpn.corp.example"},
 			wantOwned:   `["app.my-domain1.com"]`,
 		},
 		{
@@ -641,6 +675,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 				WithObjects(route).
 				Build()
 
@@ -668,6 +703,9 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 					t.Errorf("deleted[%d] = %q, want %q", i, mock.deletedHosts[i], want)
 				}
 			}
+			if !slices.Equal(mock.adoptedRemovals, tc.wantAdopted) {
+				t.Errorf("legacy-adopting removals = %v, want %v", mock.adoptedRemovals, tc.wantAdopted)
+			}
 
 			var updated gatewayv1.HTTPRoute
 			key := types.NamespacedName{Name: "live-route", Namespace: "default"}
@@ -681,5 +719,96 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 				t.Errorf("reconcile wrote the route (%s -> %s) despite nothing having changed", before, updated.ResourceVersion)
 			}
 		})
+	}
+}
+
+// reconcileOnce runs one reconcile of default/<name> against a fake client
+// holding routes, and returns the reconciler, whose client can be inspected.
+func reconcileOnce(t *testing.T, mock *mockDNSProvider, name string, routes ...*gatewayv1.HTTPRoute) *HTTPRouteReconciler {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatalf("failed to install gateway-api scheme: %v", err)
+	}
+	builder := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames)
+	for _, r := range routes {
+		builder = builder.WithObjects(r)
+	}
+	c := builder.Build()
+	reconciler := &HTTPRouteReconciler{
+		Client:    c,
+		APIReader: c,
+		Log:       zap.New(zap.UseDevMode(true)),
+		DomainMap: newTestDomainMap(t),
+		DNS:       mock,
+		Upsert:    true,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	return reconciler
+}
+
+func managedRoute(name, annotation string, hostnames ...string) *gatewayv1.HTTPRoute {
+	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "default", Finalizers: []string{finalizerName},
+	}}
+	if annotation != "" {
+		route.Annotations = map[string]string{managedHostnamesAnnotation: annotation}
+	}
+	for _, h := range hostnames {
+		route.Spec.Hostnames = append(route.Spec.Hostnames, gatewayv1.Hostname(h))
+	}
+	return route
+}
+
+// TestHTTPRouteReconciler_ConflictIsNotOwned: a name held by a record the
+// controller does not manage stays out of the annotation, so the route can
+// never later adopt or delete that record through it.
+func TestHTTPRouteReconciler_ConflictIsNotOwned(t *testing.T) {
+	mock := &mockDNSProvider{conflictHosts: map[string]bool{"app.my-domain1.com": true}}
+	r := reconcileOnce(t, mock, "route", managedRoute("route", "", "app.my-domain1.com", "web.my-domain1.com"))
+
+	var updated gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "route", Namespace: "default"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Annotations[managedHostnamesAnnotation]; got != `["web.my-domain1.com"]` {
+		t.Errorf("annotation = %s, want only the hostname without a conflict", got)
+	}
+}
+
+// TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames: a record written
+// before ownership was marked is adopted only for a name the route already
+// recorded owning.
+func TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames(t *testing.T) {
+	mock := &mockDNSProvider{}
+	reconcileOnce(t, mock, "route", managedRoute("route", `["app.my-domain1.com"]`, "app.my-domain1.com", "web.my-domain1.com"))
+
+	if !mock.ensureOpts["app.my-domain1.com"].AdoptLegacy {
+		t.Error("app.my-domain1.com is recorded as owned, so its legacy record should be adoptable")
+	}
+	if mock.ensureOpts["web.my-domain1.com"].AdoptLegacy {
+		t.Error("web.my-domain1.com is not recorded as owned, so a legacy record must not be adopted")
+	}
+}
+
+// TestHTTPRouteReconciler_SharedHostnameIsKept is audit B1: two routes serving
+// one name each record it as owned, and deleting either must leave the record
+// the other still needs.
+func TestHTTPRouteReconciler_SharedHostnameIsKept(t *testing.T) {
+	now := metav1.Now()
+	deleting := managedRoute("blue", `["app.my-domain1.com"]`, "app.my-domain1.com")
+	deleting.DeletionTimestamp = &now
+	other := managedRoute("green", `["app.my-domain1.com"]`, "app.my-domain1.com")
+
+	mock := &mockDNSProvider{}
+	reconcileOnce(t, mock, "blue", deleting, other)
+
+	if len(mock.deletedHosts) != 0 {
+		t.Errorf("deleted %v while green still claims it", mock.deletedHosts)
 	}
 }

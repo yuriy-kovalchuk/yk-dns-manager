@@ -32,7 +32,7 @@ func TestResponseBodyLimit(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	err = p.Batch().Remove(context.Background(), "app.example.com", "A")
+	err = p.Batch().Remove(context.Background(), "app.example.com", "A", false)
 	if err == nil {
 		t.Fatal("expected an oversized body to be rejected")
 	}
@@ -61,7 +61,7 @@ func TestErrorBodyTruncated(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	_, err = p.Batch().Ensure(context.Background(), dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}, false)
+	_, err = p.Batch().Ensure(context.Background(), dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}, dns.EnsureOptions{})
 	if err == nil {
 		t.Fatal("expected a 500 to be reported")
 	}
@@ -106,7 +106,7 @@ func TestCommitChecksReconfigureStatus(t *testing.T) {
 
 	// A fresh provider owes one publish, so a used batch commits.
 	b := p.Batch()
-	if err := b.Remove(ctx, "app.example.com", "A"); err != nil {
+	if err := b.Remove(ctx, "app.example.com", "A", false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if err := b.Commit(ctx); err == nil || !strings.Contains(err.Error(), `"failed"`) {

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,6 +26,9 @@ import (
 const (
 	finalizerName              = "dns.yk/cleanup"
 	managedHostnamesAnnotation = "dns.yk/managed-hostnames"
+	// hostnameIndex indexes routes by the hostnames in their spec, so a
+	// record shared by several routes is only removed once none claims it.
+	hostnameIndex = "spec.hostnames"
 )
 
 // HTTPRouteReconciler reconciles HTTPRoute objects.
@@ -87,17 +92,14 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if controllerutil.ContainsFinalizer(&route, finalizerName) {
 			r.Log.Info("deleting DNS records for HTTPRoute", "name", req.NamespacedName)
 
-			// Delete everything the annotation claims we own, plus everything the
-			// live spec still maps. The union covers routes written before the
-			// annotation existed, and hostnames that left the spec but are still
-			// in the map.
+			// Release everything the annotation claims we own, plus everything
+			// the live spec still maps. The union covers routes written before
+			// the annotation existed.
 			var deleteErr error
-			for _, hostname := range union(r.deletable(owned), specHostnames) {
-				if err := batch.Remove(ctx, hostname, "A"); err != nil {
+			for _, hostname := range union(owned, specHostnames) {
+				if err := r.release(ctx, batch, req.NamespacedName, hostname, owned); err != nil {
 					r.Log.Error(err, "failed to delete DNS record", "hostname", hostname)
 					deleteErr = fmt.Errorf("at least one DNS record deletion failed")
-				} else {
-					r.Log.Info("deleted DNS record", "hostname", hostname)
 				}
 			}
 
@@ -137,18 +139,19 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Delete records we own that are no longer in the spec.
-	for _, oldHost := range r.deletable(owned) {
+	// Release records we own that the spec or the domain map no longer wants.
+	for _, oldHost := range owned {
 		if !slices.Contains(specHostnames, oldHost) {
-			r.Log.Info("hostname no longer managed, deleting DNS record", "hostname", oldHost)
-			if err := batch.Remove(ctx, oldHost, "A"); err != nil {
+			if err := r.release(ctx, batch, req.NamespacedName, oldHost, owned); err != nil {
 				return ctrl.Result{}, fmt.Errorf("deleting removed DNS record for %s: %w", oldHost, err)
 			}
 		}
 	}
 
-	// Create or update. In create-only mode (Upsert false) a live record that
-	// already exists is left alone, whatever it holds.
+	// Create or update. In create-only mode (Upsert false) a managed record
+	// that already exists is left alone, whatever it holds. A record the
+	// controller does not manage is never touched.
+	managed := make([]string, 0, len(specHostnames))
 	for _, hostname := range specHostnames {
 		ip, _ := r.DomainMap.LookupIP(hostname)
 
@@ -157,10 +160,15 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Hostname: hostname,
 			Type:     "A",
 			Value:    ip,
-			Meta:     map[string]string{"description": "managed by yk-dns-manager"},
 		}
 
-		res, err := batch.Ensure(ctx, record, r.Upsert)
+		// A record written before ownership was marked is adopted only for a
+		// name this route already recorded owning; the domain map covers every
+		// name here.
+		res, err := batch.Ensure(ctx, record, dns.EnsureOptions{
+			Overwrite:   r.Upsert,
+			AdoptLegacy: slices.Contains(owned, hostname),
+		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("ensuring DNS record for %s: %w", hostname, err)
 		}
@@ -171,13 +179,17 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			r.Log.Info("DNS record already exists with a different value and upsert mode is disabled — IPs may drift if domain map changes; consider enabling upsert mode to keep records in sync", "hostname", hostname, "ip", ip)
 		case dns.Unchanged:
 			r.Log.V(1).Info("DNS record already up to date", "hostname", hostname, "ip", ip)
+		case dns.Conflict:
+			r.Log.Info("DNS record exists but is not managed by this controller; leaving it alone", "hostname", hostname, "ip", ip)
+			continue
 		}
+		managed = append(managed, hostname)
 	}
 
-	// Update annotation with the list of hostnames we actually manage (those
-	// matching the domain map). Both sides are the same shape here, so the
-	// comparison cannot loop on a spurious write.
-	if !sameStrings(owned, specHostnames) {
+	// Record the hostnames this route actually manages. A name that hit a
+	// conflict is left out, so the annotation can never be used to adopt a
+	// legacy record that belongs to another route.
+	if !slices.Equal(owned, managed) {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
 				return err
@@ -185,7 +197,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if route.Annotations == nil {
 				route.Annotations = make(map[string]string)
 			}
-			data, _ := json.Marshal(specHostnames)
+			data, _ := json.Marshal(managed)
 			route.Annotations[managedHostnamesAnnotation] = string(data)
 			return r.Update(ctx, &route)
 		})
@@ -215,22 +227,44 @@ func (r *HTTPRouteReconciler) readOwned(route *gatewayv1.HTTPRoute) []string {
 	return owned
 }
 
-// deletable returns the owned hostnames the controller may delete: those the
-// domain map covers. The annotation is writable by anyone who can edit the
-// route, so on its own it cannot authorize a delete; without this check any
-// route editor could remove any override on the appliance, in any domain.
+// release removes the managed DNS record for hostname, unless another live
+// route still claims the name.
 //
-// The cost is that a hostname whose domain was dropped from the map is no
-// longer cleaned up. It is logged so an operator can remove it by hand.
-func (r *HTTPRouteReconciler) deletable(owned []string) []string {
-	out := make([]string, 0, len(owned))
-	for _, h := range owned {
-		if _, ok := r.DomainMap.LookupIP(h); ok {
-			out = append(out, h)
+// Records the controller does not manage are never removed, whatever the
+// annotation says: the provider only deletes rows carrying its ownership
+// marker. A record written before ownership was marked is removed only for a
+// name the route recorded owning and the domain map covers.
+func (r *HTTPRouteReconciler) release(ctx context.Context, batch dns.Batch, self types.NamespacedName, hostname string, owned []string) error {
+	var routes gatewayv1.HTTPRouteList
+	if err := r.List(ctx, &routes, client.MatchingFields{hostnameIndex: hostname}); err != nil {
+		return fmt.Errorf("listing routes that claim %s: %w", hostname, err)
+	}
+	for _, other := range routes.Items {
+		if (other.Namespace == self.Namespace && other.Name == self.Name) || !other.DeletionTimestamp.IsZero() {
 			continue
 		}
-		r.Log.Info("not deleting DNS record outside the domain map; the ownership annotation cannot authorize it, so remove it by hand if this controller created it",
-			"hostname", h)
+		r.Log.Info("not deleting DNS record still claimed by another route", "hostname", hostname,
+			"route", other.Namespace+"/"+other.Name)
+		return nil
+	}
+
+	_, mapped := r.DomainMap.LookupIP(hostname)
+	if err := batch.Remove(ctx, hostname, "A", mapped && slices.Contains(owned, hostname)); err != nil {
+		return err
+	}
+	r.Log.Info("released DNS record", "hostname", hostname)
+	return nil
+}
+
+// indexHostnames is the hostnameIndex extractor.
+func indexHostnames(obj client.Object) []string {
+	route, ok := obj.(*gatewayv1.HTTPRoute)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(route.Spec.Hostnames))
+	for _, h := range route.Spec.Hostnames {
+		out = append(out, strings.TrimSuffix(string(h), "."))
 	}
 	return out
 }
@@ -246,23 +280,11 @@ func union(a, b []string) []string {
 	return out
 }
 
-// sameStrings compares two string slices without treating nil and empty as
-// different, which reflect.DeepEqual does and which would force a write every
-// reconcile for a route that owns nothing.
-func sameStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // SetupWithManager registers the reconciler with the controller manager.
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames); err != nil {
+		return fmt.Errorf("indexing routes by hostname: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
 		WithEventFilter(predicate.Funcs{
