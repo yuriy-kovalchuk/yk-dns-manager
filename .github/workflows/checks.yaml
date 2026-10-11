@@ -1,0 +1,91 @@
+name: Checks
+
+# The checks every change and every release has to pass: format, vet, build,
+# unit + integration + envtest, lint, govulncheck, image build and helm lint.
+# CI runs them on every push and PR; CD runs them on the release tag before
+# anything is published.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Code checks + helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags are needed for git describe in `make build`
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Pinned to a patch, not "1.27": setup-go runs with GOTOOLCHAIN=local, so the
+          # toolchain installed here is the standard library govulncheck judges, and a
+          # floating minor is just whatever the runner image happens to carry ("1.26"
+          # resolved to go1.26.8, which predates the net/http, net/textproto, crypto/tls
+          # and html/template fixes go1.26.9 carries). Keep this equal to the go.mod go
+          # directive and the Dockerfile base image, and keep golangci-lint below built
+          # with at least this Go — it refuses modules newer than its own build.
+          go-version: "1.27.2"
+          cache: true
+
+      - name: Install golangci-lint
+        # golangci-lint refuses to load a module whose Go version is newer than the Go
+        # it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright. v2.14.0
+        # is built with go1.27.0. Install script pinned to the same tag — `master`
+        # install.sh also mis-greps the .sbom.json checksum and fails the install.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.14.0/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
+          golangci-lint version
+
+      - name: Format check
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -s needed for: $unformatted"
+            exit 1
+          fi
+
+      - name: Vet, build, test, lint
+        # `make test` is unit + integration; integration never ran here before, and
+        # lint is blocking now (it used to carry continue-on-error: true).
+        run: make vet build test lint
+
+      - name: Vulnerability scan
+        # Blocking. Replaces the Trivy fs/image SARIF uploads, which ran after the
+        # image was already published and gated nothing.
+        run: make vuln
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (amd64, no push)
+        # Deliberate deviation from the reference, which has no Dockerfile check in
+        # CI: this catches Dockerfile/.dockerignore breakage on the PR instead of
+        # after merge. Single platform and no --load, so it cannot hit the
+        # multi-platform-export failure that `make docker-build` used to.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install helm
+        run: |
+          curl -fsSL "https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz" | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Helm lint
+        run: make helm-lint
+
+      - name: Helm template render (default values)
+        run: make helm-template

@@ -1,8 +1,10 @@
 name: CD
 
-# A `v*` tag is the release trigger and the version. This workflow builds and
-# publishes the release image and the Helm chart, then turns the tag into a
-# GitHub Release. `:latest` is only ever moved here, never by a master push.
+# A `v*` tag is the release trigger and the version. This workflow runs the
+# same checks as CI on the tagged commit, refuses a tag that is not on master,
+# then builds and publishes the release image and the Helm chart and turns the
+# tag into a GitHub Release. `:latest` is only ever moved here, never by a
+# master push.
 
 on:
   push:
@@ -11,6 +13,10 @@ on:
 concurrency:
   group: cd-${{ github.ref }}
   cancel-in-progress: true
+
+# Jobs that need more ask for it themselves.
+permissions:
+  contents: read
 
 env:
   # Artifact registry: GHCR serves both the docker image and the helm chart
@@ -22,8 +28,15 @@ env:
   CHART_DIR:   charts/yk-dns-manager
 
 jobs:
+  # Nothing is published unless the tagged commit passes the same checks a PR
+  # has to. A tag can point at any commit, including one that never went
+  # through CI.
+  checks:
+    uses: ./.github/workflows/checks.yaml
+
   publish:
     name: Publish image + helm chart
+    needs: checks
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,6 +46,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # tags are needed for version stamping
+
+      - name: Require the tagged commit to be on master
+        # Releases come from reviewed history only. A tag on a side branch or
+        # a local-only commit would otherwise ship as :latest.
+        run: |
+          git fetch --no-tags origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on master; refusing to publish"
+            exit 1
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
