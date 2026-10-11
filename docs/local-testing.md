@@ -5,7 +5,11 @@
 - Go 1.27.2 (pinned in `go.mod`; with `GOTOOLCHAIN=auto` the go command fetches it on demand)
 - Docker (for buildx and kind)
 - `kubectl` and `helm` v3.x
-- For kind-based testing: [`kind`](https://kind.sigs.k8s.io/)
+- For kind-based testing: [`kind`](https://kind.sigs.k8s.io/) **v0.33.0 or newer**.
+  `hack/kind-config.yaml` pins the node image to
+  `kindest/node:v1.37.0@sha256:a1ed56cf…`, so the dev cluster is always Kubernetes
+  1.37.0 regardless of which kind you have — but older kind releases cannot load
+  newer node images, so upgrade the tool alongside the pin.
 
 No OPNsense appliance and no real credentials are needed. `make fake-opnsense`
 serves an in-memory stand-in for the appliance API, and the local profile under

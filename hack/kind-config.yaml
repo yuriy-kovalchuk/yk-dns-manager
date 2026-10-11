@@ -1,5 +1,13 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 
+# The node image is pinned deliberately. Left unset, the cluster's Kubernetes
+# version is whatever the locally installed kind defaults to, so two developers
+# get different clusters and a kind upgrade silently changes what is being tested
+# against. v1.37.0 is the default for kind v0.33.0 and matches the k8s.io v0.37.x
+# client the controller is compiled against. Bump the two together: the image
+# digest comes from the kind release notes, and older kind releases cannot load
+# newer node images.
 nodes:
 - role: control-plane
+  image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
