@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.26+
+- Go 1.27.2 (pinned in `go.mod`; with `GOTOOLCHAIN=auto` the go command fetches it on demand)
 - Docker (for buildx and kind)
 - A local or remote Kubernetes cluster with [Gateway API CRDs](https://gateway-api.sigs.k8s.io/) installed
 - `kubectl` configured to your target cluster
