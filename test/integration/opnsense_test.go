@@ -2,147 +2,16 @@ package integration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
 
 	logrtesting "github.com/go-logr/logr/testing"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
-
-// fakeOPNsense is a minimal in-memory OPNsense Unbound API for testing.
-type fakeOPNsense struct {
-	mu     sync.Mutex
-	store  map[string]hostOverride
-	nextID int
-	calls  []string // tracks endpoint calls in order
-}
-
-type hostOverride struct {
-	Enabled     string `json:"enabled"`
-	Hostname    string `json:"hostname"`
-	Domain      string `json:"domain"`
-	RR          string `json:"rr"`
-	Server      string `json:"server"`
-	Description string `json:"description"`
-	MXPrio      string `json:"mxprio"`
-	MX          string `json:"mx"`
-}
-
-func newFakeOPNsense() *fakeOPNsense {
-	return &fakeOPNsense{store: map[string]hostOverride{}}
-}
-
-func (f *fakeOPNsense) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
-	f.mu.Unlock()
-
-	switch {
-	case r.URL.Path == "/api/unbound/settings/searchHostOverride":
-		f.handleSearch(w, r)
-	case r.URL.Path == "/api/unbound/settings/addHostOverride":
-		f.handleAdd(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/unbound/settings/setHostOverride/"):
-		f.handleSet(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/unbound/settings/delHostOverride/"):
-		f.handleDel(w, r)
-	case r.URL.Path == "/api/unbound/service/reconfigure":
-		f.handleReconfigure(w, r)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func (f *fakeOPNsense) handleSearch(w http.ResponseWriter, _ *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	type row struct {
-		UUID string `json:"uuid"`
-		hostOverride
-	}
-	rows := []row{}
-	for id, h := range f.store {
-		rows = append(rows, row{UUID: id, hostOverride: h})
-	}
-	writeJSON(w, map[string]interface{}{"rows": rows, "total": len(rows)})
-}
-
-func (f *fakeOPNsense) handleAdd(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		Host hostOverride `json:"host"`
-	}
-	if err := readJSON(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	f.mu.Lock()
-	f.nextID++
-	id := fmt.Sprintf("uuid-%d", f.nextID)
-	f.store[id] = payload.Host
-	f.mu.Unlock()
-
-	writeJSON(w, map[string]string{"result": "saved", "uuid": id})
-}
-
-func (f *fakeOPNsense) handleSet(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/unbound/settings/setHostOverride/")
-	var payload struct {
-		Host hostOverride `json:"host"`
-	}
-	if err := readJSON(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.store[id]; !ok {
-		http.Error(w, `{"result":"not found"}`, http.StatusNotFound)
-		return
-	}
-	f.store[id] = payload.Host
-	writeJSON(w, map[string]string{"result": "saved"})
-}
-
-func (f *fakeOPNsense) handleDel(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/unbound/settings/delHostOverride/")
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.store[id]; !ok {
-		http.Error(w, `{"result":"not found"}`, http.StatusNotFound)
-		return
-	}
-	delete(f.store, id)
-	writeJSON(w, map[string]string{"result": "deleted"})
-}
-
-func (f *fakeOPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func writeJSON(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func readJSON(r *http.Request, v interface{}) error {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, v)
-}
 
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	t.Helper()
@@ -158,7 +27,7 @@ func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 }
 
 func TestCreateAndExists(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -195,11 +64,11 @@ func TestCreateAndExists(t *testing.T) {
 	}
 
 	// Verify the stored data.
-	fake.mu.Lock()
-	if len(fake.store) != 1 {
-		t.Fatalf("expected 1 entry in store, got %d", len(fake.store))
+	store := fake.Snapshot()
+	if len(store) != 1 {
+		t.Fatalf("expected 1 entry in store, got %d", len(store))
 	}
-	for _, h := range fake.store {
+	for _, h := range store {
 		if h.Hostname != "app" {
 			t.Errorf("expected hostname 'app', got %q", h.Hostname)
 		}
@@ -219,11 +88,10 @@ func TestCreateAndExists(t *testing.T) {
 			t.Errorf("expected enabled '1', got %q", h.Enabled)
 		}
 	}
-	fake.mu.Unlock()
 }
 
 func TestUpdateExistingRecord(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -251,17 +119,16 @@ func TestUpdateExistingRecord(t *testing.T) {
 	}
 
 	// Verify the IP changed in the store.
-	fake.mu.Lock()
-	for _, h := range fake.store {
+	store := fake.Snapshot()
+	for _, h := range store {
 		if h.Server != "10.0.0.2" {
 			t.Errorf("expected server '10.0.0.2' after update, got %q", h.Server)
 		}
 	}
-	fake.mu.Unlock()
 }
 
 func TestUpdateNonExistent(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -279,7 +146,7 @@ func TestUpdateNonExistent(t *testing.T) {
 }
 
 func TestDeleteExistingRecord(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -310,15 +177,14 @@ func TestDeleteExistingRecord(t *testing.T) {
 		t.Fatal("expected record to not exist after Delete")
 	}
 
-	fake.mu.Lock()
-	if len(fake.store) != 0 {
-		t.Errorf("expected empty store after delete, got %d entries", len(fake.store))
+	store := fake.Snapshot()
+	if len(store) != 0 {
+		t.Errorf("expected empty store after delete, got %d entries", len(store))
 	}
-	fake.mu.Unlock()
 }
 
 func TestDeleteNonExistent(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -332,7 +198,7 @@ func TestDeleteNonExistent(t *testing.T) {
 }
 
 func TestUpsertCreatesAndUpdates(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -349,11 +215,10 @@ func TestUpsertCreatesAndUpdates(t *testing.T) {
 		t.Fatalf("Upsert (create): %v", err)
 	}
 
-	fake.mu.Lock()
-	if len(fake.store) != 1 {
-		t.Fatalf("expected 1 entry after first upsert, got %d", len(fake.store))
+	store := fake.Snapshot()
+	if len(store) != 1 {
+		t.Fatalf("expected 1 entry after first upsert, got %d", len(store))
 	}
-	fake.mu.Unlock()
 
 	// Second upsert should update.
 	err = p.Upsert(ctx, dns.Record{
@@ -365,20 +230,19 @@ func TestUpsertCreatesAndUpdates(t *testing.T) {
 		t.Fatalf("Upsert (update): %v", err)
 	}
 
-	fake.mu.Lock()
-	if len(fake.store) != 1 {
-		t.Fatalf("expected still 1 entry after second upsert, got %d", len(fake.store))
+	store = fake.Snapshot()
+	if len(store) != 1 {
+		t.Fatalf("expected still 1 entry after second upsert, got %d", len(store))
 	}
-	for _, h := range fake.store {
+	for _, h := range store {
 		if h.Server != "10.0.0.99" {
 			t.Errorf("expected server '10.0.0.99' after upsert update, got %q", h.Server)
 		}
 	}
-	fake.mu.Unlock()
 }
 
 func TestFullLifecycle(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -425,14 +289,13 @@ func TestFullLifecycle(t *testing.T) {
 	}
 
 	// 5. Verify updated value
-	fake.mu.Lock()
+	store := fake.Snapshot()
 	var updatedIP string
-	for _, h := range fake.store {
+	for _, h := range store {
 		if h.Hostname == "web" && h.Domain == "mysite.org" {
 			updatedIP = h.Server
 		}
 	}
-	fake.mu.Unlock()
 	if updatedIP != "192.168.1.20" {
 		t.Fatalf("step 5: expected IP '192.168.1.20', got %q", updatedIP)
 	}
@@ -454,7 +317,7 @@ func TestFullLifecycle(t *testing.T) {
 }
 
 func TestMultipleRecords(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -473,11 +336,10 @@ func TestMultipleRecords(t *testing.T) {
 		}
 	}
 
-	fake.mu.Lock()
-	if len(fake.store) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(fake.store))
+	store := fake.Snapshot()
+	if len(store) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(store))
 	}
-	fake.mu.Unlock()
 
 	// Each should exist independently.
 	for _, rec := range records {
@@ -513,7 +375,7 @@ func TestMultipleRecords(t *testing.T) {
 // overrides for the same hostname/RR. Deleting only the first left the rest
 // answering with stale values and nothing else ever removed them.
 func TestDeleteRemovesAllDuplicates(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -530,9 +392,8 @@ func TestDeleteRemovesAllDuplicates(t *testing.T) {
 		}
 	}
 
-	fake.mu.Lock()
-	seeded := len(fake.store)
-	fake.mu.Unlock()
+	store := fake.Snapshot()
+	seeded := len(store)
 	if seeded != 2 {
 		t.Fatalf("expected 2 duplicate overrides seeded, got %d", seeded)
 	}
@@ -541,17 +402,16 @@ func TestDeleteRemovesAllDuplicates(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.store) != 0 {
-		t.Fatalf("expected 0 overrides after Delete, got %d: %+v", len(fake.store), fake.store)
+	store = fake.Snapshot()
+	if len(store) != 0 {
+		t.Fatalf("expected 0 overrides after Delete, got %d: %+v", len(store), store)
 	}
 }
 
 // TestUpsertConvergesDuplicates checks that writing to a hostname that has
 // duplicate overrides leaves exactly one row behind, holding the new value.
 func TestUpsertConvergesDuplicates(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -572,12 +432,11 @@ func TestUpsertConvergesDuplicates(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.store) != 1 {
-		t.Fatalf("expected 1 override after Upsert, got %d: %+v", len(fake.store), fake.store)
+	store := fake.Snapshot()
+	if len(store) != 1 {
+		t.Fatalf("expected 1 override after Upsert, got %d: %+v", len(store), store)
 	}
-	for _, h := range fake.store {
+	for _, h := range store {
 		if h.Server != "10.0.0.99" {
 			t.Errorf("surviving override has server %q, want 10.0.0.99", h.Server)
 		}
@@ -589,7 +448,7 @@ func TestUpsertConvergesDuplicates(t *testing.T) {
 // again, then setHostOverride and a per-record reconfigure. It is now one list
 // fetch plus one write, with reconfigure deferred to Flush.
 func TestUpsertUpdatePathCallCount(t *testing.T) {
-	fake := newFakeOPNsense()
+	fake := testenv.NewOPNsense()
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 
@@ -603,17 +462,13 @@ func TestUpsertUpdatePathCallCount(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	fake.mu.Lock()
-	fake.calls = nil
-	fake.mu.Unlock()
+	fake.ResetCalls()
 
 	if err := p.Upsert(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.2"}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	fake.mu.Lock()
-	got := append([]string(nil), fake.calls...)
-	fake.mu.Unlock()
+	got := fake.Calls()
 
 	want := []string{
 		"GET /api/unbound/settings/searchHostOverride",
@@ -626,9 +481,7 @@ func TestUpsertUpdatePathCallCount(t *testing.T) {
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-	fake.mu.Lock()
-	got = append([]string(nil), fake.calls[len(want):]...)
-	fake.mu.Unlock()
+	got = fake.Calls()[len(want):]
 	if len(got) != 1 || got[0] != "POST /api/unbound/service/reconfigure" {
 		t.Fatalf("Flush issued %v, want exactly one reconfigure", got)
 	}
@@ -637,9 +490,7 @@ func TestUpsertUpdatePathCallCount(t *testing.T) {
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("second Flush: %v", err)
 	}
-	fake.mu.Lock()
-	n := len(fake.calls)
-	fake.mu.Unlock()
+	n := len(fake.Calls())
 	if n != len(want)+1 {
 		t.Fatalf("idle Flush issued extra calls: total %d, want %d", n, len(want)+1)
 	}

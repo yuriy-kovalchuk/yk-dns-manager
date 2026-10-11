@@ -13,6 +13,12 @@ CHART_DIR  := charts/$(APP_NAME)
 
 KIND_CLUSTER        ?= yk-dns-manager-dev
 KIND_CONFIG         := hack/kind-config.yaml
+# Every kind target pins this context. Without it a target run before kind-up
+# acts on whatever the kubeconfig currently points at, which in practice is a
+# real cluster.
+KIND_CONTEXT        := kind-$(KIND_CLUSTER)
+KIND_NAMESPACE      ?= yk-dns-manager-system
+FAKE_IMAGE          ?= fake-opnsense:local
 # Must match the sigs.k8s.io/gateway-api version in go.mod: the controller is
 # compiled against these types, and CRDs two minor versions behind silently
 # prune fields the reconciler reads.
@@ -34,7 +40,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -158,33 +164,46 @@ kind-down:
 kind-load: docker-build-local
 	kind load docker-image $(IMAGE):local --name $(KIND_CLUSTER)
 
+## fake-opnsense: serve the in-memory OPNsense API locally for `make run`
+fake-opnsense:
+	go run ./hack/fake-opnsense --addr=:8053
+
+## kind-fake-install: run the fake OPNsense inside the kind cluster
+kind-fake-install:
+	docker build -f Dockerfile.fake -t $(FAKE_IMAGE) .
+	kind load docker-image $(FAKE_IMAGE) --name $(KIND_CLUSTER)
+	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) apply -f hack/fake-opnsense-deployment.yaml
+
+kind-fake-delete:
+	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) delete -f hack/fake-opnsense-deployment.yaml --ignore-not-found
+
 kind-secret:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@set -a && . ./.env && set +a && \
-		kubectl create namespace yk-dns-manager-system --dry-run=client -o yaml | kubectl apply -f - && \
-		kubectl create secret generic yk-dns-manager-credentials \
-			--namespace yk-dns-manager-system \
+		kubectl --context $(KIND_CONTEXT) create namespace $(KIND_NAMESPACE) --dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f - && \
+		kubectl --context $(KIND_CONTEXT) create secret generic yk-dns-manager-credentials \
+			--namespace $(KIND_NAMESPACE) \
 			--from-literal=OPNSENSE_API_KEY=$${OPNSENSE_API_KEY} \
 			--from-literal=OPNSENSE_API_SECRET=$${OPNSENSE_API_SECRET} \
-			--dry-run=client -o yaml | kubectl apply -f -
+			--dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f -
 
 kind-deploy: kind-up kind-load kind-secret
-	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
-	helm upgrade --install yk-dns-manager $(CHART_DIR) \
-		--namespace yk-dns-manager-system \
+	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+	helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
+		--namespace $(KIND_NAMESPACE) \
 		--create-namespace \
 		-f hack/local-values.yaml \
 		--wait
 
 kind-undeploy:
-	helm uninstall yk-dns-manager --namespace yk-dns-manager-system --ignore-not-found
+	helm --kube-context $(KIND_CONTEXT) uninstall $(APP_NAME) --namespace $(KIND_NAMESPACE) --ignore-not-found
 
 kind-reload: kind-load
-	kubectl rollout restart deployment/yk-dns-manager --namespace yk-dns-manager-system
+	kubectl --context $(KIND_CONTEXT) rollout restart deployment/$(APP_NAME) --namespace $(KIND_NAMESPACE)
 
 kind-logs:
-	kubectl logs --namespace yk-dns-manager-system \
-		-l app.kubernetes.io/name=yk-dns-manager \
+	kubectl --context $(KIND_CONTEXT) logs --namespace $(KIND_NAMESPACE) \
+		-l app.kubernetes.io/name=$(APP_NAME) \
 		--follow
 
 # ── Git hooks ──────────────────────────────────────────────────────────────────
