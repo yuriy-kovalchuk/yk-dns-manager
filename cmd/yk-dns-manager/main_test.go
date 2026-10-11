@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
+
+	dns "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
 func TestParseLogLevel(t *testing.T) {
@@ -102,5 +106,74 @@ func TestDebugLevelKeepsProductionEncoder(t *testing.T) {
 	}
 	if !strings.Contains(line, `"probe"`) {
 		t.Errorf("V(1) message missing from output: %q", line)
+	}
+}
+
+// stubProvider satisfies dns.Provider without implementing anything. Only the
+// interface conversion matters here, and embedding the interface keeps that
+// from turning the test into a mock.
+type stubProvider struct {
+	dns.Provider
+}
+
+func TestSelectProviderSkipsFailedFactories(t *testing.T) {
+	factories := []providerFactory{
+		{"broken", func(logr.Logger, map[string]string) (dns.Provider, error) {
+			return nil, errors.New("bad settings")
+		}},
+		{"good", func(logr.Logger, map[string]string) (dns.Provider, error) {
+			return stubProvider{}, nil
+		}},
+	}
+
+	p, name, err := selectProvider(logr.Discard(), factories, nil)
+	if err != nil {
+		t.Fatalf("selectProvider: %v", err)
+	}
+	if name != "good" {
+		t.Errorf("selected %q, want %q", name, "good")
+	}
+	if p == nil {
+		t.Error("provider is nil despite a working factory")
+	}
+}
+
+func TestSelectProviderFailsWhenNoneInitialize(t *testing.T) {
+	factories := []providerFactory{
+		{"broken", func(logr.Logger, map[string]string) (dns.Provider, error) {
+			return nil, errors.New("bad settings")
+		}},
+	}
+
+	p, name, err := selectProvider(logr.Discard(), factories, nil)
+	if err == nil {
+		t.Fatal("expected an error when every factory fails")
+	}
+	if name != "" {
+		t.Errorf("selected %q, want no provider", name)
+	}
+	if p != nil {
+		t.Error("provider must be nil so callers can guard on it")
+	}
+}
+
+// A factory that returns a nil concrete pointer mirrors opnsense.New's shape.
+// Converted to dns.Provider that value is not == nil, so anything that stores it
+// before checking the error hands the caller a provider that panics on first use
+// instead of reporting the configuration error.
+func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
+	factories := []providerFactory{
+		{"typednil", func(logr.Logger, map[string]string) (dns.Provider, error) {
+			var p *stubProvider
+			return p, errors.New("missing base_url")
+		}},
+	}
+
+	p, _, err := selectProvider(logr.Discard(), factories, nil)
+	if err == nil {
+		t.Fatal("expected the factory error to be returned")
+	}
+	if p != nil {
+		t.Error("a typed-nil provider was returned; callers guard with == nil")
 	}
 }

@@ -1,0 +1,15 @@
+# Provider config for local development. base_url points at the in-memory fake
+# from `make fake-opnsense` (hack/fake-opnsense over internal/testenv), which
+# stores everything in memory and accepts any credentials.
+#
+# For a real appliance, copy this file, set base_url to the appliance API and put
+# real credentials in .env.
+
+provider: opnsense
+upsert: true
+
+settings:
+  base_url: "http://127.0.0.1:8053/api"
+  api_key: "${OPNSENSE_API_KEY}"
+  api_secret: "${OPNSENSE_API_SECRET}"
+  default_ttl: "60"

@@ -50,12 +50,16 @@ resources:
 Run the following command to install the controller from the OCI registry:
 
 ```bash
-helm install yk-dns-manager oci://ghcr.io/yuriy-kovalchuk/yk-dns-manager-chart/yk-dns-manager \
-  --version <version> 
-  --namespace yk-dns-manager 
-  --create-namespace 
+helm install yk-dns-manager oci://ghcr.io/yuriy-kovalchuk/charts/yk-dns-manager \
+  --version <version> \
+  --namespace yk-dns-manager \
+  --create-namespace \
   -f values.local.yaml
 ```
+
+The chart is published under `oci://ghcr.io/yuriy-kovalchuk/charts/`. The image it
+defaults to is `ghcr.io/yuriy-kovalchuk/yk-dns-manager`, tagged with the chart's
+`appVersion`, which the release pipeline stamps from the release tag.
 
 ## Verification
 

@@ -1,3 +1,5 @@
+# Helm overrides for the kind cluster that `make kind-deploy` creates.
+
 image:
   tag: local
   pullPolicy: Never  # image is loaded directly into kind via `make kind-load`
@@ -5,7 +7,7 @@ image:
 logLevel: debug
 
 domainMap:
-  "*.example.com": "10.0.0.1"
+  example.com: 10.0.0.1
 
 dnsProvider:
   provider: opnsense

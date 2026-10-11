@@ -13,6 +13,12 @@ CHART_DIR  := charts/$(APP_NAME)
 
 KIND_CLUSTER        ?= yk-dns-manager-dev
 KIND_CONFIG         := hack/kind-config.yaml
+# Every kind target pins this context. Without it a target run before kind-up
+# acts on whatever the kubeconfig currently points at, which in practice is a
+# real cluster.
+KIND_CONTEXT        := kind-$(KIND_CLUSTER)
+KIND_NAMESPACE      ?= yk-dns-manager-system
+FAKE_IMAGE          ?= fake-opnsense:local
 # Must match the sigs.k8s.io/gateway-api version in go.mod: the controller is
 # compiled against these types, and CRDs two minor versions behind silently
 # prune fields the reconciler reads.
@@ -34,7 +40,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -70,6 +76,7 @@ build:
 ## run: build and run the primary binary locally
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
+	@echo "reconciling against kubecontext: $$(kubectl config current-context 2>/dev/null || echo unknown)"
 	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
 
 # ── Testing ────────────────────────────────────────────────────────────────────
@@ -148,9 +155,13 @@ docker-build-local:
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMAGE):local .
 
+## kind-up: create the dev cluster, or say so when reusing an existing one
 kind-up:
-	kind get clusters | grep -q "^$(KIND_CLUSTER)$$" || \
-		kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG)
+	@if kind get clusters | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "reusing cluster $(KIND_CLUSTER) ($$(kubectl --context $(KIND_CONTEXT) get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null || echo 'not responding')) — run 'make kind-down' or 'make kind-reset' to recreate it"; \
+	else \
+		kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG); \
+	fi
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
@@ -158,34 +169,80 @@ kind-down:
 kind-load: docker-build-local
 	kind load docker-image $(IMAGE):local --name $(KIND_CLUSTER)
 
+## fake-opnsense: serve the in-memory OPNsense API locally for `make run`
+fake-opnsense:
+	go run ./hack/fake-opnsense --addr=:8053
+
+## kind-fake-install: run the fake OPNsense inside the kind cluster
+kind-fake-install:
+	docker build -f Dockerfile.fake -t $(FAKE_IMAGE) .
+	kind load docker-image $(FAKE_IMAGE) --name $(KIND_CLUSTER)
+	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) apply -f hack/fake-opnsense-deployment.yaml
+
+kind-fake-delete:
+	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) delete -f hack/fake-opnsense-deployment.yaml --ignore-not-found
+
 kind-secret:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@set -a && . ./.env && set +a && \
-		kubectl create namespace yk-dns-manager-system --dry-run=client -o yaml | kubectl apply -f - && \
-		kubectl create secret generic yk-dns-manager-credentials \
-			--namespace yk-dns-manager-system \
+		kubectl --context $(KIND_CONTEXT) create namespace $(KIND_NAMESPACE) --dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f - && \
+		kubectl --context $(KIND_CONTEXT) create secret generic yk-dns-manager-credentials \
+			--namespace $(KIND_NAMESPACE) \
 			--from-literal=OPNSENSE_API_KEY=$${OPNSENSE_API_KEY} \
 			--from-literal=OPNSENSE_API_SECRET=$${OPNSENSE_API_SECRET} \
-			--dry-run=client -o yaml | kubectl apply -f -
+			--dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f -
 
-kind-deploy: kind-up kind-load kind-secret
-	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
-	helm upgrade --install yk-dns-manager $(CHART_DIR) \
-		--namespace yk-dns-manager-system \
+## kind-crds: install the Gateway API CRDs the controller watches
+kind-crds:
+	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+
+# kind-deploy installs the in-memory fake so the local path works with no
+# appliance. To deploy against a real one, edit hack/local-values.yaml and drop
+# the kind-fake-install prerequisite.
+## kind-deploy: cluster + CRDs + image + fake appliance + controller
+kind-deploy: kind-up kind-crds kind-load kind-secret kind-fake-install
+	@if ! helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
+		--namespace $(KIND_NAMESPACE) \
 		--create-namespace \
 		-f hack/local-values.yaml \
-		--wait
+		--wait --timeout 2m; then \
+		echo "--- deploy did not become ready; pod status and recent events ---"; \
+		kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get pods -o wide; \
+		kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get events --sort-by=.lastTimestamp | tail -10; \
+		exit 1; \
+	fi
 
 kind-undeploy:
-	helm uninstall yk-dns-manager --namespace yk-dns-manager-system --ignore-not-found
+	helm --kube-context $(KIND_CONTEXT) uninstall $(APP_NAME) --namespace $(KIND_NAMESPACE) --ignore-not-found
+
+## kind-demo: apply the sample HTTPRoute that the local domain map matches
+kind-demo:
+	kubectl --context $(KIND_CONTEXT) apply -f hack/local/httproute.yaml
 
 kind-reload: kind-load
-	kubectl rollout restart deployment/yk-dns-manager --namespace yk-dns-manager-system
+	kubectl --context $(KIND_CONTEXT) rollout restart deployment/$(APP_NAME) --namespace $(KIND_NAMESPACE)
 
 kind-logs:
-	kubectl logs --namespace yk-dns-manager-system \
-		-l app.kubernetes.io/name=yk-dns-manager \
+	kubectl --context $(KIND_CONTEXT) logs --namespace $(KIND_NAMESPACE) \
+		-l app.kubernetes.io/name=$(APP_NAME) \
 		--follow
+
+## kind-status: print the local dev state in one place
+kind-status:
+	@echo "kubecontext:  $$(kubectl config current-context 2>/dev/null || echo none)"
+	@if kind get clusters | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "cluster:      $(KIND_CLUSTER) ($$(kubectl --context $(KIND_CONTEXT) get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null || echo 'not responding'))"; \
+	else \
+		echo "cluster:      absent — make kind-up"; \
+	fi
+	@echo "gateway CRDs: $$(kubectl --context $(KIND_CONTEXT) get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1 && echo installed || echo 'missing — make kind-crds')"
+	@echo "controller:   $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy $(APP_NAME) -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not deployed — make kind-deploy')"
+	@echo "fake in-cluster: $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy fake-opnsense -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not running — make kind-fake-install')"
+	@echo "fake on host:    $$(curl -sf --max-time 2 localhost:8053/records >/dev/null 2>&1 && echo 'listening on :8053' || echo 'not listening — make fake-opnsense')"
+	@test -f .env && echo "env:          $$(grep -E '^(DOMAIN_MAP_PATH|DNS_PROVIDER_PATH)=' .env | sed 's/^[A-Z_]*=//' | tr '\n' ' ')" || echo "env:          no .env — cp .env.example .env"
+
+## kind-reset: rebuild the dev cluster from scratch (use it after the kind pin changes)
+kind-reset: kind-down kind-deploy
 
 # ── Git hooks ──────────────────────────────────────────────────────────────────
 ## install-hooks: install git hooks from .githooks/

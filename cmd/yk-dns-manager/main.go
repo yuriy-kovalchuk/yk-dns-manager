@@ -52,6 +52,27 @@ func newProviders() []providerFactory {
 	//   }},
 }
 
+// selectProvider walks the factory list in order and returns the first provider
+// that initializes.
+//
+// The provider is assigned only after the error is checked. A factory such as
+// opnsense.New returns a concrete *Provider; when it fails that pointer is nil,
+// and converting it to the dns.Provider interface produces an interface that is
+// not == nil. Storing it and calling a method later panics with a nil dereference
+// instead of reporting the configuration error.
+func selectProvider(log logr.Logger, factories []providerFactory, settings map[string]string) (dns.Provider, string, error) {
+	for _, pf := range factories {
+		log.Info("trying to initialize provider", "name", pf.name)
+		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
+		if err != nil {
+			log.Info("provider initialization failed, trying next", "name", pf.name, "error", err)
+			continue
+		}
+		return p, pf.name, nil
+	}
+	return nil, "", fmt.Errorf("no DNS provider could be initialized from config")
+}
+
 var scheme = runtime.NewScheme()
 
 func init() {
@@ -71,13 +92,12 @@ func run() error {
 		logLevel      string
 		domainMapPath string
 		domainMap     *config.DomainMap
-		dnsProvider   dns.Provider
 	)
 
 	ctx := context.Background()
 	log := ctrl.Log.WithName("setup")
 
-	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level (debug, info, warn, error)")
+	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
 	flag.Parse()
 
@@ -118,25 +138,20 @@ func run() error {
 	}
 	log.Info("loaded provider config", "provider", providerCfg.Provider, "upsert", providerCfg.Upsert)
 
-	var selectedProvider string
-	for _, pf := range newProviders() {
-		log.Info("trying to initialize provider", "name", pf.name)
-		dnsProvider, err = pf.fn(ctrl.Log.WithName("dns-"+pf.name), providerCfg.Settings)
-		if err != nil {
-			log.Info("provider initialization failed, trying next", "name", pf.name, "error", err)
-			continue
-		}
-		selectedProvider = pf.name
-		break
-	}
-	if dnsProvider == nil {
-		return fmt.Errorf("no DNS provider could be initialized from config")
+	dnsProvider, selectedProvider, err := selectProvider(log, newProviders(), providerCfg.Settings)
+	if err != nil {
+		return err
 	}
 	log.Info("initialized DNS provider", "name", selectedProvider)
 
 	log.Info("checking DNS provider connectivity")
 	if err := dnsProvider.HealthCheck(ctx); err != nil {
-		return fmt.Errorf("DNS provider health check failed: %w", err)
+		// Non-fatal on purpose. The appliance may be down or the credentials may
+		// be wrong, and exiting here CrashLoops the pod without ever surfacing the
+		// reason through the reconciler. Every reconcile reports the same failure
+		// and requeues with backoff, so a provider that comes back recovers on its
+		// own without a restart.
+		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", selectedProvider)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
