@@ -90,11 +90,11 @@ test: test-unit test-integration test-envtest
 
 ## test-unit: run unit tests with coverage profile
 test-unit:
-	go test -race -timeout 120s -v -count=1 -coverprofile=coverage.txt ./internal/...
+	go test -race -timeout 120s -v -count=1 -coverprofile=coverage.txt ./cmd/... ./internal/...
 
 ## test-cover: run tests, print function summary, generate HTML report
 test-cover:
-	go test -v -race -count=1 -coverprofile=coverage.txt ./internal/...
+	go test -v -race -count=1 -coverprofile=coverage.txt ./cmd/... ./internal/...
 	go tool cover -html=coverage.txt -o coverage.html
 
 ## test-integration: run integration tests
