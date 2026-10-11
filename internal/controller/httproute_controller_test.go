@@ -21,10 +21,12 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
-// mockDNSProvider records DNS operations for test assertions.
+// mockDNSProvider records DNS operations for test assertions. Ensure with
+// overwrite on is recorded as an upsert, with overwrite off as a create, which
+// is skipped for hostnames in existingHosts.
 type mockDNSProvider struct {
 	mu              sync.Mutex
-	existingHosts   map[string]bool // hostnames that Exists returns true for
+	existingHosts   map[string]bool // hostnames that already hold a live record
 	createdRecords  []dns.Record
 	upsertedRecords []dns.Record
 	deletedHosts    []string
@@ -32,47 +34,42 @@ type mockDNSProvider struct {
 	flushErr        error
 }
 
-func (m *mockDNSProvider) Exists(_ context.Context, hostname, _ string) (bool, error) {
-	if m.existingHosts != nil {
-		return m.existingHosts[hostname], nil
-	}
-	return false, nil
-}
-
-func (m *mockDNSProvider) Create(_ context.Context, record dns.Record) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.createdRecords = append(m.createdRecords, record)
-	return nil
-}
-
-func (m *mockDNSProvider) Update(_ context.Context, _ dns.Record) error {
-	return nil
-}
-
-func (m *mockDNSProvider) Delete(_ context.Context, hostname, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deletedHosts = append(m.deletedHosts, hostname)
-	return nil
-}
-
-func (m *mockDNSProvider) Upsert(_ context.Context, record dns.Record) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.upsertedRecords = append(m.upsertedRecords, record)
-	return nil
-}
-
 func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
 	return nil
 }
 
-func (m *mockDNSProvider) Flush(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.flushes++
-	return m.flushErr
+func (m *mockDNSProvider) Batch() dns.Batch {
+	return mockBatch{m}
+}
+
+type mockBatch struct{ m *mockDNSProvider }
+
+func (b mockBatch) Ensure(_ context.Context, record dns.Record, overwrite bool) (dns.Result, error) {
+	b.m.mu.Lock()
+	defer b.m.mu.Unlock()
+	if overwrite {
+		b.m.upsertedRecords = append(b.m.upsertedRecords, record)
+		return dns.Updated, nil
+	}
+	if b.m.existingHosts[record.Hostname] {
+		return dns.Kept, nil
+	}
+	b.m.createdRecords = append(b.m.createdRecords, record)
+	return dns.Created, nil
+}
+
+func (b mockBatch) Remove(_ context.Context, hostname, _ string) error {
+	b.m.mu.Lock()
+	defer b.m.mu.Unlock()
+	b.m.deletedHosts = append(b.m.deletedHosts, hostname)
+	return nil
+}
+
+func (b mockBatch) Commit(_ context.Context) error {
+	b.m.mu.Lock()
+	defer b.m.mu.Unlock()
+	b.m.flushes++
+	return b.m.flushErr
 }
 
 func newTestDomainMap(t *testing.T) *config.DomainMap {

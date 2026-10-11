@@ -162,8 +162,6 @@ func TestSharedHostnameSurvivesOneRouteDeletion(t *testing.T) {
 // TestUnchangedRouteCausesNoWrites: upsert mode rewrites the override and
 // reloads Unbound on every reconcile, even when the record is already right.
 func TestUnchangedRouteCausesNoWrites(t *testing.T) {
-	pending(t, "audit B2, roadmap phase 2")
-
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("app", []string{"app.example.com"})
 	h.waitOwned("app", `["app.example.com"]`)
@@ -185,8 +183,6 @@ func TestUnchangedRouteCausesNoWrites(t *testing.T) {
 // TestDisabledManagedRecordIsReenabled: a disabled override the controller
 // created counts as existing, so in create mode the name never resolves again.
 func TestDisabledManagedRecordIsReenabled(t *testing.T) {
-	pending(t, "audit B8, roadmap phase 2")
-
 	h := start(t, harnessOptions{domainMap: exampleMap})
 	h.fake.Seed(testenv.HostOverride{
 		Enabled: "0", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",

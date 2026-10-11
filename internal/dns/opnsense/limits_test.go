@@ -32,7 +32,7 @@ func TestResponseBodyLimit(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	_, err = p.Exists(context.Background(), "app.example.com", "A")
+	err = p.Batch().Remove(context.Background(), "app.example.com", "A")
 	if err == nil {
 		t.Fatal("expected an oversized body to be rejected")
 	}
@@ -45,7 +45,12 @@ func TestResponseBodyLimit(t *testing.T) {
 // arbitrarily large body in the error, which then reaches the logs.
 func TestErrorBodyTruncated(t *testing.T) {
 	const padding = "PADPAD"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An empty list lets Ensure reach the add, which then fails.
+		if strings.HasSuffix(r.URL.Path, "/searchHostOverride") {
+			_, _ = io.WriteString(w, `{"rows":[]}`)
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, strings.Repeat(padding, 4096))
 	}))
@@ -56,7 +61,7 @@ func TestErrorBodyTruncated(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	err = p.Create(context.Background(), dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"})
+	_, err = p.Batch().Ensure(context.Background(), dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}, false)
 	if err == nil {
 		t.Fatal("expected a 500 to be reported")
 	}
@@ -74,4 +79,42 @@ func httpSettings(baseURL string) map[string]string {
 	s := baseSettings(baseURL)
 	s["allow_insecure_http"] = "true"
 	return s
+}
+
+// TestCommitChecksReconfigureStatus: OPNsense answers a reconfigure with
+// HTTP 200 and a status field. Anything but "ok" is a failure, and the publish
+// stays owed.
+func TestCommitChecksReconfigureStatus(t *testing.T) {
+	status := "failed"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/searchHostOverride"):
+			_, _ = io.WriteString(w, `{"rows":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/reconfigure"):
+			_, _ = io.WriteString(w, `{"status":"`+status+`"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p, err := New(logr.Discard(), httpSettings(srv.URL))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+
+	// A fresh provider owes one publish, so a used batch commits.
+	b := p.Batch()
+	if err := b.Remove(ctx, "app.example.com", "A"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := b.Commit(ctx); err == nil || !strings.Contains(err.Error(), `"failed"`) {
+		t.Fatalf("Commit = %v, want the failed status reported", err)
+	}
+
+	status = "OK"
+	if err := b.Commit(ctx); err != nil {
+		t.Fatalf("retried Commit: %v", err)
+	}
 }

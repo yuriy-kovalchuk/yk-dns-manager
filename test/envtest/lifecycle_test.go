@@ -91,3 +91,24 @@ func TestRouteIsDeletableWhileApplianceFails(t *testing.T) {
 	h.deleteRoute("app")
 	h.waitRouteGone("app")
 }
+
+// TestRecordPublishedAfterReconfigureRecovers: a failed publish makes the
+// reconcile fail and retry. The retry finds the override already staged and
+// writes nothing, but must still publish it.
+func TestRecordPublishedAfterReconfigureRecovers(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.fake.SetFailure(testenv.EndpointReconfigure, http.StatusServiceUnavailable)
+
+	h.createRoute("app", []string{"app.example.com"})
+	h.eventually("app.example.com staged", func() bool {
+		return hasRow(h.fake.Snapshot(), "app.example.com", "10.0.0.1")
+	})
+	if len(rows(h.fake.Published(), "app.example.com")) != 0 {
+		t.Fatal("published while reconfigure was failing")
+	}
+
+	h.fake.SetFailure(testenv.EndpointReconfigure, 0)
+	h.eventually("app.example.com published after recovery", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
+	})
+}

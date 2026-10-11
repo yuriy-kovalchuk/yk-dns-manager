@@ -77,6 +77,7 @@ type OPNsense struct {
 	failures  map[string]int
 
 	apiKey, apiSecret string
+	duringReconfigure func()
 }
 
 // NewOPNsense returns an empty fake with no overrides.
@@ -107,6 +108,16 @@ func (f *OPNsense) SetFailure(endpoint string, status int) {
 		return
 	}
 	f.failures[endpoint] = status
+}
+
+// DuringReconfigure registers fn to run inside every reconfigure, after the
+// staged config has been taken for publishing and before the response is
+// sent. A write fn makes is therefore not published by that reconfigure,
+// which is how tests make a write race with a publish in flight.
+func (f *OPNsense) DuringReconfigure(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.duringReconfigure = fn
 }
 
 // ServeHTTP routes the API paths the provider calls.
@@ -279,7 +290,11 @@ func (f *OPNsense) handleDel(w http.ResponseWriter, r *http.Request) {
 func (f *OPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
 	f.published = copyStore(f.store)
+	hook := f.duringReconfigure
 	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
