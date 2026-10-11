@@ -17,9 +17,10 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 | Command | Description |
 |---------|-------------|
 | `make build` | Compile binary to `bin/yk-dns-manager` with ldflags |
-| `make test` | All tests (unit + integration) |
+| `make test` | All tests (unit + integration + envtest) |
 | `make test-unit` | Unit tests only, coverage profile |
 | `make test-integration` | Integration tests with fake HTTP server |
+| `make test-envtest` | Real manager against an envtest API server and the fake appliance (downloads binaries to `bin/k8s`) |
 | `make test-cover` | Coverage report (HTML at `coverage.html`) |
 | `make run` | Build and run locally (sources `.env`) |
 | `make kind-up` | Start local kind cluster |
