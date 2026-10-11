@@ -29,8 +29,12 @@ dnsProvider:
   provider: opnsense
   settings:
     base_url: "https://opnsense.example.com/api" # Replace with your OPNsense URL
-    skip_tls_verify: "false"
+    # Pin the CA that signed the appliance certificate rather than turning
+    # verification off. Put the CA in a ConfigMap under the key ca.pem and name
+    # that ConfigMap in caConfigMap.
+    ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   existingSecret: "yk-dns-manager-opnsense-credentials"
+  caConfigMap: "opnsense-ca"
 
 resources:
   requests:

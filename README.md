@@ -90,7 +90,7 @@ provider: opnsense
 upsert: false
 settings:
   base_url: "https://opnsense.example.com/api"
-  skip_tls_verify: "false"
+  ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
   default_ttl: "300"
@@ -98,7 +98,8 @@ settings:
 
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
 - `upsert: true` updates existing records on every reconcile; when `false`, only creates missing records.
-- Settings support `${ENV_VAR}` expansion for credential injection.
+- Settings support `${ENV_VAR}` expansion for credential injection. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
+- `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
 
 Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
 
