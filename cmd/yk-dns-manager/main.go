@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.uber.org/zap/zapcore"
@@ -76,6 +77,9 @@ func selectProvider(log logr.Logger, factories []providerFactory, name string, s
 	}
 	return nil, fmt.Errorf("unknown DNS provider %q; available: %s", name, strings.Join(known, ", "))
 }
+
+// healthCheckTimeout bounds the startup connectivity check.
+const healthCheckTimeout = 10 * time.Second
 
 var scheme = runtime.NewScheme()
 
@@ -149,7 +153,12 @@ func run() error {
 	log.Info("initialized DNS provider", "name", providerCfg.Provider)
 
 	log.Info("checking DNS provider connectivity")
-	if err := dnsProvider.HealthCheck(ctx); err != nil {
+	// A short deadline of its own: the HTTP client's 30s timeout applies per
+	// request, and startup should not hang on an appliance that is down.
+	hctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	err = dnsProvider.HealthCheck(hctx)
+	cancel()
+	if err != nil {
 		// Non-fatal on purpose. The appliance may be down or the credentials may
 		// be wrong, and exiting here CrashLoops the pod without ever surfacing the
 		// reason through the reconciler. Every reconcile reports the same failure
