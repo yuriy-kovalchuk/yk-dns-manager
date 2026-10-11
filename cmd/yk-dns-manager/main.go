@@ -5,11 +5,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/go-logr/logr"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -76,15 +80,18 @@ func run() error {
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
 	flag.Parse()
 
-	opts := zap.Options{Development: logLevel == "debug"}
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	level, err := parseLogLevel(logLevel)
+	if err != nil {
+		return err
+	}
+	// The level is what turns debug output on.
+	ctrl.SetLogger(newLogger(level))
 
-	log.Info("starting yk-dns-manager", "version", version.Version)
+	log.Info("starting yk-dns-manager", "version", version.Version, "logLevel", level.String())
 
 	if domainMapPath == "" {
 		return fmt.Errorf("--domain-map-path flag or DOMAIN_MAP_PATH environment variable is required")
 	}
-	var err error
 	domainMap, err = config.LoadDomainMap(domainMapPath)
 	if err != nil {
 		return fmt.Errorf("unable to load domain map: %w", err)
@@ -156,4 +163,36 @@ func run() error {
 	}
 
 	return nil
+}
+
+// newLogger builds the process logger. Development stays off: it swaps in a
+// console encoder, attaches stack traces and turns DPanic into a real panic, and
+// coupling it to "debug" put all three in production clusters. Debug output comes
+// from the level, not from development mode.
+func newLogger(level zapcore.Level) logr.Logger {
+	return zap.New(zap.UseFlagOptions(&zap.Options{Level: level}))
+}
+
+// parseLogLevel maps the --zap-log-level value to a zap level. logr verbosity is
+// the negative of the zap level, so V(1) needs zapcore.DebugLevel (-1); an
+// operator can ask for deeper verbosity with a numeric value such as "-3".
+func parseLogLevel(s string) (zapcore.Level, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return zapcore.InfoLevel, nil
+	}
+	// zapcore.ParseLevel only accepts non-negative numbers, which would leave
+	// logr verbosity above V(0) unreachable. Handle the numeric form here so an
+	// operator can request V(3) with "-3".
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < math.MinInt8 || n > math.MaxInt8 {
+			return zapcore.InfoLevel, fmt.Errorf("invalid --zap-log-level %q: out of range", s)
+		}
+		return zapcore.Level(n), nil
+	}
+	level, err := zapcore.ParseLevel(s)
+	if err != nil {
+		return zapcore.InfoLevel, fmt.Errorf("invalid --zap-log-level %q: %w", s, err)
+	}
+	return level, nil
 }
