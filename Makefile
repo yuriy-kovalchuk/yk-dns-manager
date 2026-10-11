@@ -40,7 +40,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -76,6 +76,7 @@ build:
 ## run: build and run the primary binary locally
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
+	@echo "reconciling against kubecontext: $$(kubectl config current-context 2>/dev/null || echo unknown)"
 	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
 
 # ── Testing ────────────────────────────────────────────────────────────────────
@@ -187,7 +188,10 @@ kind-secret:
 			--from-literal=OPNSENSE_API_SECRET=$${OPNSENSE_API_SECRET} \
 			--dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f -
 
-kind-deploy: kind-up kind-load kind-secret
+# kind-deploy installs the in-memory fake so the local path works with no
+# appliance. To deploy against a real one, edit hack/local-values.yaml and drop
+# the kind-fake-install prerequisite.
+kind-deploy: kind-up kind-load kind-secret kind-fake-install
 	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
 	helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
 		--namespace $(KIND_NAMESPACE) \
@@ -197,6 +201,10 @@ kind-deploy: kind-up kind-load kind-secret
 
 kind-undeploy:
 	helm --kube-context $(KIND_CONTEXT) uninstall $(APP_NAME) --namespace $(KIND_NAMESPACE) --ignore-not-found
+
+## kind-demo: apply the sample HTTPRoute that the local domain map matches
+kind-demo:
+	kubectl --context $(KIND_CONTEXT) apply -f hack/local/httproute.yaml
 
 kind-reload: kind-load
 	kubectl --context $(KIND_CONTEXT) rollout restart deployment/$(APP_NAME) --namespace $(KIND_NAMESPACE)
