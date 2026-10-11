@@ -6,8 +6,9 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 39 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling |
-| Integration | `test/integration/` | 11 | The real OPNsense provider against an in-process fake appliance API over HTTP |
+| Unit | `cmd/`, `internal/` | 45 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Integration | `test/integration/` | 14 | The real OPNsense provider against an in-process fake appliance API over HTTP |
+| Envtest | `test/envtest/` | 5 + 8 pending | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
 
 There are no mocking frameworks. Tests use plain structs implementing `dns.Provider` and `sigs.k8s.io/controller-runtime/pkg/client/fake`.
@@ -58,6 +59,19 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestResponseBodyLimit` | A body over the cap is reported as a limit error, not as truncated JSON |
 | `TestErrorBodyTruncated` | Error bodies are capped rather than dumped whole into the log |
 
+### Fake appliance — `internal/testenv/`
+
+The fake is only useful while it behaves like OPNsense, so its contract is pinned too.
+
+| Test | Description |
+|---|---|
+| `TestFakeRequiresCredentialsWhenConfigured` | With `RequireCredentials`, missing or wrong basic auth gets 401 |
+| `TestFakeUnknownUUIDAnswers200WithResult` | Unknown uuids get HTTP 200 with `result: failed` (set) or `not found` (del), not a 404 |
+| `TestFakeValidatesRows` | Rows the appliance would reject get `result: failed` with `validations` |
+| `TestFakeWritesRequirePOST` | Write endpoints ignore other methods |
+| `TestFakePublishesOnlyOnReconfigure` | Writes are staged; only a successful reconfigure publishes them |
+| `TestFakeSeedIsPublished` | Seeded rows count as configuration that was already live |
+
 ### HTTPRoute controller — `internal/controller/httproute_controller_test.go`
 
 Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster and no DNS traffic.
@@ -77,6 +91,8 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 
 `test/integration/opnsense_test.go` drives the real provider over real HTTP against `internal/testenv.OPNsense`, the same in-memory appliance `make fake-opnsense` serves. This is where wire format is pinned: JSON shapes, URL construction, status handling and response parsing.
 
+The fake follows the appliance where the provider depends on it. Writes are staged (`Snapshot`) and only published (`Published`) by reconfigure. Unknown uuids get HTTP 200 with a result body. Invalid rows are rejected with `validations`. In these tests it requires the credentials the provider sends. `SetFailure` makes an endpoint return an error status, to test failure paths.
+
 ```bash
 make test-integration
 ```
@@ -94,6 +110,46 @@ make test-integration
 | `TestDeleteRemovesAllDuplicates` | Every duplicate override for a hostname is deleted, not just the first |
 | `TestUpsertConvergesDuplicates` | Writing to a hostname with duplicates leaves exactly one row, holding the new value |
 | `TestUpsertUpdatePathCallCount` | An update-path `Upsert` costs one list fetch plus one write, and `Flush` issues exactly one `reconfigure`; an idle `Flush` issues none |
+| `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
+| `TestCreateSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error, not a success |
+| `TestFlushPublishes` | Writes go live only on `Flush`; a failed `Flush` stays pending and a retry publishes |
+
+## Envtest
+
+`test/envtest/` starts a real API server and etcd (controller-runtime envtest) with the Gateway API CRDs from the module go.mod pins. Each test starts its own manager, running the real reconciler and OPNsense provider against its own fake appliance and watching its own namespace. This covers what the controller unit tests cannot, because they call `Reconcile` directly on a fake client: the event predicates, the finalizer → reconcile chain, and the API server's generation and finalizer semantics.
+
+```bash
+make test-envtest   # downloads pinned control-plane binaries into bin/k8s, then runs the suite
+```
+
+Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and the pre-push hook) still works without the binaries. `make test`, and so CI, always runs it.
+
+| Test | Description |
+|---|---|
+| `TestCreatePublishesRecord` | In both modes, the finalizer is added, the record is published, and the route records ownership |
+| `TestHostnameChangeMovesRecord` | Changing a hostname publishes the new record and removes the old one |
+| `TestDeleteRemovesRecordAndReleasesRoute` | Deleting the route unpublishes the record and releases the finalizer |
+| `TestUnmatchedRouteIsIgnored` | A route the domain map does not cover gets no finalizer and no appliance writes |
+| `TestRouteIsDeletableWhileApplianceFails` | A route is still deleted while every appliance call fails |
+
+### Pending findings
+
+`test/envtest/findings_test.go` pins findings from the 2026-10-12 audit (finding IDs such as S1 and B2) that are not fixed yet. Each test describes the correct behaviour, fails on the current code, and is skipped through `pending()`. The change that fixes a finding deletes its `pending` call. To run them all:
+
+```bash
+ENVTEST_RUN_PENDING=1 make test-envtest
+```
+
+| Test | Finding | Roadmap phase |
+|---|---|---|
+| `TestAnnotationCannotDeleteForeignRecords` | S1 | 0 |
+| `TestUnchangedRouteCausesNoWrites` | B2 | 2 |
+| `TestDisabledManagedRecordIsReenabled` | B8 | 2 |
+| `TestUnmanagedRecordIsNotOverwritten` | S2 | 3 |
+| `TestUnmanagedRecordSurvivesRouteDeletion` | S2 | 3 |
+| `TestSharedHostnameSurvivesOneRouteDeletion` | B1 | 3 |
+| `TestDeleteIsPublishedAfterReconfigureRecovers` | B9 | 4 |
+| `TestUnacceptedRouteGetsNoRecord` | S3 | 4 |
 
 ## End-to-end
 
@@ -111,7 +167,8 @@ row. Automating this as `make test-e2e` is open work.
 ## Running tests
 
 ```bash
-make test              # unit + integration
+make test              # unit + integration + envtest
+make test-envtest      # envtest only
 make test-unit         # unit only, with a coverage profile
 make test-cover        # function summary + coverage.html
 make test-integration  # integration only
