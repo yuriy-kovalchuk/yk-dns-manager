@@ -49,7 +49,6 @@ settings:
   ca_file: "./opnsense-ca.pem"
   api_key: ""       # or hardcode for local dev
   api_secret: ""
-  default_ttl: "60"
 ```
 
 ```

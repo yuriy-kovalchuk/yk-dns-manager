@@ -69,7 +69,6 @@ dnsProvider:
     ca_file: ""
     api_key: "${OPNSENSE_API_KEY}"
     api_secret: "${OPNSENSE_API_SECRET}"
-    default_ttl: "300"
   # -- Name of an existing Secret containing provider credentials.
   # The secret's data will be injected as environment variables, which
   # can be referenced in settings via ${ENV_VAR} syntax.

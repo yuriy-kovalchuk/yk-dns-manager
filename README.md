@@ -93,7 +93,6 @@ settings:
   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
-  default_ttl: "300"
 ```
 
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
