@@ -41,13 +41,13 @@ type Provider interface {
 }
 
 type Batch interface {
-    Ensure(ctx context.Context, record Record, overwrite bool) (Result, error)
-    Remove(ctx context.Context, hostname, recordType string) error
+    Ensure(ctx context.Context, record Record, opts EnsureOptions) (Result, error)
+    Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error
     Commit(ctx context.Context) error
 }
 ```
 
-The controller starts one `Batch` per reconcile. A batch reads the backend's records once, on first use, and works from that view, so a route with any number of hostnames costs one read. `Ensure` makes a hostname resolve to a value. It returns `Created`, `Updated`, `Unchanged` (nothing written) or `Kept` (a live record with another value, left alone because `overwrite` is off), and it writes nothing when the record already matches. `Commit` publishes whatever is staged and not yet published, including changes from earlier batches whose publish failed. The controller delegates DNS entirely to the selected provider — it never knows which backend is in use.
+The controller starts one `Batch` per reconcile. A batch reads the backend's records once, on first use, and works from that view, so a route with any number of hostnames costs one read. `Ensure` makes a hostname resolve to a value as a managed record. It returns `Created`, `Updated`, `Unchanged` (nothing written), `Kept` (a managed record with another value, left alone because `opts.Overwrite` is off) or `Conflict` (someone else's record holds the name, and nothing was written). `Remove` deletes only managed records. `Commit` publishes whatever is staged and not yet published, including changes from earlier batches whose publish failed. The controller delegates DNS entirely to the selected provider — it never knows which backend is in use.
 
 ## Data Flow
 
@@ -57,10 +57,17 @@ The controller starts one `Batch` per reconcile. A batch reads the backend's rec
 2. **Read route** — uses `APIReader` (bypasses cache) for read-after-write consistency during conflict retries.
 3. **Filter by domain map** — hostnames that have no entry in the domain map are silently skipped. This lets a single controller serve multiple load balancers via different domain maps.
 4. **If deletion timestamp set:** remove DNS records, then remove the finalizer (`dns.yk/cleanup`). If record deletion fails, errors are logged but never block the finalizer — the route must always be removed.
-5. **If new or updated:** add finalizer (first reconcile), then `Ensure` a record for each matching hostname, with overwrite set from `upsert`, and `Commit` the batch at the end of the reconcile.
-6. **Update annotation** (`dns.yk/managed-hostnames`) tracks which hostnames have actual DNS records for comparison on subsequent reconciles.
+5. **If new or updated:** add finalizer (first reconcile), release owned hostnames that left the spec or the domain map, then `Ensure` a record for each matching hostname with `Overwrite` set from `upsert`, and `Commit` the batch at the end of the reconcile.
+6. **Update annotation** (`dns.yk/managed-hostnames`): the hostnames this route actually manages. A hostname that hit a conflict is left out.
 
-Anyone who can edit a route can write that annotation, so on its own it never authorizes a delete. Both cleanup paths only delete annotated hostnames the domain map covers. As a result, when a domain is dropped from the map, records already created under it are left in place and logged, to be removed by hand.
+### Ownership
+
+The provider decides which records it may touch, not the controller:
+
+- **The marker.** Every record the controller writes carries an ownership marker; for OPNsense it is the override description `yk-dns-manager: managed record, do not edit`. The provider only ever changes or deletes records carrying it. A live record without it belongs to someone else, and `Ensure` reports `Conflict` instead of replacing or shadowing it. Route editors cannot write the marker, so nothing in an HTTPRoute can make the controller delete a record it does not manage.
+- **The annotation** remembers which hostnames a route manages, so a hostname that leaves the spec or the domain map can be released. It never authorizes a delete on its own.
+- **Shared hostnames.** Routes are indexed by hostname. Releasing a hostname deletes its record only when no other live route still claims it.
+- **Upgrading.** Versions before the marker wrote `managed by yk-dns-manager`. Such a legacy record is adopted (`EnsureOptions.AdoptLegacy`, `Remove`'s `adoptLegacy`) only for a hostname the route's annotation already lists and the domain map covers, and is rewritten with the marker. The annotation only lists names the route actually manages, so a new route cannot adopt another route's legacy record through it.
 
 ### Domain Map Lookup
 
@@ -136,12 +143,22 @@ func (p *Provider) Batch() dns.Batch                      { /* ... */ }
 
 type batch struct { /* ... */ }
 
-func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (dns.Result, error) { /* ... */ }
-func (b *batch) Remove(ctx context.Context, hostname, recordType string) error                    { /* ... */ }
-func (b *batch) Commit(ctx context.Context) error                                                 { /* ... */ }
+func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) { /* ... */ }
+func (b *batch) Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error         { /* ... */ }
+func (b *batch) Commit(ctx context.Context) error                                                        { /* ... */ }
 ```
 
-A backend that applies every write immediately can make `Commit` a no-op. `test/integration` shows the behaviour a provider is expected to have.
+The provider must be able to tell its own records from everyone else's (see [Ownership](#ownership)): it needs somewhere on the backend to store a marker. A backend that applies every write immediately can make `Commit` a no-op.
+
+Run the conformance suite against it. It pins the whole contract, ownership included, and only needs an adapter that seeds records and reads them back from a test backend; `test/integration/conformance_test.go` is the OPNsense one:
+
+```go
+func TestConformance(t *testing.T) {
+    dnstest.Run(t, func(t *testing.T) (dns.Provider, dnstest.Backend) {
+        // start a fake backend, return the provider and an adapter over it
+    })
+}
+```
 
 **2. Register it in `main()`:**
 ```go

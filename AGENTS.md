@@ -33,6 +33,7 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 ## Key Patterns
 - **Provider interface is the only DNS boundary.** Controllers never import provider packages directly. Adding a new backend: implement `Provider`, register in `newProviders()`, set config `provider` field.
 - **Domain map walk-up matching:** exact → wildcard at each parent level → nil. One controller serves multiple domains/ILBs via one domain map file.
-- **The ownership annotation never authorizes a delete on its own.** `dns.yk/managed-hostnames` is writable by any route editor, so cleanup only deletes annotated hostnames the domain map covers.
+- **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
+- **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
 - **Finalizer cleanup is best-effort.** Individual DNS deletion failures are logged but never block finalizer removal — the HTTPRoute must always be deletable.
 - **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files.

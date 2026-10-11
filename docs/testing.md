@@ -6,9 +6,9 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 47 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
-| Integration | `test/integration/` | 16 | The real OPNsense provider against an in-process fake appliance API over HTTP |
-| Envtest | `test/envtest/` | 9 + 5 pending | The real manager, predicates and provider against a real API server and the fake appliance |
+| Unit | `cmd/`, `internal/` | 50 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Integration | `test/integration/` | 11 + conformance | The provider conformance suite and OPNsense-specific checks, against an in-process fake appliance over HTTP |
+| Envtest | `test/envtest/` | 14 + 2 pending | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
 
 There are no mocking frameworks. Tests use plain structs implementing `dns.Provider` and `sigs.k8s.io/controller-runtime/pkg/client/fake`.
@@ -86,32 +86,41 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_CreateSkipsExisting` | Leaves existing records alone when upsert is off |
 | `TestHTTPRouteReconciler_Deletion` | Finalizer cleanup deletes the records |
 | `TestHTTPRouteReconciler_DeletionWithoutMatchingHostname` | A route whose hostnames no longer match the domain map is still deletable — the orphaned-finalizer bug |
-| `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec are deleted; names outside the domain map are never deleted through the annotation; corrupt annotations do not wedge the route |
+| `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec or the domain map are released; names outside the map are released without adopting legacy records; corrupt annotations do not wedge the route |
+| `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
+| `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
+| `TestHTTPRouteReconciler_SharedHostnameIsKept` | Deleting one of two routes sharing a hostname keeps the record (B1) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
 ## Integration tests
 
-`test/integration/opnsense_test.go` drives the real provider over real HTTP against `internal/testenv.OPNsense`, the same in-memory appliance `make fake-opnsense` serves. This is where wire format is pinned: JSON shapes, URL construction, status handling and response parsing.
+`test/integration/` drives the real provider over real HTTP against `internal/testenv.OPNsense`, the same in-memory appliance `make fake-opnsense` serves.
 
-The fake follows the appliance where the provider depends on it. Writes are staged (`Snapshot`) and only published (`Published`) by reconfigure. Unknown uuids get HTTP 200 with a result body. Invalid rows are rejected with `validations`. In these tests it requires the credentials the provider sends. `SetFailure` makes an endpoint return an error status, to test failure paths.
+The fake follows the appliance where the provider depends on it. Writes are staged (`Snapshot`) and only published (`Published`) by reconfigure. Unknown uuids get HTTP 200 with a result body. Invalid rows are rejected with `validations`. In these tests it requires the credentials the provider sends. `SetFailure` makes an endpoint return an error status, and `DuringReconfigure` lets a write race a publish.
 
 ```bash
 make test-integration
 ```
 
+### Provider conformance — `internal/dns/dnstest`
+
+The contract every provider must meet, written once against `dns.Provider` and run by each provider through an adapter that seeds and reads records on its test backend (`conformance_test.go` for OPNsense). It covers:
+
+- creating, updating, keeping (create-only mode) and re-enabling managed records, and writing nothing when a record already matches;
+- never touching someone else's record: a live one is a `Conflict`, a disabled one is ignored, and `Remove` leaves both;
+- legacy records: foreign unless adopted, rewritten with the marker when adopted, removed only when adopting;
+- converging duplicate managed records, removing a missing record, and a batch seeing its own writes.
+
+### OPNsense-specific — `opnsense_test.go`
+
 | Test | Description |
 |---|---|
-| `TestEnsureCreatesRecord` | A new record is added, published on commit, and every stored field is right |
-| `TestEnsureOverwriteUpdatesInPlace` | With overwrite on, a changed value updates the existing row |
-| `TestEnsureWithoutOverwriteKeepsExistingValue` | With overwrite off, a live record holding another value is left alone |
+| `TestEnsureWritesTheOverrideFields` | The FQDN is split into hostname and domain, and the description carries the ownership marker |
 | `TestEnsureUnchangedWritesNothing` | A matching record costs one list, no write and no reconfigure (B2) |
-| `TestEnsureReenablesDisabledRecord` | A disabled override is re-enabled even with overwrite off (B8) |
 | `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error, not a success |
-| `TestEnsureConvergesDuplicates` | Writing to a hostname with duplicates leaves exactly one row, holding the new value |
-| `TestRemoveDeletesEveryDuplicate` | Every override for the hostname is deleted, and others are untouched |
-| `TestRemoveMissingRecordIsNotAnError` | Removing a record that does not exist issues no delete |
+| `TestRemoveOfMissingRecordIssuesNoDelete` | Removing a record that does not exist issues no delete |
 | `TestRemoveToleratesVanishedRecord` | A row deleted by someone else since the batch listed is not an error |
-| `TestBatchListsOnce` | A batch lists once however many records it touches, sees its own writes, and commits with one reconfigure (D4) |
+| `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
 | `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
 | `TestFirstCommitPublishes` | A new provider's first used batch publishes, in case an earlier process left changes staged (B10) |
 | `TestFailedPublishStaysOwed` | After a failed reconfigure, a later batch that writes nothing still publishes (B10) |
@@ -139,6 +148,11 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestAnnotationCannotDeleteForeignRecords` | Names written into the ownership annotation outside the domain map are never deleted (S1) |
 | `TestUnchangedRouteCausesNoWrites` | Reconciling an unchanged route makes no writes and no reconfigure (B2) |
 | `TestDisabledManagedRecordIsReenabled` | A disabled managed override is re-enabled (B8) |
+| `TestUnmanagedRecordIsNotOverwritten` | A hand-made record for a route's hostname is never repointed (S2) |
+| `TestUnmanagedRecordSurvivesRouteDeletion` | Deleting the route leaves a hand-made record in place (S2) |
+| `TestSharedHostnameSurvivesOneRouteDeletion` | Deleting one of two routes sharing a hostname keeps the record published (B1) |
+| `TestLegacyRecordIsAdoptedByItsRoute` | A record from before ownership marking is adopted and re-marked by the route that recorded owning it |
+| `TestLegacyRecordIsNotAdoptedByANewRoute` | A route that never owned a name cannot adopt or delete its legacy record |
 
 ### Pending findings
 
@@ -150,9 +164,6 @@ ENVTEST_RUN_PENDING=1 make test-envtest
 
 | Test | Finding | Roadmap phase |
 |---|---|---|
-| `TestUnmanagedRecordIsNotOverwritten` | S2 | 3 |
-| `TestUnmanagedRecordSurvivesRouteDeletion` | S2 | 3 |
-| `TestSharedHostnameSurvivesOneRouteDeletion` | B1 | 3 |
 | `TestDeleteIsPublishedAfterReconfigureRecovers` | B9 | 4 |
 | `TestUnacceptedRouteGetsNoRecord` | S3 | 4 |
 
