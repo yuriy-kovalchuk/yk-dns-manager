@@ -9,6 +9,13 @@ metadata:
   namespace: {{ .Values.serviceMonitor.namespace }}
   {{- end }}
 spec:
+  {{- if .Values.serviceMonitor.namespace }}
+  # The ServiceMonitor lives outside the release namespace, and Prometheus only
+  # looks for Services in its own namespace unless told otherwise.
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "yk-dns-manager.selectorLabels" . | nindent 6 }}
