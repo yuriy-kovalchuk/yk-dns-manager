@@ -29,6 +29,11 @@ LOCALBIN              ?= $(shell pwd)/bin
 # it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright.
 # v2.14.0 is built with go1.27.0. Keep this >= the go.mod go directive.
 GOLANGCI_LINT_VERSION ?= v2.14.0
+# envtest control plane. The Kubernetes minor matches the k8s.io/* modules in
+# go.mod; setup-envtest matches the controller-runtime release.
+ENVTEST_K8S_VERSION   ?= 1.37.0
+SETUP_ENVTEST_VERSION ?= v0.25.2
+SETUP_ENVTEST         := go run sigs.k8s.io/controller-runtime/tools/setup-envtest@$(SETUP_ENVTEST_VERSION)
 
 VERSION_PKG := github.com/yuriy-kovalchuk/yk-dns-manager/internal/version
 
@@ -40,7 +45,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-envtest envtest test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -80,8 +85,8 @@ run:
 	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
 
 # ── Testing ────────────────────────────────────────────────────────────────────
-## test: run all tests (unit + integration)
-test: test-unit test-integration
+## test: run all tests (unit + integration + envtest)
+test: test-unit test-integration test-envtest
 
 ## test-unit: run unit tests with coverage profile
 test-unit:
@@ -95,6 +100,15 @@ test-cover:
 ## test-integration: run integration tests
 test-integration:
 	go test -race -timeout 120s -v -count=1 ./test/integration/
+
+## envtest: download the envtest control-plane binaries into bin/k8s
+envtest:
+	$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)/k8s -p path
+
+## test-envtest: run the controller against a real API server and the fake appliance
+test-envtest:
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)/k8s -p path)" \
+		go test -race -timeout 300s -v -count=1 ./test/envtest/
 
 ## vuln: check for known vulnerabilities (also runs in CI)
 # `go run` resolves through this module's toolchain, so govulncheck is built
