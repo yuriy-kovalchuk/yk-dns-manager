@@ -1,0 +1,33 @@
+# The Dockerfile does `COPY . .`, so anything not listed here can end up in an
+# image layer — and the GHA layer cache (cache-from: type=gha) keeps those layers
+# addressable after the image is gone. Local state and secrets stay out.
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+
+# VCS and tooling
+.git
+.gitignore
+.githooks
+.github
+.golangci.yaml
+
+# Build and test artifacts
+bin/
+dist/
+coverage.*
+*.out
+*.tgz
+*.log
+
+# Not needed to compile ./cmd/yk-dns-manager
+charts/
+docs/
+hack/
+test/
+
+# OS noise
+.DS_Store
