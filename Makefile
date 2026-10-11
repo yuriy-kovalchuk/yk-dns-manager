@@ -40,7 +40,7 @@ LDFLAGS := -s -w \
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -155,9 +155,13 @@ docker-build-local:
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMAGE):local .
 
+## kind-up: create the dev cluster, or say so when reusing an existing one
 kind-up:
-	kind get clusters | grep -q "^$(KIND_CLUSTER)$$" || \
-		kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG)
+	@if kind get clusters | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "reusing cluster $(KIND_CLUSTER) ($$(kubectl --context $(KIND_CONTEXT) get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null || echo 'not responding')) — run 'make kind-down' or 'make kind-reset' to recreate it"; \
+	else \
+		kind create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG); \
+	fi
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
@@ -188,19 +192,25 @@ kind-secret:
 			--from-literal=OPNSENSE_API_SECRET=$${OPNSENSE_API_SECRET} \
 			--dry-run=client -o yaml | kubectl --context $(KIND_CONTEXT) apply -f -
 
-# kind-deploy installs the in-memory fake so the local path works with no
-# appliance. To deploy against a real one, edit hack/local-values.yaml and drop
-# the kind-fake-install prerequisite.
 ## kind-crds: install the Gateway API CRDs the controller watches
 kind-crds:
 	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
 
+# kind-deploy installs the in-memory fake so the local path works with no
+# appliance. To deploy against a real one, edit hack/local-values.yaml and drop
+# the kind-fake-install prerequisite.
+## kind-deploy: cluster + CRDs + image + fake appliance + controller
 kind-deploy: kind-up kind-crds kind-load kind-secret kind-fake-install
-	helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
+	@if ! helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
 		--namespace $(KIND_NAMESPACE) \
 		--create-namespace \
 		-f hack/local-values.yaml \
-		--wait
+		--wait --timeout 2m; then \
+		echo "--- deploy did not become ready; pod status and recent events ---"; \
+		kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get pods -o wide; \
+		kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get events --sort-by=.lastTimestamp | tail -10; \
+		exit 1; \
+	fi
 
 kind-undeploy:
 	helm --kube-context $(KIND_CONTEXT) uninstall $(APP_NAME) --namespace $(KIND_NAMESPACE) --ignore-not-found
@@ -216,6 +226,23 @@ kind-logs:
 	kubectl --context $(KIND_CONTEXT) logs --namespace $(KIND_NAMESPACE) \
 		-l app.kubernetes.io/name=$(APP_NAME) \
 		--follow
+
+## kind-status: print the local dev state in one place
+kind-status:
+	@echo "kubecontext:  $$(kubectl config current-context 2>/dev/null || echo none)"
+	@if kind get clusters | grep -q "^$(KIND_CLUSTER)$$"; then \
+		echo "cluster:      $(KIND_CLUSTER) ($$(kubectl --context $(KIND_CONTEXT) get nodes -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}' 2>/dev/null || echo 'not responding'))"; \
+	else \
+		echo "cluster:      absent — make kind-up"; \
+	fi
+	@echo "gateway CRDs: $$(kubectl --context $(KIND_CONTEXT) get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1 && echo installed || echo 'missing — make kind-crds')"
+	@echo "controller:   $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy $(APP_NAME) -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not deployed — make kind-deploy')"
+	@echo "fake in-cluster: $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy fake-opnsense -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not running — make kind-fake-install')"
+	@echo "fake on host:    $$(curl -sf --max-time 2 localhost:8053/records >/dev/null 2>&1 && echo 'listening on :8053' || echo 'not listening — make fake-opnsense')"
+	@test -f .env && echo "env:          $$(grep -E '^(DOMAIN_MAP_PATH|DNS_PROVIDER_PATH)=' .env | sed 's/^[A-Z_]*=//' | tr '\n' ' ')" || echo "env:          no .env — cp .env.example .env"
+
+## kind-reset: rebuild the dev cluster from scratch (use it after the kind pin changes)
+kind-reset: kind-down kind-deploy
 
 # ── Git hooks ──────────────────────────────────────────────────────────────────
 ## install-hooks: install git hooks from .githooks/
