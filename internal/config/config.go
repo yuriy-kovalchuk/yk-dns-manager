@@ -16,7 +16,7 @@ type DomainMap struct {
 
 // LoadDomainMap reads a YAML file mapping domains to IPs.
 func LoadDomainMap(path string) (*DomainMap, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path comes from an operator-set CLI flag, not request input
 	if err != nil {
 		return nil, fmt.Errorf("reading domain map file: %w", err)
 	}

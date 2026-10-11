@@ -15,7 +15,7 @@ settings:
   default_ttl: "300"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -47,7 +47,7 @@ settings:
   api_secret: "testsecret"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -69,7 +69,7 @@ settings:
   api_secret: "testsecret"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,7 +88,7 @@ func TestLoadProviderConfig_MissingProvider(t *testing.T) {
   base_url: "https://opnsense.local/api"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -109,7 +109,7 @@ settings:
   api_secret: "${TEST_API_SECRET}"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,7 +138,7 @@ settings:
   api_secret: "literal-value"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

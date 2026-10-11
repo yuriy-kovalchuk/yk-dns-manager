@@ -67,7 +67,9 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if v := settings["skip_tls_verify"]; v == "true" {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		// Deliberate operator opt-in for OPNsense instances with self-signed certs.
+		// The chart must not default this to true; see the security hardening work.
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402
 	}
 
 	return &Provider{

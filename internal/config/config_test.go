@@ -9,7 +9,7 @@ import (
 func TestLoadDomainMap(t *testing.T) {
 	content := "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n"
 	path := filepath.Join(t.TempDir(), "domain-map.yaml")
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
