@@ -32,4 +32,9 @@ type Provider interface {
 	Delete(ctx context.Context, hostname, recordType string) error
 	Upsert(ctx context.Context, record Record) error
 	HealthCheck(ctx context.Context) error
+	// Flush applies changes accumulated by Create/Update/Delete. Providers that
+	// need an explicit apply step (OPNsense's reconfigure republishes the whole
+	// model config) defer it here so a reconcile costs one apply instead of one
+	// per record. Calling it with nothing pending is a no-op.
+	Flush(ctx context.Context) error
 }
