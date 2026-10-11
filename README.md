@@ -103,6 +103,10 @@ settings:
 
 Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
 
+## Ownership
+
+The controller only changes or deletes DNS records it created. It marks each one; for OPNsense the override description is `yk-dns-manager: managed record, do not edit`, so do not edit that description by hand. A record someone else created for the same name is left alone and logged as a conflict, whatever `upsert` says. Records created by earlier versions are adopted automatically by the route that created them.
+
 ## Supported Providers
 
 | Provider | Backend |
