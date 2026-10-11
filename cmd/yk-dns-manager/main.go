@@ -52,6 +52,27 @@ func newProviders() []providerFactory {
 	//   }},
 }
 
+// selectProvider walks the factory list in order and returns the first provider
+// that initializes.
+//
+// The provider is assigned only after the error is checked. A factory such as
+// opnsense.New returns a concrete *Provider; when it fails that pointer is nil,
+// and converting it to the dns.Provider interface produces an interface that is
+// not == nil. Storing it and calling a method later panics with a nil dereference
+// instead of reporting the configuration error.
+func selectProvider(log logr.Logger, factories []providerFactory, settings map[string]string) (dns.Provider, string, error) {
+	for _, pf := range factories {
+		log.Info("trying to initialize provider", "name", pf.name)
+		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
+		if err != nil {
+			log.Info("provider initialization failed, trying next", "name", pf.name, "error", err)
+			continue
+		}
+		return p, pf.name, nil
+	}
+	return nil, "", fmt.Errorf("no DNS provider could be initialized from config")
+}
+
 var scheme = runtime.NewScheme()
 
 func init() {
@@ -71,7 +92,6 @@ func run() error {
 		logLevel      string
 		domainMapPath string
 		domainMap     *config.DomainMap
-		dnsProvider   dns.Provider
 	)
 
 	ctx := context.Background()
@@ -118,19 +138,9 @@ func run() error {
 	}
 	log.Info("loaded provider config", "provider", providerCfg.Provider, "upsert", providerCfg.Upsert)
 
-	var selectedProvider string
-	for _, pf := range newProviders() {
-		log.Info("trying to initialize provider", "name", pf.name)
-		dnsProvider, err = pf.fn(ctrl.Log.WithName("dns-"+pf.name), providerCfg.Settings)
-		if err != nil {
-			log.Info("provider initialization failed, trying next", "name", pf.name, "error", err)
-			continue
-		}
-		selectedProvider = pf.name
-		break
-	}
-	if dnsProvider == nil {
-		return fmt.Errorf("no DNS provider could be initialized from config")
+	dnsProvider, selectedProvider, err := selectProvider(log, newProviders(), providerCfg.Settings)
+	if err != nil {
+		return err
 	}
 	log.Info("initialized DNS provider", "name", selectedProvider)
 
