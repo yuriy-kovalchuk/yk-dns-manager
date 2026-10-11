@@ -1,3 +1,4 @@
+// Package dns defines the provider interface the controller manages DNS records through.
 package dns
 
 import (

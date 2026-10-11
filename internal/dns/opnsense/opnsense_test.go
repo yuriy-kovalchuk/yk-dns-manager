@@ -20,8 +20,9 @@ func TestNew_ValidSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p.baseURL != "https://opnsense.local/api" {
-		t.Errorf("expected baseURL 'https://opnsense.local/api', got %q", p.baseURL)
+	// Stored with a trailing slash so API paths append directly.
+	if p.baseURL != "https://opnsense.local/api/" {
+		t.Errorf("expected baseURL 'https://opnsense.local/api/', got %q", p.baseURL)
 	}
 }
 

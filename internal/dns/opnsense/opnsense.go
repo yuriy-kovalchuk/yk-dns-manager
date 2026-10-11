@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,23 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+)
+
+const (
+	searchPath      = "unbound/settings/searchHostOverride"
+	addPath         = "unbound/settings/addHostOverride"
+	setPath         = "unbound/settings/setHostOverride/"
+	delPath         = "unbound/settings/delHostOverride/"
+	reconfigurePath = "unbound/service/reconfigure"
+)
+
+// Bounds on how much of an OPNsense response body is read, so a hostile or
+// misbehaving appliance cannot exhaust the pod's memory. 8MiB covers tens of
+// thousands of override rows at roughly 200 bytes each.
+const (
+	maxResponseBytes = 8 << 20
+	// Error bodies are only ever logged, so a short snippet is enough.
+	maxErrorBodyBytes = 1 << 10
 )
 
 // Provider implements dns.Provider for OPNsense Unbound DNS.
@@ -46,35 +64,23 @@ type Provider struct {
 }
 
 // New creates an OPNsense DNS provider from the given settings map.
-// Returns (nil, err) if mandatory settings are missing.
 func New(log logr.Logger, settings map[string]string) (*Provider, error) {
-	baseURL := settings["base_url"]
-	if baseURL == "" {
-		return nil, fmt.Errorf("opnsense: missing required setting 'base_url'")
+	for _, key := range []string{"base_url", "api_key", "api_secret"} {
+		if settings[key] == "" {
+			return nil, fmt.Errorf("opnsense: missing required setting '%s'", key)
+		}
 	}
-	// Validate that base_url includes the /api path segment.
+	baseURL := settings["base_url"]
 	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("opnsense: invalid base_url %q: %w", baseURL, err)
 	}
 	if !strings.HasPrefix(parsedURL.Path, "/api") {
-		return nil, fmt.Errorf(
-			"opnsense: base_url path must start with '/api' (e.g. https://opnsense.example.com/api), got %q",
-			parsedURL.Path,
-		)
+		return nil, fmt.Errorf("opnsense: base_url path must start with '/api' (e.g. https://opnsense.example.com/api), got %q", parsedURL.Path)
 	}
 	if err := checkScheme(parsedURL, settings, log); err != nil {
 		return nil, err
 	}
-	apiKey := settings["api_key"]
-	if apiKey == "" {
-		return nil, fmt.Errorf("opnsense: missing required setting 'api_key'")
-	}
-	apiSecret := settings["api_secret"]
-	if apiSecret == "" {
-		return nil, fmt.Errorf("opnsense: missing required setting 'api_secret'")
-	}
-
 	if v := settings["default_ttl"]; v != "" {
 		log.Info("opnsense: default_ttl is ignored and will be removed: Unbound host overrides have no per-record TTL", "default_ttl", v)
 	}
@@ -85,9 +91,9 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 
 	return &Provider{
-		baseURL:   baseURL,
-		apiKey:    apiKey,
-		apiSecret: apiSecret,
+		baseURL:   strings.TrimRight(baseURL, "/") + "/",
+		apiKey:    settings["api_key"],
+		apiSecret: settings["api_secret"],
 		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:       log,
 		staged:    1,
@@ -113,12 +119,10 @@ func checkScheme(u *url.URL, settings map[string]string, log logr.Logger) error 
 	}
 }
 
-// applyTLSConfig wires the two TLS knobs an operator controls.
-//
-// ca_file pins a private CA, which is the safe answer to a self-signed
-// appliance. skip_tls_verify switches verification off entirely and is loudly
-// discouraged: it removes the only defence against anyone on the network path
-// reading or forging the basic-auth credentials sent with every request.
+// applyTLSConfig wires the two TLS knobs an operator controls. ca_file pins a
+// private CA, the safe answer to a self-signed appliance. skip_tls_verify
+// switches verification off and is loudly discouraged: it hands the basic-auth
+// credentials to anyone on the network path.
 func applyTLSConfig(transport *http.Transport, settings map[string]string, log logr.Logger) error {
 	caFile := settings["ca_file"]
 	skipVerify := settings["skip_tls_verify"] == "true"
@@ -131,7 +135,6 @@ func applyTLSConfig(transport *http.Transport, settings map[string]string, log l
 	}
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-
 	if caFile != "" {
 		// #nosec G304 -- path comes from operator-set provider config, not request input
 		pem, err := os.ReadFile(caFile)
@@ -145,38 +148,29 @@ func applyTLSConfig(transport *http.Transport, settings map[string]string, log l
 		cfg.RootCAs = pool
 		log.V(1).Info("opnsense: pinning appliance CA", "ca_file", caFile)
 	}
-
 	if skipVerify {
 		log.Info("opnsense: skip_tls_verify is ENABLED - TLS certificates are not verified, so the API credentials are sent to anyone who answers on the network path. Set ca_file to pin the appliance CA instead.")
 		cfg.InsecureSkipVerify = true // #nosec G402 -- deliberate operator opt-in, warned on every startup
 	}
-
 	transport.TLSClientConfig = cfg
 	return nil
 }
 
-// doRequest builds and executes an HTTP request against the OPNsense API.
-func (p *Provider) doRequest(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
-	// Fail fast on a cancelled context instead of building a request.
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-
-	var bodyReader io.Reader
+// call sends one API request and decodes the JSON answer into out, which may
+// be nil. A non-200 status is an error carrying a bounded snippet of the body.
+func (p *Provider) call(ctx context.Context, method, path string, body, out any) error {
+	var reader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("opnsense: marshal request body: %w", err)
+			return fmt.Errorf("opnsense: marshal %s request: %w", path, err)
 		}
-		bodyReader = bytes.NewReader(data)
+		reader = bytes.NewReader(data)
 	}
-
-	url := strings.TrimRight(p.baseURL, "/") + "/" + strings.TrimLeft(path, "/")
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, reader)
 	if err != nil {
-		return nil, fmt.Errorf("opnsense: build request: %w", err)
+		return fmt.Errorf("opnsense: build %s request: %w", path, err)
 	}
-
 	req.SetBasicAuth(p.apiKey, p.apiSecret)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -184,91 +178,62 @@ func (p *Provider) doRequest(ctx context.Context, method, path string, body inte
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("opnsense: %s %s: %w", method, path, err)
-	}
-	return resp, nil
-}
-
-// Bounds on how much of an OPNsense response body is read. Every read here was
-// unbounded while the pod carries a 256Mi memory limit, so a hostile or
-// misbehaving appliance could exhaust it. 8MiB is generous for the override
-// list — a row is roughly 200 bytes of JSON, so this covers tens of thousands
-// of entries — while still failing fast on a runaway response.
-const (
-	maxResponseBytes = 8 << 20
-	// Error bodies are only ever logged, so a short snippet is enough.
-	maxErrorBodyBytes = 1 << 10
-)
-
-// decodeJSON reads at most maxResponseBytes of the response body into target.
-// A body that hits the limit is reported as such instead of surfacing a
-// confusing truncated-JSON error.
-func decodeJSON(resp *http.Response, target any, what string) error {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	if err != nil {
-		return fmt.Errorf("opnsense: read %s response: %w", what, err)
-	}
-	if len(data) == maxResponseBytes {
-		return fmt.Errorf("opnsense: %s response exceeded the %d byte limit", what, maxResponseBytes)
-	}
-	if err := json.Unmarshal(data, target); err != nil {
-		return fmt.Errorf("opnsense: decode %s response: %w", what, err)
-	}
-	return nil
-}
-
-func readErrorBody(resp *http.Response) string {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-	return string(body)
-}
-
-// HealthCheck verifies the OPNsense API is reachable and credentials are valid.
-func (p *Provider) HealthCheck(ctx context.Context) error {
-	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
-	if err != nil {
-		return err
+		return fmt.Errorf("opnsense: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("opnsense: authentication failed (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("opnsense: %s: authentication failed (HTTP %d)", path, resp.StatusCode)
 	default:
-		return fmt.Errorf("opnsense: health check failed (HTTP %d)", resp.StatusCode)
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		return fmt.Errorf("opnsense: %s returned status %d: %s", path, resp.StatusCode, snippet)
 	}
-}
+	if out == nil {
+		return nil
+	}
 
-// reconfigure tells OPNsense to publish its staged config to Unbound.
-func (p *Provider) reconfigure(ctx context.Context) error {
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/service/reconfigure", struct{}{})
+	// A body that hits the limit is reported as such instead of surfacing a
+	// confusing truncated-JSON error.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return fmt.Errorf("opnsense: reconfigure: %w", err)
+		return fmt.Errorf("opnsense: read %s response: %w", path, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opnsense: reconfigure returned status %d", resp.StatusCode)
+	if len(data) == maxResponseBytes {
+		return fmt.Errorf("opnsense: %s response exceeded the %d byte limit", path, maxResponseBytes)
 	}
-
-	var result struct {
-		Status string `json:"status"`
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("opnsense: decode %s response: %w", path, err)
 	}
-	if err := decodeJSON(resp, &result, "reconfigure"); err != nil {
-		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(result.Status), "ok") {
-		return fmt.Errorf("opnsense: reconfigure returned status %q", result.Status)
-	}
-	p.log.V(1).Info("reconfigure completed")
 	return nil
 }
 
-func (p *Provider) markStaged() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.staged++
+// apiResult is the answer to every write: add, set and del report "result",
+// add also the new "uuid", and reconfigure reports "status".
+type apiResult struct {
+	Result string `json:"result"`
+	UUID   string `json:"uuid"`
+	Status string `json:"status"`
+}
+
+// write POSTs body to path and requires one of the accepted results. OPNsense
+// answers a rejected write with HTTP 200, so the status code alone proves
+// nothing.
+func (p *Provider) write(ctx context.Context, path string, body any, accepted ...string) (apiResult, error) {
+	var res apiResult
+	if err := p.call(ctx, http.MethodPost, path, body, &res); err != nil {
+		return res, err
+	}
+	if !slices.Contains(accepted, res.Result) {
+		return res, fmt.Errorf("opnsense: %s unexpected result: %s", path, res.Result)
+	}
+	return res, nil
+}
+
+// HealthCheck verifies the OPNsense API is reachable and credentials are valid.
+func (p *Provider) HealthCheck(ctx context.Context) error {
+	return p.call(ctx, http.MethodGet, searchPath, nil, nil)
 }
 
 // publish reconfigures if any staged write is not yet published.
@@ -281,177 +246,69 @@ func (p *Provider) publish(ctx context.Context) error {
 		return nil
 	}
 
-	if err := p.reconfigure(ctx); err != nil {
+	var res apiResult
+	if err := p.call(ctx, http.MethodPost, reconfigurePath, struct{}{}, &res); err != nil {
 		return err
 	}
+	if !strings.EqualFold(strings.TrimSpace(res.Status), "ok") {
+		return fmt.Errorf("opnsense: reconfigure returned status %q", res.Status)
+	}
+	p.log.V(1).Info("reconfigure completed")
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if target > p.published {
-		p.published = target
-	}
+	p.published = max(p.published, target)
 	return nil
 }
 
-// searchResponse is the shape returned by searchHostOverride.
-type searchResponse struct {
-	Rows []hostRow `json:"rows"`
+func (p *Provider) markStaged() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.staged++
 }
 
-// hostRow represents a single host override row from the search response.
+// hostRow is one host override: a row of the search response, and with an
+// empty UUID the body of an add or set.
 type hostRow struct {
-	UUID        string `json:"uuid"`
+	UUID        string `json:"uuid,omitempty"`
 	Enabled     string `json:"enabled"`
 	Hostname    string `json:"hostname"`
 	Domain      string `json:"domain"`
 	RR          string `json:"rr"`
 	Server      string `json:"server"`
 	Description string `json:"description"`
+	MXPrio      string `json:"mxprio"`
+	MX          string `json:"mx"`
+}
+
+// rowFor is the override record asks for.
+func rowFor(record dns.Record) hostRow {
+	host, domain := splitHostname(record.Hostname)
+	return hostRow{
+		Enabled: "1", Hostname: host, Domain: domain, RR: record.Type,
+		Server: record.Value, Description: record.Meta["description"],
+	}
+}
+
+// splitHostname splits an FQDN into OPNsense's hostname and domain fields:
+// "sub.app.example.com" becomes ("sub", "app.example.com").
+func splitHostname(fqdn string) (hostname, domain string) {
+	hostname, domain, _ = strings.Cut(strings.TrimSuffix(fqdn, "."), ".")
+	return hostname, domain
 }
 
 func (r hostRow) enabled() bool { return r.Enabled == "1" }
 
-// is reports whether the row is the override for fqdn and recordType.
-func (r hostRow) is(fqdn, recordType string) bool {
-	host, domain := dns.SplitHostname(fqdn)
-	return strings.EqualFold(r.Hostname, host) &&
-		strings.EqualFold(r.Domain, domain) &&
-		strings.EqualFold(r.RR, recordType)
+// is reports whether the row is the override want names.
+func (r hostRow) is(want hostRow) bool {
+	return strings.EqualFold(r.Hostname, want.Hostname) &&
+		strings.EqualFold(r.Domain, want.Domain) &&
+		strings.EqualFold(r.RR, want.RR)
 }
 
-// matches reports whether the row already says what record wants.
-func (r hostRow) matches(record dns.Record) bool {
-	return r.enabled() && r.Server == record.Value && r.Description == description(record)
-}
-
-func description(record dns.Record) string {
-	if record.Meta == nil {
-		return ""
-	}
-	return record.Meta["description"]
-}
-
-func rowFor(uuid string, record dns.Record) hostRow {
-	host, domain := dns.SplitHostname(record.Hostname)
-	return hostRow{
-		UUID: uuid, Enabled: "1", Hostname: host, Domain: domain,
-		RR: record.Type, Server: record.Value, Description: description(record),
-	}
-}
-
-// listOverrides fetches every host override on the appliance.
-func (p *Provider) listOverrides(ctx context.Context) ([]hostRow, error) {
-	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("opnsense: searchHostOverride returned status %d", resp.StatusCode)
-	}
-
-	var sr searchResponse
-	if err := decodeJSON(resp, &sr, "search"); err != nil {
-		return nil, err
-	}
-	return sr.Rows, nil
-}
-
-// buildHostBody creates the JSON body for add/set host override calls.
-func buildHostBody(record dns.Record) map[string]interface{} {
-	host, domain := dns.SplitHostname(record.Hostname)
-	return map[string]interface{}{
-		"host": map[string]string{
-			"enabled":     "1",
-			"hostname":    host,
-			"domain":      domain,
-			"rr":          record.Type,
-			"server":      record.Value,
-			"description": description(record),
-			"mxprio":      "",
-			"mx":          "",
-		},
-	}
-}
-
-func (p *Provider) addOverride(ctx context.Context, record dns.Record) (string, error) {
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/addHostOverride", buildHostBody(record))
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
-	}
-
-	var result struct {
-		Result string `json:"result"`
-		UUID   string `json:"uuid"`
-	}
-	if err := decodeJSON(resp, &result, "addHostOverride"); err != nil {
-		return "", err
-	}
-	if result.Result != "saved" {
-		return "", fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
-	}
-
-	p.log.V(1).Info("override added", "hostname", record.Hostname, "uuid", result.UUID)
-	return result.UUID, nil
-}
-
-func (p *Provider) setOverride(ctx context.Context, uuid string, record dns.Record) error {
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/setHostOverride/"+url.PathEscape(uuid), buildHostBody(record))
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opnsense: setHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
-	}
-
-	var result struct {
-		Result string `json:"result"`
-	}
-	if err := decodeJSON(resp, &result, "setHostOverride"); err != nil {
-		return err
-	}
-	if result.Result != "saved" {
-		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result.Result)
-	}
-
-	p.log.V(1).Info("override updated", "hostname", record.Hostname, "uuid", uuid)
-	return nil
-}
-
-func (p *Provider) deleteOverride(ctx context.Context, uuid string) error {
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/delHostOverride/"+url.PathEscape(uuid), struct{}{})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opnsense: delHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
-	}
-
-	var result struct {
-		Result string `json:"result"`
-	}
-	if err := decodeJSON(resp, &result, "delHostOverride"); err != nil {
-		return err
-	}
-	switch result.Result {
-	case "deleted":
-		p.log.V(1).Info("override deleted", "uuid", uuid)
-	case "not found":
-		p.log.V(1).Info("override already deleted", "uuid", uuid)
-	default:
-		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
-	}
-	return nil
+// matches reports whether the row already says what want says.
+func (r hostRow) matches(want hostRow) bool {
+	return r.enabled() && r.Server == want.Server && r.Description == want.Description
 }
 
 // Batch starts a unit of work against the appliance.
@@ -474,18 +331,20 @@ func (b *batch) load(ctx context.Context) error {
 	if b.loaded {
 		return nil
 	}
-	rows, err := b.p.listOverrides(ctx)
-	if err != nil {
+	var res struct {
+		Rows []hostRow `json:"rows"`
+	}
+	if err := b.p.call(ctx, http.MethodGet, searchPath, nil, &res); err != nil {
 		return err
 	}
-	b.rows, b.loaded = rows, true
+	b.rows, b.loaded = res.Rows, true
 	return nil
 }
 
-func (b *batch) find(fqdn, recordType string) []hostRow {
+func (b *batch) find(want hostRow) []hostRow {
 	var out []hostRow
 	for _, r := range b.rows {
-		if r.is(fqdn, recordType) {
+		if r.is(want) {
 			out = append(out, r)
 		}
 	}
@@ -493,27 +352,13 @@ func (b *batch) find(fqdn, recordType string) []hostRow {
 }
 
 func (b *batch) remove(ctx context.Context, uuid string) error {
-	if err := b.p.deleteOverride(ctx, uuid); err != nil {
+	// "not found" means someone else already deleted it, which is the goal.
+	if _, err := b.p.write(ctx, delPath+url.PathEscape(uuid), struct{}{}, "deleted", "not found"); err != nil {
 		return err
 	}
 	b.p.markStaged()
-	for i, r := range b.rows {
-		if r.UUID == uuid {
-			b.rows = append(b.rows[:i], b.rows[i+1:]...)
-			break
-		}
-	}
+	b.rows = slices.DeleteFunc(b.rows, func(r hostRow) bool { return r.UUID == uuid })
 	return nil
-}
-
-func (b *batch) replace(row hostRow) {
-	for i, r := range b.rows {
-		if r.UUID == row.UUID {
-			b.rows[i] = row
-			return
-		}
-	}
-	b.rows = append(b.rows, row)
 }
 
 // Ensure implements dns.Batch.
@@ -525,60 +370,57 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (
 	if err := b.load(ctx); err != nil {
 		return 0, err
 	}
+	want := rowFor(record)
 
-	existing := b.find(record.Hostname, record.Type)
+	existing := b.find(want)
 	if len(existing) == 0 {
-		uuid, err := b.p.addOverride(ctx, record)
+		res, err := b.p.write(ctx, addPath, map[string]hostRow{"host": want}, "saved")
 		if err != nil {
 			return 0, err
 		}
 		b.p.markStaged()
-		b.replace(rowFor(uuid, record))
+		want.UUID = res.UUID
+		b.rows = append(b.rows, want)
 		return dns.Created, nil
 	}
 
 	keep := existing[0]
-	for _, r := range existing {
-		if r.enabled() {
-			keep = r
-			break
-		}
+	if i := slices.IndexFunc(existing, hostRow.enabled); i >= 0 {
+		keep = existing[i]
 	}
 
 	// A disabled override answers nothing, so it does not count as a live
 	// record that create-only mode must leave alone.
 	if !overwrite && keep.enabled() {
-		if keep.matches(record) {
+		if keep.matches(want) {
 			return dns.Unchanged, nil
 		}
 		return dns.Kept, nil
 	}
 
-	removed := 0
 	for _, r := range existing {
-		if r.UUID == keep.UUID {
-			continue
+		if r.UUID != keep.UUID {
+			if err := b.remove(ctx, r.UUID); err != nil {
+				return 0, err
+			}
 		}
-		if err := b.remove(ctx, r.UUID); err != nil {
-			return 0, err
-		}
-		removed++
 	}
-	if removed > 0 {
+	if removed := len(existing) - 1; removed > 0 {
 		b.p.log.Info("removed duplicate host overrides", "hostname", record.Hostname, "removed", removed)
 	}
 
-	if keep.matches(record) {
-		if removed > 0 {
+	if keep.matches(want) {
+		if len(existing) > 1 {
 			return dns.Updated, nil
 		}
 		return dns.Unchanged, nil
 	}
-	if err := b.p.setOverride(ctx, keep.UUID, record); err != nil {
+	if _, err := b.p.write(ctx, setPath+url.PathEscape(keep.UUID), map[string]hostRow{"host": want}, "saved"); err != nil {
 		return 0, err
 	}
 	b.p.markStaged()
-	b.replace(rowFor(keep.UUID, record))
+	want.UUID = keep.UUID
+	b.rows[slices.IndexFunc(b.rows, func(r hostRow) bool { return r.UUID == keep.UUID })] = want
 	return dns.Updated, nil
 }
 
@@ -587,7 +429,7 @@ func (b *batch) Remove(ctx context.Context, hostname, recordType string) error {
 	if err := b.load(ctx); err != nil {
 		return err
 	}
-	for _, r := range b.find(hostname, recordType) {
+	for _, r := range b.find(rowFor(dns.Record{Hostname: hostname, Type: recordType})) {
 		if err := b.remove(ctx, r.UUID); err != nil {
 			return err
 		}
