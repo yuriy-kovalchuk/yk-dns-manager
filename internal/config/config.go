@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -15,15 +16,39 @@ type DomainMap struct {
 }
 
 // LoadDomainMap reads a YAML file mapping domains to IPs.
+//
+// Every entry is validated here rather than at reconcile time. The record type
+// is hardcoded to A, so a value that is not an IPv4 address would produce a
+// broken DNS record, and an empty map would leave a controller running that
+// manages nothing.
 func LoadDomainMap(path string) (*DomainMap, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path comes from an operator-set CLI flag, not request input
 	if err != nil {
 		return nil, fmt.Errorf("reading domain map file: %w", err)
 	}
 
-	entries := make(map[string]string)
-	if err := yaml.Unmarshal(data, &entries); err != nil {
+	raw := make(map[string]string)
+	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing domain map file: %w", err)
+	}
+
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("domain map file %s contains no entries: the controller would manage nothing", path)
+	}
+
+	entries := make(map[string]string, len(raw))
+	for domain, value := range raw {
+		if strings.TrimSpace(domain) == "" {
+			return nil, fmt.Errorf("domain map file %s: entry with an empty domain key", path)
+		}
+		addr, err := netip.ParseAddr(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("domain map entry %q: %q is not a valid IP address", domain, value)
+		}
+		if !addr.Is4() {
+			return nil, fmt.Errorf("domain map entry %q: %s is not IPv4; only A records are managed", domain, addr)
+		}
+		entries[domain] = addr.String()
 	}
 
 	return &DomainMap{entries: entries}, nil
@@ -59,11 +84,11 @@ func (dm *DomainMap) LookupIP(hostname string) (string, bool) {
 	return "", false
 }
 
-// Domains returns all configured base domains.
-func (dm *DomainMap) Domains() []string {
-	domains := make([]string, 0, len(dm.entries))
-	for d := range dm.entries {
-		domains = append(domains, d)
+// Entries returns a copy of the configured domain-to-IP mapping.
+func (dm *DomainMap) Entries() map[string]string {
+	out := make(map[string]string, len(dm.entries))
+	for d, ip := range dm.entries {
+		out[d] = ip
 	}
-	return domains
+	return out
 }
