@@ -17,10 +17,13 @@ import (
 
 // newFake returns a fake appliance that only accepts the credentials
 // newProvider sends, so every test also proves the provider authenticates.
-func newFake() *testenv.OPNsense {
+func newFake(t *testing.T) (*testenv.OPNsense, string) {
+	t.Helper()
 	fake := testenv.NewOPNsense()
 	fake.RequireCredentials("test-key", "test-secret")
-	return fake
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	return fake, srv.URL
 }
 
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
@@ -37,474 +40,376 @@ func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	return p
 }
 
-func TestCreateAndExists(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	// Should not exist yet.
-	exists, err := p.Exists(ctx, "app.example.com", "A")
-	if err != nil {
-		t.Fatalf("Exists: %v", err)
-	}
-	if exists {
-		t.Fatal("expected record to not exist before Create")
-	}
-
-	// Create it.
-	err = p.Create(ctx, dns.Record{
-		Hostname: "app.example.com",
+func record(fqdn, ip string) dns.Record {
+	return dns.Record{
+		Hostname: fqdn,
 		Type:     "A",
-		Value:    "10.0.0.1",
-		Meta:     map[string]string{"description": "test record"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+		Value:    ip,
+		Meta:     map[string]string{"description": "managed by yk-dns-manager"},
 	}
+}
 
-	// Should exist now.
-	exists, err = p.Exists(ctx, "app.example.com", "A")
-	if err != nil {
-		t.Fatalf("Exists after Create: %v", err)
-	}
-	if !exists {
-		t.Fatal("expected record to exist after Create")
-	}
-
-	// Verify the stored data.
-	store := fake.Snapshot()
-	if len(store) != 1 {
-		t.Fatalf("expected 1 entry in store, got %d", len(store))
-	}
+func rowsFor(store map[string]testenv.HostOverride, fqdn string) []testenv.HostOverride {
+	var out []testenv.HostOverride
 	for _, h := range store {
-		if h.Hostname != "app" {
-			t.Errorf("expected hostname 'app', got %q", h.Hostname)
+		if h.FQDN() == fqdn {
+			out = append(out, h)
 		}
-		if h.Domain != "example.com" {
-			t.Errorf("expected domain 'example.com', got %q", h.Domain)
+	}
+	return out
+}
+
+// only returns the single row for fqdn, failing the test if there is not
+// exactly one.
+func only(t *testing.T, store map[string]testenv.HostOverride, fqdn string) testenv.HostOverride {
+	t.Helper()
+	rows := rowsFor(store, fqdn)
+	if len(rows) != 1 {
+		t.Fatalf("%d rows for %s, want 1: %v", len(rows), fqdn, rows)
+	}
+	return rows[0]
+}
+
+func countCalls(fake *testenv.OPNsense, endpoint string) int {
+	n := 0
+	for _, c := range fake.Calls() {
+		if strings.Contains(c, "/"+endpoint) {
+			n++
 		}
-		if h.Server != "10.0.0.1" {
-			t.Errorf("expected server '10.0.0.1', got %q", h.Server)
-		}
-		if h.RR != "A" {
-			t.Errorf("expected rr 'A', got %q", h.RR)
-		}
-		if h.Description != "test record" {
-			t.Errorf("expected description 'test record', got %q", h.Description)
-		}
-		if h.Enabled != "1" {
-			t.Errorf("expected enabled '1', got %q", h.Enabled)
-		}
+	}
+	return n
+}
+
+func ensure(t *testing.T, b dns.Batch, rec dns.Record, overwrite bool) dns.Result {
+	t.Helper()
+	res, err := b.Ensure(context.Background(), rec, overwrite)
+	if err != nil {
+		t.Fatalf("Ensure %s: %v", rec.Hostname, err)
+	}
+	return res
+}
+
+func commit(t *testing.T, b dns.Batch) {
+	t.Helper()
+	if err := b.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
 	}
 }
 
-func TestUpdateExistingRecord(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
+func TestEnsureCreatesRecord(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
 
-	p := newProvider(t, srv.URL)
+	b := p.Batch()
+	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Created {
+		t.Fatalf("Ensure = %s, want created", res)
+	}
+	commit(t, b)
+
+	h := only(t, fake.Published(), "app.example.com")
+	if h.Hostname != "app" || h.Domain != "example.com" {
+		t.Errorf("split as %q / %q, want app / example.com", h.Hostname, h.Domain)
+	}
+	if h.Server != "10.0.0.1" || h.RR != "A" || h.Enabled != "1" {
+		t.Errorf("row = %+v, want an enabled A record for 10.0.0.1", h)
+	}
+	if h.Description != "managed by yk-dns-manager" {
+		t.Errorf("description = %q", h.Description)
+	}
+}
+
+func TestEnsureOverwriteUpdatesInPlace(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	ensure(t, b, record("app.example.com", "10.0.0.1"), true)
+	commit(t, b)
+
+	b = p.Batch()
+	if res := ensure(t, b, record("app.example.com", "10.0.0.99"), true); res != dns.Updated {
+		t.Fatalf("Ensure = %s, want updated", res)
+	}
+	commit(t, b)
+
+	if h := only(t, fake.Published(), "app.example.com"); h.Server != "10.0.0.99" {
+		t.Errorf("server = %s, want 10.0.0.99", h.Server)
+	}
+}
+
+func TestEnsureWithoutOverwriteKeepsExistingValue(t *testing.T) {
+	fake, url := newFake(t)
+	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.50"})
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Kept {
+		t.Fatalf("Ensure = %s, want kept", res)
+	}
+	commit(t, b)
+
+	if h := only(t, fake.Snapshot(), "app.example.com"); h.Server != "10.0.0.50" {
+		t.Errorf("server = %s, want the existing 10.0.0.50", h.Server)
+	}
+}
+
+// TestEnsureUnchangedWritesNothing is audit B2 at the provider: a record that
+// already matches costs one list and no write, and with nothing owed the
+// commit does not reconfigure.
+func TestEnsureUnchangedWritesNothing(t *testing.T) {
+	for _, overwrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("overwrite=%v", overwrite), func(t *testing.T) {
+			fake, url := newFake(t)
+			p := newProvider(t, url)
+
+			b := p.Batch()
+			ensure(t, b, record("app.example.com", "10.0.0.1"), overwrite)
+			commit(t, b)
+			fake.ResetCalls()
+
+			b = p.Batch()
+			if res := ensure(t, b, record("app.example.com", "10.0.0.1"), overwrite); res != dns.Unchanged {
+				t.Fatalf("Ensure = %s, want unchanged", res)
+			}
+			commit(t, b)
+
+			want := []string{"GET /api/unbound/settings/searchHostOverride"}
+			if got := fake.Calls(); len(got) != 1 || got[0] != want[0] {
+				t.Fatalf("calls = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestEnsureReenablesDisabledRecord is audit B8 at the provider: a disabled
+// override answers nothing, so create-only mode must not treat it as an
+// existing record to leave alone.
+func TestEnsureReenablesDisabledRecord(t *testing.T) {
+	fake, url := newFake(t)
+	fake.Seed(testenv.HostOverride{Enabled: "0", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
+		Description: "managed by yk-dns-manager"})
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), false); res != dns.Updated {
+		t.Fatalf("Ensure = %s, want updated", res)
+	}
+	commit(t, b)
+
+	if h := only(t, fake.Published(), "app.example.com"); h.Enabled != "1" {
+		t.Errorf("enabled = %q, want 1", h.Enabled)
+	}
+}
+
+func TestEnsureSurfacesValidationFailure(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	// The appliance answers HTTP 200 with result "failed", so a provider that
+	// only checked the status code would report success.
+	if _, err := p.Batch().Ensure(context.Background(), record("app.example.com", "not-an-ip"), false); err == nil {
+		t.Fatal("expected Ensure to fail for a row the appliance rejects")
+	}
+	if n := len(fake.Snapshot()); n != 0 {
+		t.Errorf("rejected row was stored: %d rows", n)
+	}
+}
+
+func TestEnsureConvergesDuplicates(t *testing.T) {
+	fake, url := newFake(t)
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: ip})
+	}
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	ensure(t, b, record("app.example.com", "10.0.0.99"), true)
+	commit(t, b)
+
+	// A stale duplicate keeps answering after the live one is updated.
+	if h := only(t, fake.Published(), "app.example.com"); h.Server != "10.0.0.99" {
+		t.Errorf("surviving override has server %q, want 10.0.0.99", h.Server)
+	}
+}
+
+func TestRemoveDeletesEveryDuplicate(t *testing.T) {
+	fake, url := newFake(t)
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2"} {
+		fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: ip})
+	}
+	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "other", Domain: "example.com", RR: "A", Server: "10.0.0.3"})
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	if err := b.Remove(context.Background(), "app.example.com", "A"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	commit(t, b)
+
+	published := fake.Published()
+	if n := len(rowsFor(published, "app.example.com")); n != 0 {
+		t.Errorf("%d app.example.com rows left, want 0", n)
+	}
+	only(t, published, "other.example.com")
+}
+
+func TestRemoveMissingRecordIsNotAnError(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	if err := b.Remove(context.Background(), "ghost.example.com", "A"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if n := countCalls(fake, testenv.EndpointDel); n != 0 {
+		t.Errorf("issued %d deletes for a record that does not exist", n)
+	}
+}
+
+// TestRemoveToleratesVanishedRecord: the batch works from the list it read
+// first. A row deleted by someone else in the meantime is answered with
+// "not found", which is what Remove wanted anyway.
+func TestRemoveToleratesVanishedRecord(t *testing.T) {
+	fake, url := newFake(t)
+	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1"})
+	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "web", Domain: "example.com", RR: "A", Server: "10.0.0.1"})
+	p := newProvider(t, url)
 	ctx := context.Background()
 
-	// Create initial record.
-	err := p.Create(ctx, dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "10.0.0.1",
+	stale := p.Batch()
+	if err := stale.Remove(ctx, "web.example.com", "A"); err != nil { // loads the list
+		t.Fatalf("Remove web: %v", err)
+	}
+
+	other := p.Batch()
+	if err := other.Remove(ctx, "app.example.com", "A"); err != nil {
+		t.Fatalf("Remove app in another batch: %v", err)
+	}
+
+	if err := stale.Remove(ctx, "app.example.com", "A"); err != nil {
+		t.Fatalf("Remove of an already deleted row: %v", err)
+	}
+}
+
+// TestBatchListsOnce is audit D4: however many records a batch touches, it
+// reads the appliance's list once.
+func TestBatchListsOnce(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	ensure(t, b, record("a.example.com", "10.0.0.1"), true)
+	ensure(t, b, record("b.example.com", "10.0.0.1"), true)
+	ensure(t, b, record("a.example.com", "10.0.0.2"), true)
+	if err := b.Remove(context.Background(), "b.example.com", "A"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	commit(t, b)
+
+	if n := countCalls(fake, testenv.EndpointSearch); n != 1 {
+		t.Errorf("listed %d times, want 1", n)
+	}
+	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
+		t.Errorf("reconfigured %d times, want 1", n)
+	}
+	published := fake.Published()
+	if h := only(t, published, "a.example.com"); h.Server != "10.0.0.2" {
+		t.Errorf("a.example.com = %s, want 10.0.0.2 (the batch must see its own writes)", h.Server)
+	}
+	if n := len(rowsFor(published, "b.example.com")); n != 0 {
+		t.Errorf("b.example.com still has %d rows", n)
+	}
+}
+
+// TestUnusedBatchCommitsNothing: a reconcile that never touched DNS must not
+// reach the appliance, even with a publish owed.
+func TestUnusedBatchCommitsNothing(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	commit(t, p.Batch())
+
+	if n := len(fake.Calls()); n != 0 {
+		t.Errorf("an unused batch made %d calls", n)
+	}
+}
+
+// TestFirstCommitPublishes is audit B10: a new process cannot know whether a
+// previous one left staged changes unpublished, so its first used batch
+// publishes even when it changed nothing.
+func TestFirstCommitPublishes(t *testing.T) {
+	fake, url := newFake(t)
+	// Staged on the appliance by an earlier process that died before
+	// publishing it.
+	fake.Seed(testenv.HostOverride{Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
+		Description: "managed by yk-dns-manager"})
+	p := newProvider(t, url)
+
+	b := p.Batch()
+	ensure(t, b, record("app.example.com", "10.0.0.1"), false)
+	commit(t, b)
+	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
+		t.Fatalf("first commit reconfigured %d times, want 1", n)
+	}
+
+	b = p.Batch()
+	ensure(t, b, record("app.example.com", "10.0.0.1"), false)
+	commit(t, b)
+	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
+		t.Errorf("a commit with nothing owed reconfigured; total %d, want 1", n)
+	}
+}
+
+// TestFailedPublishStaysOwed is audit B10 within a process: after a failed
+// reconfigure the next batch finds its records already staged and writes
+// nothing, but must still publish.
+func TestFailedPublishStaysOwed(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+	ctx := context.Background()
+
+	b := p.Batch()
+	ensure(t, b, record("app.example.com", "10.0.0.1"), true)
+	fake.SetFailure(testenv.EndpointReconfigure, http.StatusInternalServerError)
+	if err := b.Commit(ctx); err == nil {
+		t.Fatal("expected Commit to fail while reconfigure fails")
+	}
+	if n := len(fake.Published()); n != 0 {
+		t.Fatalf("published %d rows after a failed commit, want 0", n)
+	}
+
+	fake.SetFailure(testenv.EndpointReconfigure, 0)
+	b = p.Batch()
+	if res := ensure(t, b, record("app.example.com", "10.0.0.1"), true); res != dns.Unchanged {
+		t.Fatalf("Ensure = %s, want unchanged", res)
+	}
+	commit(t, b)
+
+	only(t, fake.Published(), "app.example.com")
+}
+
+// TestWriteDuringPublishStaysOwed is audit D3: a write that lands while
+// another batch's reconfigure is in flight is not covered by it, so the
+// writer's own commit must still publish.
+func TestWriteDuringPublishStaysOwed(t *testing.T) {
+	fake, url := newFake(t)
+	p := newProvider(t, url)
+
+	first := p.Batch()
+	ensure(t, first, record("a.example.com", "10.0.0.1"), true)
+
+	second := p.Batch()
+	fake.DuringReconfigure(func() {
+		fake.DuringReconfigure(nil)
+		ensure(t, second, record("b.example.com", "10.0.0.1"), true)
 	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
+	commit(t, first)
+
+	if n := len(rowsFor(fake.Published(), "b.example.com")); n != 0 {
+		t.Fatal("test setup: the racing write was published by the first reconfigure")
 	}
-
-	// Update to a new IP.
-	err = p.Update(ctx, dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "10.0.0.2",
-	})
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	// Verify the IP changed in the store.
-	store := fake.Snapshot()
-	for _, h := range store {
-		if h.Server != "10.0.0.2" {
-			t.Errorf("expected server '10.0.0.2' after update, got %q", h.Server)
-		}
-	}
-}
-
-func TestUpdateNonExistent(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	err := p.Update(ctx, dns.Record{
-		Hostname: "ghost.example.com",
-		Type:     "A",
-		Value:    "10.0.0.1",
-	})
-	if err == nil {
-		t.Fatal("expected error when updating non-existent record")
-	}
-}
-
-func TestDeleteExistingRecord(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	// Create then delete.
-	err := p.Create(ctx, dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "10.0.0.1",
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	err = p.Delete(ctx, "app.example.com", "A")
-	if err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-
-	// Should not exist anymore.
-	exists, err := p.Exists(ctx, "app.example.com", "A")
-	if err != nil {
-		t.Fatalf("Exists after Delete: %v", err)
-	}
-	if exists {
-		t.Fatal("expected record to not exist after Delete")
-	}
-
-	store := fake.Snapshot()
-	if len(store) != 0 {
-		t.Errorf("expected empty store after delete, got %d entries", len(store))
-	}
-}
-
-func TestDeleteNonExistent(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	err := p.Delete(ctx, "ghost.example.com", "A")
-	if err != nil {
-		t.Fatalf("expected no error when deleting non-existent record: %v", err)
-	}
-}
-
-func TestUpsertCreatesAndUpdates(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	// First upsert should create.
-	err := p.Upsert(ctx, dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "10.0.0.1",
-	})
-	if err != nil {
-		t.Fatalf("Upsert (create): %v", err)
-	}
-
-	store := fake.Snapshot()
-	if len(store) != 1 {
-		t.Fatalf("expected 1 entry after first upsert, got %d", len(store))
-	}
-
-	// Second upsert should update.
-	err = p.Upsert(ctx, dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "10.0.0.99",
-	})
-	if err != nil {
-		t.Fatalf("Upsert (update): %v", err)
-	}
-
-	store = fake.Snapshot()
-	if len(store) != 1 {
-		t.Fatalf("expected still 1 entry after second upsert, got %d", len(store))
-	}
-	for _, h := range store {
-		if h.Server != "10.0.0.99" {
-			t.Errorf("expected server '10.0.0.99' after upsert update, got %q", h.Server)
-		}
-	}
-}
-
-func TestFullLifecycle(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	// 1. Doesn't exist
-	exists, err := p.Exists(ctx, "web.mysite.org", "A")
-	if err != nil {
-		t.Fatalf("step 1 Exists: %v", err)
-	}
-	if exists {
-		t.Fatal("step 1: expected not to exist")
-	}
-
-	// 2. Create
-	err = p.Create(ctx, dns.Record{
-		Hostname: "web.mysite.org",
-		Type:     "A",
-		Value:    "192.168.1.10",
-		Meta:     map[string]string{"description": "web server"},
-	})
-	if err != nil {
-		t.Fatalf("step 2 Create: %v", err)
-	}
-
-	// 3. Exists
-	exists, err = p.Exists(ctx, "web.mysite.org", "A")
-	if err != nil {
-		t.Fatalf("step 3 Exists: %v", err)
-	}
-	if !exists {
-		t.Fatal("step 3: expected to exist after Create")
-	}
-
-	// 4. Update IP
-	err = p.Update(ctx, dns.Record{
-		Hostname: "web.mysite.org",
-		Type:     "A",
-		Value:    "192.168.1.20",
-	})
-	if err != nil {
-		t.Fatalf("step 4 Update: %v", err)
-	}
-
-	// 5. Verify updated value
-	store := fake.Snapshot()
-	var updatedIP string
-	for _, h := range store {
-		if h.Hostname == "web" && h.Domain == "mysite.org" {
-			updatedIP = h.Server
-		}
-	}
-	if updatedIP != "192.168.1.20" {
-		t.Fatalf("step 5: expected IP '192.168.1.20', got %q", updatedIP)
-	}
-
-	// 6. Delete
-	err = p.Delete(ctx, "web.mysite.org", "A")
-	if err != nil {
-		t.Fatalf("step 6 Delete: %v", err)
-	}
-
-	// 7. Doesn't exist anymore
-	exists, err = p.Exists(ctx, "web.mysite.org", "A")
-	if err != nil {
-		t.Fatalf("step 7 Exists: %v", err)
-	}
-	if exists {
-		t.Fatal("step 7: expected not to exist after Delete")
-	}
-}
-
-func TestMultipleRecords(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	records := []dns.Record{
-		{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"},
-		{Hostname: "api.example.com", Type: "A", Value: "10.0.0.2"},
-		{Hostname: "db.other.net", Type: "A", Value: "10.0.0.3"},
-	}
-
-	for _, rec := range records {
-		if err := p.Create(ctx, rec); err != nil {
-			t.Fatalf("Create %s: %v", rec.Hostname, err)
-		}
-	}
-
-	store := fake.Snapshot()
-	if len(store) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(store))
-	}
-
-	// Each should exist independently.
-	for _, rec := range records {
-		exists, err := p.Exists(ctx, rec.Hostname, rec.Type)
-		if err != nil {
-			t.Fatalf("Exists %s: %v", rec.Hostname, err)
-		}
-		if !exists {
-			t.Errorf("expected %s to exist", rec.Hostname)
-		}
-	}
-
-	// Delete one — others should remain.
-	if err := p.Delete(ctx, "api.example.com", "A"); err != nil {
-		t.Fatalf("Delete api.example.com: %v", err)
-	}
-
-	exists, _ := p.Exists(ctx, "api.example.com", "A")
-	if exists {
-		t.Error("api.example.com should not exist after delete")
-	}
-	exists, _ = p.Exists(ctx, "app.example.com", "A")
-	if !exists {
-		t.Error("app.example.com should still exist")
-	}
-	exists, _ = p.Exists(ctx, "db.other.net", "A")
-	if !exists {
-		t.Error("db.other.net should still exist")
-	}
-}
-
-// TestDeleteRemovesAllDuplicates covers the case where OPNsense holds several
-// overrides for the same hostname/RR. Deleting only the first left the rest
-// answering with stale values and nothing else ever removed them.
-func TestDeleteRemovesAllDuplicates(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	for i := 0; i < 2; i++ {
-		if err := p.Create(ctx, dns.Record{
-			Hostname: "dup.example.com",
-			Type:     "A",
-			Value:    fmt.Sprintf("10.0.0.%d", i+1),
-		}); err != nil {
-			t.Fatalf("Create %d: %v", i, err)
-		}
-	}
-
-	store := fake.Snapshot()
-	seeded := len(store)
-	if seeded != 2 {
-		t.Fatalf("expected 2 duplicate overrides seeded, got %d", seeded)
-	}
-
-	if err := p.Delete(ctx, "dup.example.com", "A"); err != nil {
-		t.Fatalf("Delete: %v", err)
-	}
-
-	store = fake.Snapshot()
-	if len(store) != 0 {
-		t.Fatalf("expected 0 overrides after Delete, got %d: %+v", len(store), store)
-	}
-}
-
-// TestUpsertConvergesDuplicates checks that writing to a hostname that has
-// duplicate overrides leaves exactly one row behind, holding the new value.
-func TestUpsertConvergesDuplicates(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	for i := 0; i < 2; i++ {
-		if err := p.Create(ctx, dns.Record{
-			Hostname: "dup.example.com",
-			Type:     "A",
-			Value:    fmt.Sprintf("10.0.0.%d", i+1),
-		}); err != nil {
-			t.Fatalf("Create %d: %v", i, err)
-		}
-	}
-
-	if err := p.Upsert(ctx, dns.Record{Hostname: "dup.example.com", Type: "A", Value: "10.0.0.99"}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-
-	store := fake.Snapshot()
-	if len(store) != 1 {
-		t.Fatalf("expected 1 override after Upsert, got %d: %+v", len(store), store)
-	}
-	for _, h := range store {
-		if h.Server != "10.0.0.99" {
-			t.Errorf("surviving override has server %q, want 10.0.0.99", h.Server)
-		}
-	}
-}
-
-// TestUpsertUpdatePathCallCount pins the API cost of an update-path Upsert.
-// It used to be four calls: Exists fetched the full list, Update fetched it
-// again, then setHostOverride and a per-record reconfigure. It is now one list
-// fetch plus one write, with reconfigure deferred to Flush.
-func TestUpsertUpdatePathCallCount(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	if err := p.Create(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	fake.ResetCalls()
-
-	if err := p.Upsert(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.2"}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-
-	got := fake.Calls()
-
-	want := []string{
-		"GET /api/unbound/settings/searchHostOverride",
-		"POST /api/unbound/settings/setHostOverride/uuid-1",
-	}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("update-path Upsert made %d calls %v, want %v", len(got), got, want)
-	}
-
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	got = fake.Calls()[len(want):]
-	if len(got) != 1 || got[0] != "POST /api/unbound/service/reconfigure" {
-		t.Fatalf("Flush issued %v, want exactly one reconfigure", got)
-	}
-
-	// A second Flush with nothing staged must not reconfigure again.
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("second Flush: %v", err)
-	}
-	n := len(fake.Calls())
-	if n != len(want)+1 {
-		t.Fatalf("idle Flush issued extra calls: total %d, want %d", n, len(want)+1)
-	}
+	commit(t, second)
+	only(t, fake.Published(), "b.example.com")
 }
 
 func TestHealthCheckRejectsWrongCredentials(t *testing.T) {
@@ -516,60 +421,5 @@ func TestHealthCheckRejectsWrongCredentials(t *testing.T) {
 	err := newProvider(t, srv.URL).HealthCheck(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
 		t.Fatalf("HealthCheck = %v, want an authentication failure", err)
-	}
-}
-
-// TestCreateSurfacesValidationFailure proves a row the appliance rejects comes
-// back as an error. The appliance answers HTTP 200 with result "failed", so a
-// provider that only checked the status code would report success.
-func TestCreateSurfacesValidationFailure(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	err := newProvider(t, srv.URL).Create(context.Background(), dns.Record{
-		Hostname: "app.example.com",
-		Type:     "A",
-		Value:    "not-an-ip",
-	})
-	if err == nil {
-		t.Fatal("expected Create to fail for a row the appliance rejects")
-	}
-	if n := len(fake.Snapshot()); n != 0 {
-		t.Errorf("rejected row was stored: %d rows", n)
-	}
-}
-
-// TestFlushPublishes pins that writes are staged and only Flush makes Unbound
-// answer with them, and that a failed Flush stays pending and is retried.
-func TestFlushPublishes(t *testing.T) {
-	fake := newFake()
-	srv := httptest.NewServer(fake)
-	defer srv.Close()
-
-	p := newProvider(t, srv.URL)
-	ctx := context.Background()
-
-	if err := p.Create(ctx, dns.Record{Hostname: "app.example.com", Type: "A", Value: "10.0.0.1"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if n := len(fake.Published()); n != 0 {
-		t.Fatalf("published %d rows before Flush, want 0", n)
-	}
-
-	fake.SetFailure(testenv.EndpointReconfigure, http.StatusInternalServerError)
-	if err := p.Flush(ctx); err == nil {
-		t.Fatal("expected Flush to fail while reconfigure fails")
-	}
-	if n := len(fake.Published()); n != 0 {
-		t.Fatalf("published %d rows after a failed Flush, want 0", n)
-	}
-
-	fake.SetFailure(testenv.EndpointReconfigure, 0)
-	if err := p.Flush(ctx); err != nil {
-		t.Fatalf("retried Flush: %v", err)
-	}
-	if n := len(fake.Published()); n != 1 {
-		t.Fatalf("published %d rows after a retried Flush, want 1", n)
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,18 +23,26 @@ import (
 
 // Provider implements dns.Provider for OPNsense Unbound DNS.
 type Provider struct {
-	baseURL    string
-	apiKey     string
-	apiSecret  string
-	defaultTTL int
-	client     *http.Client
-	log        logr.Logger
+	baseURL   string
+	apiKey    string
+	apiSecret string
+	client    *http.Client
+	log       logr.Logger
 
-	// mu guards pending, which records that overrides were staged but not yet
-	// published by reconfigure. Concurrent flushes are harmless: reconfigure
-	// publishes whatever the appliance currently holds.
-	mu      sync.Mutex
-	pending bool
+	// OPNsense keeps override edits in its staged config until reconfigure
+	// publishes them. staged counts writes made through any batch; published
+	// is the value staged had when the last successful reconfigure started.
+	// A commit owes a publish while published < staged. Counting, rather than
+	// a flag, keeps a write made during another batch's reconfigure from being
+	// marked published by it, and keeps a failed publish owed until a later
+	// commit succeeds.
+	//
+	// A new provider starts one write behind: a previous process may have
+	// staged changes it never published, and nothing short of a reconfigure
+	// can tell.
+	mu        sync.Mutex
+	staged    uint64
+	published uint64
 }
 
 // New creates an OPNsense DNS provider from the given settings map.
@@ -68,13 +75,8 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		return nil, fmt.Errorf("opnsense: missing required setting 'api_secret'")
 	}
 
-	defaultTTL := 300
 	if v := settings["default_ttl"]; v != "" {
-		parsed, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, fmt.Errorf("opnsense: invalid default_ttl %q: %w", v, err)
-		}
-		defaultTTL = parsed
+		log.Info("opnsense: default_ttl is ignored and will be removed: Unbound host overrides have no per-record TTL", "default_ttl", v)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -83,12 +85,12 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 
 	return &Provider{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		apiSecret:  apiSecret,
-		defaultTTL: defaultTTL,
-		client:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:        log,
+		baseURL:   baseURL,
+		apiKey:    apiKey,
+		apiSecret: apiSecret,
+		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		log:       log,
+		staged:    1,
 	}, nil
 }
 
@@ -238,7 +240,7 @@ func (p *Provider) HealthCheck(ctx context.Context) error {
 	}
 }
 
-// reconfigure tells OPNsense to apply DNS changes.
+// reconfigure tells OPNsense to publish its staged config to Unbound.
 func (p *Provider) reconfigure(ctx context.Context) error {
 	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/service/reconfigure", struct{}{})
 	if err != nil {
@@ -256,7 +258,38 @@ func (p *Provider) reconfigure(ctx context.Context) error {
 	if err := decodeJSON(resp, &result, "reconfigure"); err != nil {
 		return err
 	}
-	p.log.V(1).Info("reconfigure completed", "status", result.Status)
+	if !strings.EqualFold(strings.TrimSpace(result.Status), "ok") {
+		return fmt.Errorf("opnsense: reconfigure returned status %q", result.Status)
+	}
+	p.log.V(1).Info("reconfigure completed")
+	return nil
+}
+
+func (p *Provider) markStaged() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.staged++
+}
+
+// publish reconfigures if any staged write is not yet published.
+func (p *Provider) publish(ctx context.Context) error {
+	p.mu.Lock()
+	target := p.staged
+	owed := p.published < target
+	p.mu.Unlock()
+	if !owed {
+		return nil
+	}
+
+	if err := p.reconfigure(ctx); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if target > p.published {
+		p.published = target
+	}
 	return nil
 }
 
@@ -267,18 +300,47 @@ type searchResponse struct {
 
 // hostRow represents a single host override row from the search response.
 type hostRow struct {
-	UUID     string `json:"uuid"`
-	Enabled  string `json:"enabled"`
-	Hostname string `json:"hostname"`
-	Domain   string `json:"domain"`
-	RR       string `json:"rr"`
-	Server   string `json:"server"`
+	UUID        string `json:"uuid"`
+	Enabled     string `json:"enabled"`
+	Hostname    string `json:"hostname"`
+	Domain      string `json:"domain"`
+	RR          string `json:"rr"`
+	Server      string `json:"server"`
+	Description string `json:"description"`
 }
 
-// findOverrides returns the UUID of every host override matching fqdn/recordType.
-// OPNsense accepts several overrides for the same name, so more than one is
-// possible and every caller has to account for it.
-func (p *Provider) findOverrides(ctx context.Context, fqdn, recordType string) ([]string, error) {
+func (r hostRow) enabled() bool { return r.Enabled == "1" }
+
+// is reports whether the row is the override for fqdn and recordType.
+func (r hostRow) is(fqdn, recordType string) bool {
+	host, domain := dns.SplitHostname(fqdn)
+	return strings.EqualFold(r.Hostname, host) &&
+		strings.EqualFold(r.Domain, domain) &&
+		strings.EqualFold(r.RR, recordType)
+}
+
+// matches reports whether the row already says what record wants.
+func (r hostRow) matches(record dns.Record) bool {
+	return r.enabled() && r.Server == record.Value && r.Description == description(record)
+}
+
+func description(record dns.Record) string {
+	if record.Meta == nil {
+		return ""
+	}
+	return record.Meta["description"]
+}
+
+func rowFor(uuid string, record dns.Record) hostRow {
+	host, domain := dns.SplitHostname(record.Hostname)
+	return hostRow{
+		UUID: uuid, Enabled: "1", Hostname: host, Domain: domain,
+		RR: record.Type, Server: record.Value, Description: description(record),
+	}
+}
+
+// listOverrides fetches every host override on the appliance.
+func (p *Provider) listOverrides(ctx context.Context) ([]hostRow, error) {
 	resp, err := p.doRequest(ctx, http.MethodGet, "unbound/settings/searchHostOverride", nil)
 	if err != nil {
 		return nil, err
@@ -293,41 +355,12 @@ func (p *Provider) findOverrides(ctx context.Context, fqdn, recordType string) (
 	if err := decodeJSON(resp, &sr, "search"); err != nil {
 		return nil, err
 	}
-
-	host, domain := dns.SplitHostname(fqdn)
-	var uuids []string
-	for _, row := range sr.Rows {
-		if strings.EqualFold(row.Hostname, host) &&
-			strings.EqualFold(row.Domain, domain) &&
-			strings.EqualFold(row.RR, recordType) {
-			uuids = append(uuids, row.UUID)
-		}
-	}
-	return uuids, nil
-}
-
-// convergeDuplicates deletes every override after the first. A stale duplicate
-// keeps answering after the live one is updated, so the extra rows have to go.
-func (p *Provider) convergeDuplicates(ctx context.Context, hostname string, uuids []string) error {
-	if len(uuids) <= 1 {
-		return nil
-	}
-	for _, uuid := range uuids[1:] {
-		if err := p.deleteOverride(ctx, uuid); err != nil {
-			return err
-		}
-	}
-	p.log.Info("removed duplicate host overrides", "hostname", hostname, "removed", len(uuids)-1)
-	return nil
+	return sr.Rows, nil
 }
 
 // buildHostBody creates the JSON body for add/set host override calls.
 func buildHostBody(record dns.Record) map[string]interface{} {
 	host, domain := dns.SplitHostname(record.Hostname)
-	description := ""
-	if record.Meta != nil {
-		description = record.Meta["description"]
-	}
 	return map[string]interface{}{
 		"host": map[string]string{
 			"enabled":     "1",
@@ -335,44 +368,22 @@ func buildHostBody(record dns.Record) map[string]interface{} {
 			"domain":      domain,
 			"rr":          record.Type,
 			"server":      record.Value,
-			"description": description,
+			"description": description(record),
 			"mxprio":      "",
 			"mx":          "",
 		},
 	}
 }
 
-// Exists checks whether a DNS host override exists for the given hostname and record type.
-func (p *Provider) Exists(ctx context.Context, hostname, recordType string) (bool, error) {
-	p.log.V(1).Info("checking if record exists", "hostname", hostname, "type", recordType)
-	uuids, err := p.findOverrides(ctx, hostname, recordType)
+func (p *Provider) addOverride(ctx context.Context, record dns.Record) (string, error) {
+	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/addHostOverride", buildHostBody(record))
 	if err != nil {
-		return false, err
-	}
-	return len(uuids) > 0, nil
-}
-
-// Create adds a new DNS host override. The change is staged; call Flush to
-// publish it.
-func (p *Provider) Create(ctx context.Context, record dns.Record) error {
-	p.log.V(1).Info("creating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
-	if err := p.createOverride(ctx, record); err != nil {
-		return err
-	}
-	p.setPending()
-	return nil
-}
-
-func (p *Provider) createOverride(ctx context.Context, record dns.Record) error {
-	body := buildHostBody(record)
-	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/addHostOverride", body)
-	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
+		return "", fmt.Errorf("opnsense: addHostOverride returned status %d: %s", resp.StatusCode, readErrorBody(resp))
 	}
 
 	var result struct {
@@ -380,41 +391,18 @@ func (p *Provider) createOverride(ctx context.Context, record dns.Record) error 
 		UUID   string `json:"uuid"`
 	}
 	if err := decodeJSON(resp, &result, "addHostOverride"); err != nil {
-		return err
+		return "", err
 	}
 	if result.Result != "saved" {
-		return fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
+		return "", fmt.Errorf("opnsense: addHostOverride unexpected result: %s", result.Result)
 	}
 
-	p.log.V(1).Info("record created", "uuid", result.UUID)
-	return nil
+	p.log.V(1).Info("override added", "hostname", record.Hostname, "uuid", result.UUID)
+	return result.UUID, nil
 }
 
-// Update modifies an existing DNS host override. The change is staged; call
-// Flush to publish it.
-func (p *Provider) Update(ctx context.Context, record dns.Record) error {
-	p.log.V(1).Info("updating record", "hostname", record.Hostname, "type", record.Type, "value", record.Value)
-
-	uuids, err := p.findOverrides(ctx, record.Hostname, record.Type)
-	if err != nil {
-		return err
-	}
-	if len(uuids) == 0 {
-		return fmt.Errorf("opnsense: no existing override found for %s/%s", record.Hostname, record.Type)
-	}
-	if err := p.convergeDuplicates(ctx, record.Hostname, uuids); err != nil {
-		return err
-	}
-	if err := p.updateOverride(ctx, uuids[0], record); err != nil {
-		return err
-	}
-	p.setPending()
-	return nil
-}
-
-func (p *Provider) updateOverride(ctx context.Context, uuid string, record dns.Record) error {
-	body := buildHostBody(record)
-	resp, err := p.doRequest(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/setHostOverride/%s", uuid), body)
+func (p *Provider) setOverride(ctx context.Context, uuid string, record dns.Record) error {
+	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/setHostOverride/"+url.PathEscape(uuid), buildHostBody(record))
 	if err != nil {
 		return err
 	}
@@ -434,38 +422,12 @@ func (p *Provider) updateOverride(ctx context.Context, uuid string, record dns.R
 		return fmt.Errorf("opnsense: setHostOverride unexpected result: %s", result.Result)
 	}
 
-	p.log.V(1).Info("record updated", "uuid", uuid)
-	return nil
-}
-
-// Delete removes every DNS host override matching hostname/recordType. The
-// changes are staged; call Flush to publish them.
-func (p *Provider) Delete(ctx context.Context, hostname, recordType string) error {
-	p.log.V(1).Info("deleting record", "hostname", hostname, "type", recordType)
-
-	uuids, err := p.findOverrides(ctx, hostname, recordType)
-	if err != nil {
-		return err
-	}
-	if len(uuids) == 0 {
-		p.log.V(1).Info("opnsense: no existing override found for deletion", "hostname", hostname, "type", recordType)
-		return nil
-	}
-
-	// Deleting only the first match left the remaining overrides answering with
-	// stale values, and nothing else would ever remove them.
-	for _, uuid := range uuids {
-		if err := p.deleteOverride(ctx, uuid); err != nil {
-			return err
-		}
-	}
-	p.log.V(1).Info("overrides deleted", "hostname", hostname, "count", len(uuids))
-	p.setPending()
+	p.log.V(1).Info("override updated", "hostname", record.Hostname, "uuid", uuid)
 	return nil
 }
 
 func (p *Provider) deleteOverride(ctx context.Context, uuid string) error {
-	resp, err := p.doRequest(ctx, http.MethodPost, fmt.Sprintf("unbound/settings/delHostOverride/%s", uuid), struct{}{})
+	resp, err := p.doRequest(ctx, http.MethodPost, "unbound/settings/delHostOverride/"+url.PathEscape(uuid), struct{}{})
 	if err != nil {
 		return err
 	}
@@ -483,63 +445,160 @@ func (p *Provider) deleteOverride(ctx context.Context, uuid string) error {
 	}
 	switch result.Result {
 	case "deleted":
-		p.log.V(1).Info("record deleted", "uuid", uuid)
+		p.log.V(1).Info("override deleted", "uuid", uuid)
 	case "not found":
-		p.log.V(1).Info("record already deleted", "uuid", uuid)
+		p.log.V(1).Info("override already deleted", "uuid", uuid)
 	default:
 		return fmt.Errorf("opnsense: delHostOverride unexpected result: %s", result.Result)
 	}
 	return nil
 }
 
-// Upsert creates or updates a DNS record, resolving the existing override once.
-// The change is staged; call Flush to publish it.
-func (p *Provider) Upsert(ctx context.Context, record dns.Record) error {
-	uuids, err := p.findOverrides(ctx, record.Hostname, record.Type)
+// Batch starts a unit of work against the appliance.
+func (p *Provider) Batch() dns.Batch {
+	return &batch{p: p}
+}
+
+// batch is one reconcile's view of the appliance. It lists the overrides once,
+// on first use, and keeps that list in step with its own writes, so later
+// calls in the same batch see them.
+type batch struct {
+	p      *Provider
+	used   bool
+	loaded bool
+	rows   []hostRow
+}
+
+func (b *batch) load(ctx context.Context) error {
+	b.used = true
+	if b.loaded {
+		return nil
+	}
+	rows, err := b.p.listOverrides(ctx)
 	if err != nil {
-		return fmt.Errorf("opnsense: upsert lookup: %w", err)
+		return err
+	}
+	b.rows, b.loaded = rows, true
+	return nil
+}
+
+func (b *batch) find(fqdn, recordType string) []hostRow {
+	var out []hostRow
+	for _, r := range b.rows {
+		if r.is(fqdn, recordType) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (b *batch) remove(ctx context.Context, uuid string) error {
+	if err := b.p.deleteOverride(ctx, uuid); err != nil {
+		return err
+	}
+	b.p.markStaged()
+	for i, r := range b.rows {
+		if r.UUID == uuid {
+			b.rows = append(b.rows[:i], b.rows[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (b *batch) replace(row hostRow) {
+	for i, r := range b.rows {
+		if r.UUID == row.UUID {
+			b.rows[i] = row
+			return
+		}
+	}
+	b.rows = append(b.rows, row)
+}
+
+// Ensure implements dns.Batch.
+//
+// OPNsense accepts several overrides for one name, and a stale duplicate keeps
+// answering after the live one is updated. Whenever Ensure writes, it first
+// removes every override for the name except the one it keeps.
+func (b *batch) Ensure(ctx context.Context, record dns.Record, overwrite bool) (dns.Result, error) {
+	if err := b.load(ctx); err != nil {
+		return 0, err
 	}
 
-	if len(uuids) == 0 {
-		if err := p.createOverride(ctx, record); err != nil {
+	existing := b.find(record.Hostname, record.Type)
+	if len(existing) == 0 {
+		uuid, err := b.p.addOverride(ctx, record)
+		if err != nil {
+			return 0, err
+		}
+		b.p.markStaged()
+		b.replace(rowFor(uuid, record))
+		return dns.Created, nil
+	}
+
+	keep := existing[0]
+	for _, r := range existing {
+		if r.enabled() {
+			keep = r
+			break
+		}
+	}
+
+	// A disabled override answers nothing, so it does not count as a live
+	// record that create-only mode must leave alone.
+	if !overwrite && keep.enabled() {
+		if keep.matches(record) {
+			return dns.Unchanged, nil
+		}
+		return dns.Kept, nil
+	}
+
+	removed := 0
+	for _, r := range existing {
+		if r.UUID == keep.UUID {
+			continue
+		}
+		if err := b.remove(ctx, r.UUID); err != nil {
+			return 0, err
+		}
+		removed++
+	}
+	if removed > 0 {
+		b.p.log.Info("removed duplicate host overrides", "hostname", record.Hostname, "removed", removed)
+	}
+
+	if keep.matches(record) {
+		if removed > 0 {
+			return dns.Updated, nil
+		}
+		return dns.Unchanged, nil
+	}
+	if err := b.p.setOverride(ctx, keep.UUID, record); err != nil {
+		return 0, err
+	}
+	b.p.markStaged()
+	b.replace(rowFor(keep.UUID, record))
+	return dns.Updated, nil
+}
+
+// Remove implements dns.Batch.
+func (b *batch) Remove(ctx context.Context, hostname, recordType string) error {
+	if err := b.load(ctx); err != nil {
+		return err
+	}
+	for _, r := range b.find(hostname, recordType) {
+		if err := b.remove(ctx, r.UUID); err != nil {
 			return err
 		}
-		p.setPending()
-		return nil
 	}
-
-	if err := p.convergeDuplicates(ctx, record.Hostname, uuids); err != nil {
-		return err
-	}
-	if err := p.updateOverride(ctx, uuids[0], record); err != nil {
-		return err
-	}
-	p.setPending()
 	return nil
 }
 
-// Flush publishes staged overrides with a single reconfigure. OPNsense keeps
-// edits in its model config and only republishes them on reconfigure, so one
-// call per reconcile is enough; doing it per record multiplied a global
-// operation by the number of hostnames on the route.
-func (p *Provider) Flush(ctx context.Context) error {
-	p.mu.Lock()
-	pending := p.pending
-	p.mu.Unlock()
-	if !pending {
+// Commit implements dns.Batch.
+func (b *batch) Commit(ctx context.Context) error {
+	if !b.used {
 		return nil
 	}
-	if err := p.reconfigure(ctx); err != nil {
-		return err
-	}
-	p.mu.Lock()
-	p.pending = false
-	p.mu.Unlock()
-	return nil
-}
-
-func (p *Provider) setPending() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.pending = true
+	return b.p.publish(ctx)
 }

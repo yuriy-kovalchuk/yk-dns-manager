@@ -3,6 +3,7 @@ package opnsense
 import (
 	"crypto/tls"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -22,39 +23,26 @@ func TestNew_ValidSettings(t *testing.T) {
 	if p.baseURL != "https://opnsense.local/api" {
 		t.Errorf("expected baseURL 'https://opnsense.local/api', got %q", p.baseURL)
 	}
-	if p.defaultTTL != 300 {
-		t.Errorf("expected default TTL 300, got %d", p.defaultTTL)
-	}
 }
 
-func TestNew_CustomTTL(t *testing.T) {
-	settings := map[string]string{
-		"base_url":    "https://opnsense.local/api",
-		"api_key":     "key123",
-		"api_secret":  "secret456",
-		"default_ttl": "600",
-	}
-
-	p, err := New(logr.Discard(), settings)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if p.defaultTTL != 600 {
-		t.Errorf("expected default TTL 600, got %d", p.defaultTTL)
-	}
-}
-
-func TestNew_InvalidTTL(t *testing.T) {
-	settings := map[string]string{
-		"base_url":    "https://opnsense.local/api",
-		"api_key":     "key123",
-		"api_secret":  "secret456",
-		"default_ttl": "notanumber",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for invalid default_ttl, got nil")
+// TestNew_DefaultTTLIgnored: Unbound host overrides have no per-record TTL,
+// so default_ttl never had an effect. It is still accepted, so existing configs
+// keep working, but it warns.
+func TestNew_DefaultTTLIgnored(t *testing.T) {
+	for _, v := range []string{"600", "notanumber"} {
+		msgs := &[]string{}
+		settings := map[string]string{
+			"base_url":    "https://opnsense.local/api",
+			"api_key":     "key123",
+			"api_secret":  "secret456",
+			"default_ttl": v,
+		}
+		if _, err := New(logr.New(captureSink{msgs: msgs}), settings); err != nil {
+			t.Fatalf("default_ttl %q: unexpected error: %v", v, err)
+		}
+		if !strings.Contains(strings.Join(*msgs, "\n"), "default_ttl is ignored") {
+			t.Errorf("default_ttl %q: expected a warning, got %v", v, *msgs)
+		}
 	}
 }
 

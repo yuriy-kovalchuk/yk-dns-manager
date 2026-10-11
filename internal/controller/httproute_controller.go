@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,18 +43,19 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// The provider stages override changes and publishes them in a single apply
-	// at the end of the reconcile, so a route with N hostnames costs one
-	// reconfigure instead of N. Flushing on the error path as well keeps staged
-	// work from being stranded.
+	// One batch per reconcile: the provider reads its records once, and the
+	// changes are published in a single commit at the end, so a route with N
+	// hostnames costs one read and at most one publish. Committing on the
+	// error path as well keeps staged work from being stranded.
+	batch := r.DNS.Batch()
 	defer func() {
-		if ferr := r.DNS.Flush(ctx); ferr != nil {
-			r.Log.Error(ferr, "failed to publish staged DNS changes")
+		if cerr := batch.Commit(ctx); cerr != nil {
+			r.Log.Error(cerr, "failed to publish staged DNS changes")
 			// Surfacing the failure is what makes controller-runtime requeue with
 			// backoff; logging it alone would leave the DNS change unpublished
 			// with no retry. An existing error already guarantees a requeue.
 			if err == nil {
-				err = ferr
+				err = cerr
 			}
 		}
 	}()
@@ -91,7 +93,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// in the map.
 			var deleteErr error
 			for _, hostname := range union(r.deletable(owned), specHostnames) {
-				if err := r.DNS.Delete(ctx, hostname, "A"); err != nil {
+				if err := batch.Remove(ctx, hostname, "A"); err != nil {
 					r.Log.Error(err, "failed to delete DNS record", "hostname", hostname)
 					deleteErr = fmt.Errorf("at least one DNS record deletion failed")
 				} else {
@@ -137,15 +139,16 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Delete records we own that are no longer in the spec.
 	for _, oldHost := range r.deletable(owned) {
-		if !Contains(specHostnames, oldHost) {
+		if !slices.Contains(specHostnames, oldHost) {
 			r.Log.Info("hostname no longer managed, deleting DNS record", "hostname", oldHost)
-			if err := r.DNS.Delete(ctx, oldHost, "A"); err != nil {
+			if err := batch.Remove(ctx, oldHost, "A"); err != nil {
 				return ctrl.Result{}, fmt.Errorf("deleting removed DNS record for %s: %w", oldHost, err)
 			}
 		}
 	}
 
-	// Update and Create
+	// Create or update. In create-only mode (Upsert false) a live record that
+	// already exists is left alone, whatever it holds.
 	for _, hostname := range specHostnames {
 		ip, _ := r.DomainMap.LookupIP(hostname)
 
@@ -157,27 +160,18 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Meta:     map[string]string{"description": "managed by yk-dns-manager"},
 		}
 
-		if r.Upsert {
-			if err := r.DNS.Upsert(ctx, record); err != nil {
-				return ctrl.Result{}, fmt.Errorf("upserting DNS record for %s: %w", hostname, err)
-			}
-			r.Log.Info("upserted DNS record", "hostname", hostname, "ip", ip)
-			continue
-		}
-
-		// Non-upsert path: only create if missing.
-		exists, err := r.DNS.Exists(ctx, hostname, "A")
+		res, err := batch.Ensure(ctx, record, r.Upsert)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("checking DNS record for %s: %w", hostname, err)
+			return ctrl.Result{}, fmt.Errorf("ensuring DNS record for %s: %w", hostname, err)
 		}
-		if exists {
-			r.Log.Info("DNS record already exists and upsert mode is disabled — IPs may drift if domain map changes; consider enabling upsert mode to keep records in sync", "hostname", hostname)
-			continue
+		switch res {
+		case dns.Created, dns.Updated:
+			r.Log.Info(res.String()+" DNS record", "hostname", hostname, "ip", ip)
+		case dns.Kept:
+			r.Log.Info("DNS record already exists with a different value and upsert mode is disabled — IPs may drift if domain map changes; consider enabling upsert mode to keep records in sync", "hostname", hostname, "ip", ip)
+		case dns.Unchanged:
+			r.Log.V(1).Info("DNS record already up to date", "hostname", hostname, "ip", ip)
 		}
-		if err := r.DNS.Create(ctx, record); err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating DNS record for %s: %w", hostname, err)
-		}
-		r.Log.Info("created DNS record", "hostname", hostname, "ip", ip)
 	}
 
 	// Update annotation with the list of hostnames we actually manage (those
@@ -245,7 +239,7 @@ func (r *HTTPRouteReconciler) deletable(owned []string) []string {
 func union(a, b []string) []string {
 	out := make([]string, 0, len(a)+len(b))
 	for _, s := range append(append([]string(nil), a...), b...) {
-		if !Contains(out, s) {
+		if !slices.Contains(out, s) {
 			out = append(out, s)
 		}
 	}
