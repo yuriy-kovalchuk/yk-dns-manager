@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- **Breaking:** an exact domain-map key matches only that one name. It used to cover every name below it as well, so `example.com: 10.0.0.1` also served `app.example.com`. Wildcards are unchanged: `*.example.com` covers every name below example.com at any depth. **Before upgrading**, replace each exact key that is meant to cover subdomains with its `*.` form (keep the exact key too if the bare name needs a record); otherwise the controller releases the records of those subdomains. At startup the controller logs every exact key without a matching wildcard. The chart default is now `"*.example.com"`.
+- **Breaking:** a `${NAME}` reference to an unset environment variable in the provider settings fails startup instead of expanding to an empty string, and only `${NAME}` is expanded, so a literal `$` in a value is kept.
+- **Breaking:** unknown fields in the provider config and unknown `settings` keys fail startup instead of being ignored.
 - A failing DNS cleanup of a deleted HTTPRoute holds the finalizer and is retried for `--cleanup-grace-period` instead of being given up after one attempt; the route is still released after that.
 - The reconcile that adds the finalizer also publishes the records, routes are read from the informer cache, and the ownership annotation is written as a merge patch. Another controller's finalizer changes no longer trigger a reconcile.
 - **Breaking:** a record for a route's hostname that the controller did not create is no longer overwritten or deleted; it is logged as a conflict. Records created by earlier versions are adopted automatically by the route whose `dns.yk/managed-hostnames` annotation lists them, and re-marked once.
@@ -35,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- Domain-map keys written with uppercase letters or a trailing dot never matched; keys are now normalized, validated as domain names, and duplicates after normalization are rejected.
 - `strategy.type: RollingUpdate` without a `strategy.rollingUpdate` block rendered `rollingUpdate: null`. The chart now renders `maxSurge` and `maxUnavailable` in full (25% unless set), so switching back to `Recreate` works with both client-side and server-side apply (Helm 4's default). A release first deployed with `RollingUpdate` by an earlier chart version may need one `helm upgrade --server-side=false` to switch back.
 - A deleted HTTPRoute's DNS cleanup could stay unpublished when the reconfigure failed, because the finalizer was already gone; the cleanup is now published before the finalizer is removed.
 - In create-only mode a disabled override counted as an existing record, so the name never resolved again; it is now re-enabled.

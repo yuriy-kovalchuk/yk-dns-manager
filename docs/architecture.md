@@ -71,18 +71,18 @@ The provider decides which records it may touch, not the controller:
 
 ### Domain Map Lookup
 
-The domain map walks up the hostname one label at a time. At each level it checks for an exact entry, then for a wildcard covering that level, and returns the first hit:
+An exact key matches only that name. Otherwise the lookup walks up the hostname and returns the first wildcard covering it, so the most specific wildcard wins:
 
 ```
 Hostname: sub.app.example.com
-  1. "sub.app.example.com", then "*.app.example.com"
-  2. "app.example.com",     then "*.example.com"
-  3. "example.com",         then "*.com"
-  4. "com"
+  1. "sub.app.example.com"   exact key
+  2. "*.app.example.com"
+  3. "*.example.com"
+  4. "*.com"
   5. no match
 ```
 
-The most specific entry wins, and an exact entry beats a wildcard at the same level. Because the walk continues upward, an exact entry such as `example.com` also covers every name under it, and `*.example.com` covers `a.b.example.com` as well as `anything.example.com`.
+A wildcard covers names at any depth below it, like a DNS wildcard, but not its bare domain: `*.example.com` matches `a.b.example.com` but not `example.com`. Keys are normalized at load time (lowercase, no trailing dot) and must be valid domain names.
 
 ### DNS Provider Selection
 

@@ -59,12 +59,17 @@ Define which IPs hostnames should resolve to:
 
 ```yaml
 # examples/domain-map.yaml
-example.com: 10.0.0.1
-"*.homelab.local": 10.0.0.2
-"special.homelab.local": 10.0.0.3   # exact match wins over wildcard
+"*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
+"special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
+homelab.local: 10.0.0.2              # the bare domain needs its own entry
 ```
 
-Matching walks up the hostname one label at a time and returns the first hit. At each level an exact entry beats a wildcard, so the most specific entry wins. Two consequences: an entry such as `example.com` also covers every name under it, and `*.example.com` covers names at any depth (`a.b.example.com` too), unless something more specific matches first.
+- An exact key such as `homelab.local` matches only that one name.
+- A wildcard key such as `*.homelab.local` matches every name below it (`app.homelab.local`, `a.b.homelab.local`), but not `homelab.local` itself.
+- An exact key wins, then the most specific wildcard.
+- Keys are case-insensitive, may end in a dot, and must be valid domain names; two keys that differ only in case or a trailing dot are rejected.
+
+Earlier versions let an exact key cover every name below it too. The controller now logs each exact key that has no matching wildcard at startup; see the CHANGELOG before upgrading.
 
 ## Configuration
 
@@ -100,7 +105,7 @@ settings:
 
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
 - `upsert: true` updates existing records on every reconcile; when `false`, only creates missing records.
-- Settings support `${ENV_VAR}` expansion for credential injection. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
+- Settings support `${ENV_VAR}` expansion for credential injection; a reference to an unset variable fails startup, and a `$` anywhere else is kept as is. Unknown fields and unknown `settings` keys also fail startup. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
 - `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for the local fake.
 - `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
 

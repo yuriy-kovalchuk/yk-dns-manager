@@ -6,7 +6,7 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 55 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Unit | `cmd/`, `internal/` | 59 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
 | Integration | `test/integration/` | 11 + conformance | The provider conformance suite and OPNsense-specific checks, against an in-process fake appliance over HTTP |
 | Envtest | `test/envtest/` | 17 | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
@@ -25,6 +25,7 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestSelectProviderPicksByName` | Only the provider the config names is initialized |
 | `TestSelectProviderRejectsUnknownName` | A misspelled name fails and lists the available providers |
 | `TestSelectProviderReturnsInitError` | The named provider's own error is the startup error |
+| `TestSelectProviderRejectsUnknownSettings` | A settings key the provider does not list fails startup (D11) |
 | `TestSelectProviderDoesNotKeepTypedNilProvider` | A factory returning `(nil, err)` must not leave a typed-nil provider behind — this is what used to panic on startup |
 
 ### Config — `internal/config/`
@@ -32,9 +33,10 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | Test | Description |
 |---|---|
 | `TestLoadDomainMap` | Parses a YAML domain map |
-| `TestLoadDomainMapValidation` | Rejects non-IPv4 values, empty maps, empty domain keys and duplicate YAML keys |
+| `TestLoadDomainMapValidation` | Rejects non-IPv4 values, empty maps, empty or invalid domain keys, and keys duplicated before or after normalization |
 | `TestLoadDomainMapNormalizesValues` | Values are canonicalised through `netip` |
-| `TestLookupIP` | Exact and nested subdomain lookup, trailing dots |
+| `TestLoadDomainMapNormalizesKeys` | Keys are lowercased and lose a trailing dot (B12) |
+| `TestLookupIP` | An exact key matches only itself, case-insensitively and with a trailing dot (D2) |
 | `TestLookupIPWildcard` | Wildcard entries match subdomains |
 | `TestLookupIPWildcardWithBaseDomain` | Walk-up matching falls back from wildcard to base domain |
 | `TestLoadProviderConfig` | Parses a valid provider config |
@@ -42,7 +44,9 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestLoadProviderConfig_UpsertDefault` | `upsert` defaults to `false` |
 | `TestLoadProviderConfig_MissingProvider` | Errors when `provider` is absent |
 | `TestLoadProviderConfig_EnvVarExpansion` | `${ENV_VAR}` in settings resolves from the environment |
-| `TestLoadProviderConfig_EnvVarUnset` | Unset variables expand to the empty string |
+| `TestLoadProviderConfig_EnvVarUnset` | A reference to an unset variable fails, naming the setting and the variable (S6) |
+| `TestLoadProviderConfig_LiteralDollar` | Only `${NAME}` is expanded; a literal `$` is kept (S6) |
+| `TestLoadProviderConfig_UnknownField` | An unknown top-level field fails (D11) |
 | `TestLoadProviderConfig_MissingFile` | Errors for a non-existent file |
 
 ### OPNsense provider — `internal/dns/opnsense/`
