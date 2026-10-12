@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- Leader election (`--leader-elect`, chart value `leaderElection.enabled`, on by default) through a Lease in the release namespace, so only one replica manages DNS. More replicas and a `RollingUpdate` strategy are now safe; the chart refuses `replicaCount` > 1 with leader election off. The chart adds a Role for Leases and leader-election Events.
 - `--require-accepted-routes` (chart value `requireAcceptedRoutes`, off by default) limits DNS to HTTPRoutes that a parent Gateway has accepted.
 - `--cleanup-grace-period` (default 5m): how long a failing DNS cleanup of a deleted HTTPRoute is retried.
 - Events on HTTPRoutes for created, updated, released, conflicting and failing DNS records, and the `yk_dns_manager_records_total` and `yk_dns_manager_dns_errors_total` metrics. The ClusterRole gains create/patch on `events.k8s.io` events.
@@ -34,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- `strategy.type: RollingUpdate` without a `strategy.rollingUpdate` block rendered `rollingUpdate: null`. The chart now renders `maxSurge` and `maxUnavailable` in full (25% unless set), so switching back to `Recreate` works with both client-side and server-side apply (Helm 4's default). A release first deployed with `RollingUpdate` by an earlier chart version may need one `helm upgrade --server-side=false` to switch back.
 - A deleted HTTPRoute's DNS cleanup could stay unpublished when the reconfigure failed, because the finalizer was already gone; the cleanup is now published before the finalizer is removed.
 - In create-only mode a disabled override counted as an existing record, so the name never resolved again; it is now re-enabled.
 - A failed reconfigure left changes staged but unpublished once the retry found nothing left to write; a failed publish now stays owed until a later one succeeds, and a new process publishes once in case an earlier one died with changes staged.
