@@ -178,3 +178,16 @@ func TestLoadProviderConfig_MissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file, got nil")
 	}
 }
+
+// TestLoadProviderConfig_UnknownField is audit D11: a misspelled top-level
+// field used to be ignored, leaving its default in place.
+func TestLoadProviderConfig_UnknownField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
+	if err := os.WriteFile(path, []byte("provider: opnsense\nupsrt: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadProviderConfigFromPath(path)
+	if err == nil || !strings.Contains(err.Error(), "upsrt") {
+		t.Fatalf("error = %v, want it to name the unknown field", err)
+	}
+}
