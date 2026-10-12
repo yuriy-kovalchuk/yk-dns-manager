@@ -76,6 +76,7 @@ homelab.local: 10.0.0.2              # the bare domain needs its own entry
 - A wildcard key such as `*.homelab.local` matches every name below it (`app.homelab.local`, `a.b.homelab.local`), but not `homelab.local` itself.
 - An exact key wins, then the most specific wildcard.
 - Keys are case-insensitive, may end in a dot, and must be valid domain names; two keys that differ only in case or a trailing dot are rejected.
+- A route hostname that is itself a wildcard (`*.example.com`) gets no record: it would answer for every name below the domain, including names other routes serve. The controller leaves it alone and records a warning Event on the route.
 
 Earlier versions let an exact key cover every name below it too. The controller now logs each exact key that has no matching wildcard at startup; see the CHANGELOG before upgrading.
 
