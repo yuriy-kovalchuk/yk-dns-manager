@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - `publish_interval` provider setting (OPNsense): the shortest gap between two Unbound reconfigures, so a burst of route changes costs one publish instead of one per change. A held-back publish keeps its changes owed, and the controller retries when it is due.
 - Events on HTTPRoutes for created, updated, released, conflicting and failing DNS records, and the `yk_dns_manager_records_total` and `yk_dns_manager_dns_errors_total` metrics. The ClusterRole gains create/patch on `events.k8s.io` events.
 - Ownership marking: every DNS record the controller writes is marked (the OPNsense override description `yk-dns-manager: managed record, do not edit`), and only marked records are ever changed or deleted.
+- The mark names the routes that asked for the record (`dns.Record.Owner`; for OPNsense the description ends with `[owners: httproute/<namespace>/<name> …]`), and `Remove` carries the owner, so a provider can refuse a delete it has no claim on. A route sharing a hostname joins the list the next time it is reconciled.
 - Provider conformance suite (`internal/dns/dnstest`) that every provider runs.
 - `networkPolicy.apiServer` and `networkPolicy.provider` set the egress ports, and optionally CIDRs, for the API server and the DNS provider.
 - `allow_insecure_http` provider setting, the opt-in for a plain-HTTP appliance URL.
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- **Breaking (provider API):** `dns.Record` gained `Owner` and `Batch.Remove` takes the owner who is releasing the name. Providers store it with the record and refuse to delete records another owner wrote. Only providers written against this interface are affected; nothing in the config or the chart changes.
 - **Breaking:** an exact domain-map key matches only that one name. It used to cover every name below it as well, so `example.com: 10.0.0.1` also served `app.example.com`. Wildcards are unchanged: `*.example.com` covers every name below example.com at any depth. **Before upgrading**, replace each exact key that is meant to cover subdomains with its `*.` form (keep the exact key too if the bare name needs a record); otherwise the controller releases the records of those subdomains. At startup the controller logs every exact key without a matching wildcard. The chart default is now `"*.example.com"`.
 - **Breaking:** a `${NAME}` reference to an unset environment variable in the provider settings fails startup instead of expanding to an empty string, and only `${NAME}` is expanded, so a literal `$` in a value is kept.
 - **Breaking:** unknown fields in the provider config and unknown `settings` keys fail startup instead of being ignored.
@@ -48,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - A failed reconfigure left changes staged but unpublished once the retry found nothing left to write; a failed publish now stays owed until a later one succeeds, and a new process publishes once in case an earlier one died with changes staged.
 - A reconfigure answering a status other than `ok` was treated as success.
 - Any user able to edit an HTTPRoute could delete arbitrary DNS host overrides by writing their names into the ownership annotation.
+- Any user able to edit an HTTPRoute could delete the DNS record of a route in another namespace by writing its hostname into their own `dns.yk/managed-hostnames` annotation: the ownership marker named no route, so the record looked like one the tampered route owned.
 - An HTTPRoute with a wildcard hostname (`*.example.com`) matched the domain map's wildcard key and created a wildcard override, so that one route answered for every name below the domain. Wildcard route hostnames are now ignored, with a warning Event on the route.
 - A record an operator deleted or edited on the DNS backend stayed wrong until something in the cluster changed: the event filter dropped informer resyncs, so nothing ever re-checked a route whose spec was untouched.
 - Every batch that changed something reconfigured Unbound, so applying a burst of HTTPRoutes at once restarted the resolver once per route.

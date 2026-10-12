@@ -129,7 +129,7 @@ Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dn
 
 ## Ownership
 
-The controller only changes or deletes DNS records it created. It marks each one; for OPNsense the override description is `yk-dns-manager: managed record, do not edit`, so do not edit that description by hand. A record someone else created for the same name is left alone and logged as a conflict, whatever `upsert` says. Records created by earlier versions are adopted automatically by the route that created them.
+The controller only changes or deletes DNS records it created. It marks each one; for OPNsense the override description is `yk-dns-manager: managed record, do not edit`, so do not edit that description by hand. The mark also names the routes that asked for the record (`[owners: httproute/<namespace>/<name>]`), and only a route named there can ever have it deleted — writing another route's hostname into your own `dns.yk/managed-hostnames` annotation does nothing. A route that shares a hostname with another joins that list the next time it is reconciled, so the last route left standing can still release the record. A record someone else created for the same name is left alone and logged as a conflict, whatever `upsert` says. Records created by earlier versions are adopted automatically by the route that created them; until that route reconciles once after the upgrade, its record carries no owners and any route naming it can release it.
 
 ## Supported Providers
 

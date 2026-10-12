@@ -280,3 +280,64 @@ func TestBurstOfRoutesCostsOnePublish(t *testing.T) {
 		t.Errorf("%d reconfigures for five routes created at once, want at most 2", n)
 	}
 }
+
+// TestAnnotationCannotDeleteAnotherRoutesRecord is audit H1: the ownership
+// marker named no route, so a route whose annotation listed a hostname could
+// delete the record another route wrote.
+func TestAnnotationCannotDeleteAnotherRoutesRecord(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.createRoute("app", []string{"app.example.com"})
+	h.waitOwned("app", `["app.example.com"]`)
+
+	h.createRoute("squatter", []string{"squatter.example.com"})
+	h.waitOwned("squatter", `["squatter.example.com"]`)
+
+	h.updateRoute("squatter", func(r *gatewayv1.HTTPRoute) {
+		r.Annotations[managedHostnamesAnnotation] = `["app.example.com","squatter.example.com"]`
+	})
+	h.deleteRoute("squatter")
+	h.waitRouteGone("squatter")
+
+	h.consistently("app.example.com is still published for app", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
+	})
+}
+
+// TestSharedHostnameIsReleasedByTheLastRoute: two routes serving one name are
+// both owners of its record, so the last of them to go can still release it.
+func TestSharedHostnameIsReleasedByTheLastRoute(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.createRoute("blue", []string{"app.example.com"})
+	h.createRoute("green", []string{"app.example.com"})
+	h.waitOwned("blue", `["app.example.com"]`)
+	h.waitOwned("green", `["app.example.com"]`)
+
+	h.deleteRoute("blue")
+	h.waitRouteGone("blue")
+	h.deleteRoute("green")
+	h.waitRouteGone("green")
+
+	if n := len(rows(h.fake.Published(), "app.example.com")); n != 0 {
+		t.Errorf("%d records left for app.example.com after both routes went", n)
+	}
+}
+
+// TestRecordFromBeforeOwnersIsStillReleased: a record the controller wrote
+// before owners were marked belongs to no route in particular, so the route
+// serving it can still release it.
+func TestRecordFromBeforeOwnersIsStillReleased(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.fake.Seed(testenv.HostOverride{
+		Enabled: "1", Hostname: "app", Domain: "example.com", RR: "A", Server: "10.0.0.1",
+		Description: opnsense.ManagedDescription,
+	})
+
+	h.createRoute("app", []string{"app.example.com"})
+	h.waitOwned("app", `["app.example.com"]`)
+	h.deleteRoute("app")
+	h.waitRouteGone("app")
+
+	if n := len(rows(h.fake.Snapshot(), "app.example.com")); n != 0 {
+		t.Errorf("%d records left for app.example.com after the route went", n)
+	}
+}

@@ -130,7 +130,7 @@ func legacy(hostname, domain, ip string) testenv.HostOverride {
 
 // TestLegacyRecordIsAdoptedByItsRoute covers the upgrade path: a route that
 // recorded owning a name before ownership was marked adopts its record, which
-// is rewritten with the ownership marker.
+// is rewritten with the ownership marker and the route as its owner.
 func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(legacy("app", "example.com", "10.0.0.1"))
@@ -143,7 +143,9 @@ func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
 
 	h.eventually("app.example.com adopted with the ownership marker", func() bool {
 		r := rows(h.fake.Published(), "app.example.com")
-		return len(r) == 1 && r[0].Description == opnsense.ManagedDescription
+		return len(r) == 1 &&
+			strings.HasPrefix(r[0].Description, opnsense.ManagedDescription) &&
+			strings.Contains(r[0].Description, "httproute/"+h.ns+"/app")
 	})
 	h.waitOwned("app", `["app.example.com"]`)
 }

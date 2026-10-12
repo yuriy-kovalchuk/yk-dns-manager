@@ -30,7 +30,8 @@ import (
 // mockDNSProvider records DNS operations for test assertions. Ensure with
 // overwrite on is recorded as an upsert, with overwrite off as a create, which
 // is skipped for hostnames in existingHosts. Hostnames in conflictHosts hold a
-// record the controller does not manage.
+// record the controller does not manage. Remove only deletes a record whose
+// recorded owners include the caller, as the provider contract requires.
 type mockDNSProvider struct {
 	mu              sync.Mutex
 	existingHosts   map[string]bool
@@ -44,7 +45,8 @@ type mockDNSProvider struct {
 	flushErr        error
 	deferPublish    time.Duration // >0: Commit holds the publish back this long
 	removeErr       error
-	known           map[string]string // hostname → value of records this mock created
+	known           map[string]string   // hostname → value of records this mock created
+	owners          map[string][]string // hostname → owners recorded on the record
 }
 
 func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
@@ -71,11 +73,17 @@ func (b mockBatch) Ensure(_ context.Context, record dns.Record, opts dns.EnsureO
 		b.m.known = map[string]string{}
 	}
 	value, ok := b.m.known[record.Hostname]
-	if ok && value == record.Value {
+	if ok && value == record.Value && !b.m.needsOwner(record.Hostname, record.Owner) {
 		return dns.Unchanged, nil
+	}
+	if ok && value == record.Value {
+		// The address already matches; only the owner list needs joining.
+		b.m.recordOwner(record.Hostname, record.Owner)
+		return dns.Updated, nil
 	}
 	if opts.Overwrite {
 		b.m.known[record.Hostname] = record.Value
+		b.m.recordOwner(record.Hostname, record.Owner)
 		b.m.upsertedRecords = append(b.m.upsertedRecords, record)
 		return dns.Updated, nil
 	}
@@ -83,18 +91,41 @@ func (b mockBatch) Ensure(_ context.Context, record dns.Record, opts dns.EnsureO
 		return dns.Kept, nil
 	}
 	b.m.known[record.Hostname] = record.Value
+	b.m.recordOwner(record.Hostname, record.Owner)
 	b.m.createdRecords = append(b.m.createdRecords, record)
 	return dns.Created, nil
 }
 
-func (b mockBatch) Remove(_ context.Context, hostname, _ string, adoptLegacy bool) error {
+// needsOwner reports whether the mock's record for hostname is missing owner.
+func (m *mockDNSProvider) needsOwner(hostname, owner string) bool {
+	return owner != "" && !slices.Contains(m.owners[hostname], owner)
+}
+
+func (m *mockDNSProvider) recordOwner(hostname, owner string) {
+	if owner == "" {
+		return
+	}
+	if m.owners == nil {
+		m.owners = map[string][]string{}
+	}
+	if !slices.Contains(m.owners[hostname], owner) {
+		m.owners[hostname] = append(m.owners[hostname], owner)
+	}
+}
+
+func (b mockBatch) Remove(_ context.Context, hostname, _, owner string, adoptLegacy bool) error {
 	b.m.mu.Lock()
 	defer b.m.mu.Unlock()
 	if b.m.removeErr != nil {
 		return b.m.removeErr
 	}
+	// A record other owners wrote belongs to them, whoever asks.
+	if owners := b.m.owners[hostname]; len(owners) > 0 && !slices.Contains(owners, owner) {
+		return nil
+	}
 	b.m.deletedHosts = append(b.m.deletedHosts, hostname)
 	delete(b.m.known, hostname)
+	delete(b.m.owners, hostname)
 	if adoptLegacy {
 		b.m.adoptedRemovals = append(b.m.adoptedRemovals, hostname)
 	}
@@ -1070,6 +1101,48 @@ func TestHTTPRouteReconciler_OneReconcilePublishes(t *testing.T) {
 	}
 	if got.Annotations[managedHostnamesAnnotation] != `["app.my-domain1.com"]` {
 		t.Errorf("annotation = %q", got.Annotations[managedHostnamesAnnotation])
+	}
+}
+
+// TestHTTPRouteReconciler_CannotReleaseAnotherRoutesRecord is audit H1: the
+// ownership marker named no route at all, so writing a hostname into the
+// ownership annotation let one route delete a record another route wrote.
+func TestHTTPRouteReconciler_CannotReleaseAnotherRoutesRecord(t *testing.T) {
+	// The backend holds a record route blue wrote; blue is gone from the
+	// cluster, and green's editor named it in green's annotation.
+	mock := &mockDNSProvider{
+		known:  map[string]string{"app.my-domain1.com": "10.0.8.100"},
+		owners: map[string][]string{"app.my-domain1.com": {"httproute/default/blue"}},
+	}
+	route := managedRoute("green", `["app.my-domain1.com"]`, "web.my-domain1.com")
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+		WithObjects(route).Build()
+	r := &HTTPRouteReconciler{
+		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
+		DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true,
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "green", Namespace: "default"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(mock.deletedHosts) != 0 {
+		t.Errorf("green released %v, a record route blue wrote", mock.deletedHosts)
+	}
+	if _, ok := mock.known["app.my-domain1.com"]; !ok {
+		t.Error("the record blue wrote is gone")
+	}
+
+	var got gatewayv1.HTTPRoute
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "green", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[managedHostnamesAnnotation] != `["web.my-domain1.com"]` {
+		t.Errorf("annotation = %q, want only what green manages", got.Annotations[managedHostnamesAnnotation])
 	}
 }
 

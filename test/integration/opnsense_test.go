@@ -195,7 +195,7 @@ func TestRemoveOfMissingRecordIssuesNoDelete(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
 
-	if err := p.Batch().Remove(context.Background(), "ghost.example.com", "A", true); err != nil {
+	if err := p.Batch().Remove(context.Background(), "ghost.example.com", "A", "route/app", true); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if n := countCalls(fake, testenv.EndpointDel); n != 0 {
@@ -214,13 +214,13 @@ func TestRemoveToleratesVanishedRecord(t *testing.T) {
 	ctx := context.Background()
 
 	stale := p.Batch()
-	if err := stale.Remove(ctx, "web.example.com", "A", false); err != nil { // loads the list
+	if err := stale.Remove(ctx, "web.example.com", "A", "route/app", false); err != nil { // loads the list
 		t.Fatalf("Remove web: %v", err)
 	}
-	if err := p.Batch().Remove(ctx, "app.example.com", "A", false); err != nil {
+	if err := p.Batch().Remove(ctx, "app.example.com", "A", "route/app", false); err != nil {
 		t.Fatalf("Remove app in another batch: %v", err)
 	}
-	if err := stale.Remove(ctx, "app.example.com", "A", false); err != nil {
+	if err := stale.Remove(ctx, "app.example.com", "A", "route/app", false); err != nil {
 		t.Fatalf("Remove of an already deleted row: %v", err)
 	}
 }
@@ -235,7 +235,7 @@ func TestBatchListsOnce(t *testing.T) {
 	ensure(t, b, record("a.example.com", "10.0.0.1"), true)
 	ensure(t, b, record("b.example.com", "10.0.0.1"), true)
 	ensure(t, b, record("a.example.com", "10.0.0.2"), true)
-	if err := b.Remove(context.Background(), "b.example.com", "A", false); err != nil {
+	if err := b.Remove(context.Background(), "b.example.com", "A", "route/app", false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	commit(t, b)

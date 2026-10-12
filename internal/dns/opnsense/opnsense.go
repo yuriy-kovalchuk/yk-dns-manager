@@ -2,8 +2,8 @@
 //
 // OPNsense keeps edits to host overrides in a staged config; they only reach
 // Unbound when "reconfigure" publishes them. Every override the controller
-// writes carries ManagedDescription, and only such overrides are ever changed
-// or deleted.
+// writes carries ManagedDescription followed by the owners that asked for it,
+// and only such overrides are ever changed or deleted.
 package opnsense
 
 import (
@@ -32,6 +32,10 @@ const (
 	// ManagedDescription marks the overrides the controller manages. Route
 	// editors cannot write it, so it decides what may be changed.
 	ManagedDescription = "yk-dns-manager: managed record, do not edit"
+	// ownersPrefix starts the list of owners inside the description: the routes
+	// that asked for the record, which is what authorizes a later delete.
+	ownersPrefix = " [owners:"
+	ownersSuffix = "]"
 	// LegacyDescription is what versions before ownership marking wrote. Such
 	// an override is only treated as managed when the caller adopts it.
 	LegacyDescription = "managed by yk-dns-manager"
@@ -234,9 +238,34 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 		}
 	}
 
-	// Create-only mode leaves a live override with another value alone. A
-	// disabled one answers nothing, so it is re-enabled instead.
+	// The owner list is the controller's own bookkeeping, not part of the
+	// record's value: a route claiming a record another route wrote joins it,
+	// and every write keeps the owners already there. Joining only when the row
+	// otherwise matches, or not at all in create-only mode, would drop the other
+	// route's owner and leave the record nobody can delete.
+	needJoin := false
+	if owners := ownersOf(keep.Description); record.Owner != "" && !slices.Contains(owners, record.Owner) {
+		want.Description = markWith(append(owners, record.Owner)...)
+		needJoin = true
+	}
+
+	// Create-only mode leaves a live override with another value alone, except
+	// that its owner list still grows. A disabled one answers nothing, so it is
+	// re-enabled instead.
 	if !opts.Overwrite && keep.Enabled == "1" && keep.Server != want.Server {
+		if !needJoin {
+			return dns.Kept, nil
+		}
+		joined := keep
+		joined.Description = want.Description
+		if _, err := b.p.write(ctx, setPath+url.PathEscape(keep.UUID), joined, "saved"); err != nil {
+			return dns.Kept, err
+		}
+		for i := range b.rows {
+			if b.rows[i].UUID == keep.UUID {
+				b.rows[i] = joined
+			}
+		}
 		return dns.Kept, nil
 	}
 
@@ -272,16 +301,27 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 
 // Remove deletes our overrides for hostname, and legacy ones when adopting.
 // Anyone else's are left alone.
-func (b *batch) Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error {
+func (b *batch) Remove(ctx context.Context, hostname, recordType, owner string, adoptLegacy bool) error {
 	matching, err := b.find(ctx, rowFor(dns.Record{Hostname: hostname, Type: recordType}))
 	if err != nil {
 		return err
 	}
 	for _, r := range matching {
-		if r.ours(adoptLegacy) {
-			if err := b.deleteRow(ctx, r.UUID); err != nil {
-				return err
-			}
+		if !r.ours(adoptLegacy) {
+			continue
+		}
+		// The owner list says who may delete the record. The caller has no claim
+		// on one written by other routes alone: the annotation that named the
+		// hostname is writable by anyone who can edit the route. The controller
+		// only gets here when no live route claims the hostname any more, so the
+		// other owners have stopped claiming it and the record goes with the
+		// caller's claim.
+		if owners := ownersOf(r.Description); len(owners) > 0 && !slices.Contains(owners, owner) {
+			b.p.log.Info("leaving a host override other routes own", "hostname", hostname, "owners", strings.Join(owners, " "))
+			continue
+		}
+		if err := b.deleteRow(ctx, r.UUID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -379,13 +419,47 @@ func rowFor(record dns.Record) hostRow {
 	hostname, domain, _ := strings.Cut(strings.TrimSuffix(record.Hostname, "."), ".")
 	return hostRow{
 		Enabled: "1", Hostname: hostname, Domain: domain, RR: record.Type,
-		Server: record.Value, Description: ManagedDescription,
+		Server: record.Value, Description: markWith(record.Owner),
 	}
+}
+
+// markWith is the description of a record the given owners asked for.
+func markWith(owners ...string) string {
+	seen := make(map[string]bool, len(owners))
+	unique := make([]string, 0, len(owners))
+	for _, o := range owners {
+		if o == "" || seen[o] {
+			continue
+		}
+		seen[o] = true
+		unique = append(unique, o)
+	}
+	if len(unique) == 0 {
+		return ManagedDescription
+	}
+	return ManagedDescription + ownersPrefix + " " + strings.Join(unique, " ") + ownersSuffix
+}
+
+// isManaged reports whether a description is our mark, with or without owners.
+func isManaged(description string) bool {
+	return description == ManagedDescription || strings.HasPrefix(description, ManagedDescription+ownersPrefix)
+}
+
+// ownersOf returns the owners in a description. It is empty for a record
+// written before owners were marked, which leaves it deletable by any route
+// until an Ensure records who asked for it.
+func ownersOf(description string) []string {
+	rest, ok := strings.CutPrefix(description, ManagedDescription+ownersPrefix)
+	if !ok {
+		return nil
+	}
+	list, _ := strings.CutSuffix(rest, ownersSuffix)
+	return strings.Fields(list)
 }
 
 // ours reports whether the controller may change or delete the override.
 func (r hostRow) ours(adoptLegacy bool) bool {
-	return r.Description == ManagedDescription || (adoptLegacy && r.Description == LegacyDescription)
+	return isManaged(r.Description) || (adoptLegacy && r.Description == LegacyDescription)
 }
 
 // apiResult is the answer to a write: "result" for add, set and del, plus

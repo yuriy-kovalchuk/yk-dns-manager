@@ -145,9 +145,10 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// already managed. A hostname held by someone else's record stays out of
 	// the annotation, so the route can never claim it later.
 	var managed []string
+	owner := routeOwner(route)
 	for _, h := range wanted {
 		ip, _ := r.DomainMap.LookupIP(h)
-		res, err := batch.Ensure(ctx, dns.Record{Hostname: h, Type: "A", Value: ip},
+		res, err := batch.Ensure(ctx, dns.Record{Hostname: h, Type: "A", Value: ip, Owner: owner},
 			dns.EnsureOptions{Overwrite: r.Upsert, AdoptLegacy: slices.Contains(owned, h)})
 		if err != nil {
 			dnsErrors.WithLabelValues("ensure").Inc()
@@ -237,8 +238,9 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 }
 
 // removeRecord deletes the record for hostname unless another live route
-// still claims it. The provider only deletes records it marked as its own; a
-// legacy record only for a hostname this route managed and the domain map covers.
+// still claims it. The provider deletes only records marked as its own, and
+// only those this route is an owner of; a legacy record only for a hostname
+// this route managed and the domain map covers.
 func (r *HTTPRouteReconciler) removeRecord(ctx context.Context, batch dns.Batch, route *gatewayv1.HTTPRoute, hostname string, owned []string) error {
 	var claimants gatewayv1.HTTPRouteList
 	if err := r.List(ctx, &claimants, client.MatchingFields{hostnameIndex: hostname}); err != nil {
@@ -253,7 +255,7 @@ func (r *HTTPRouteReconciler) removeRecord(ctx context.Context, batch dns.Batch,
 	}
 
 	_, inDomainMap := r.DomainMap.LookupIP(hostname)
-	if err := batch.Remove(ctx, hostname, "A", inDomainMap && slices.Contains(owned, hostname)); err != nil {
+	if err := batch.Remove(ctx, hostname, "A", routeOwner(route), inDomainMap && slices.Contains(owned, hostname)); err != nil {
 		dnsErrors.WithLabelValues("release").Inc()
 		return err
 	}
@@ -299,6 +301,13 @@ func isAccepted(route *gatewayv1.HTTPRoute) bool {
 		}
 	}
 	return false
+}
+
+// routeOwner is the identity the provider stores with every record a route
+// writes. It is what lets the provider refuse to delete a record this route
+// never wrote, whatever the route's annotation claims.
+func routeOwner(route *gatewayv1.HTTPRoute) string {
+	return "httproute/" + route.Namespace + "/" + route.Name
 }
 
 // indexHostnames returns a route's hostnames for hostnameIndex.
