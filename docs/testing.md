@@ -6,9 +6,9 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 50 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Unit | `cmd/`, `internal/` | 55 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
 | Integration | `test/integration/` | 11 + conformance | The provider conformance suite and OPNsense-specific checks, against an in-process fake appliance over HTTP |
-| Envtest | `test/envtest/` | 14 + 2 pending | The real manager, predicates and provider against a real API server and the fake appliance |
+| Envtest | `test/envtest/` | 17 | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
 
 There are no mocking frameworks. Tests use plain structs implementing `dns.Provider` and `sigs.k8s.io/controller-runtime/pkg/client/fake`.
@@ -90,6 +90,11 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
 | `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
 | `TestHTTPRouteReconciler_SharedHostnameIsKept` | Deleting one of two routes sharing a hostname keeps the record (B1) |
+| `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route (B9, D10) |
+| `TestHTTPRouteReconciler_RequireAccepted` | Off by default; on, only accepted routes get DNS (S3) |
+| `TestHTTPRouteReconciler_OneReconcilePublishes` | The reconcile that adds the finalizer also publishes (D7) |
+| `TestHTTPRouteReconciler_WantsUpdate` | Which updates trigger a reconcile (D8) |
+| `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events and in the counters (D6) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
 ## Integration tests
@@ -143,7 +148,7 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestHostnameChangeMovesRecord` | Changing a hostname publishes the new record and removes the old one |
 | `TestDeleteRemovesRecordAndReleasesRoute` | Deleting the route unpublishes the record and releases the finalizer |
 | `TestUnmatchedRouteIsIgnored` | A route the domain map does not cover gets no finalizer and no appliance writes |
-| `TestRouteIsDeletableWhileApplianceFails` | A route is still deleted while every appliance call fails |
+| `TestRouteIsDeletableWhileApplianceFails` | With every appliance call failing, the route is released once the cleanup grace period runs out |
 | `TestRecordPublishedAfterReconfigureRecovers` | A record staged while reconfigure fails is published once it recovers |
 | `TestAnnotationCannotDeleteForeignRecords` | Names written into the ownership annotation outside the domain map are never deleted (S1) |
 | `TestUnchangedRouteCausesNoWrites` | Reconciling an unchanged route makes no writes and no reconfigure (B2) |
@@ -153,19 +158,11 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestSharedHostnameSurvivesOneRouteDeletion` | Deleting one of two routes sharing a hostname keeps the record published (B1) |
 | `TestLegacyRecordIsAdoptedByItsRoute` | A record from before ownership marking is adopted and re-marked by the route that recorded owning it |
 | `TestLegacyRecordIsNotAdoptedByANewRoute` | A route that never owned a name cannot adopt or delete its legacy record |
+| `TestAcceptanceControlsRecord` | With `--require-accepted-routes`, a route gets its record once accepted and loses it when acceptance goes |
+| `TestDeleteIsPublishedAfterReconfigureRecovers` | A route is held while its deletion cannot be published, then goes with its record (B9) |
+| `TestUnacceptedRouteGetsNoRecord` | With `--require-accepted-routes`, an unaccepted route gets no finalizer and no record (S3) |
 
-### Pending findings
-
-`test/envtest/findings_test.go` pins findings from the 2026-10-12 audit (finding IDs such as S1 and B2) that are not fixed yet. Each test describes the correct behaviour, fails on the current code, and is skipped through `pending()`. The change that fixes a finding deletes its `pending` call. To run them all:
-
-```bash
-ENVTEST_RUN_PENDING=1 make test-envtest
-```
-
-| Test | Finding | Roadmap phase |
-|---|---|---|
-| `TestDeleteIsPublishedAfterReconfigureRecovers` | B9 | 4 |
-| `TestUnacceptedRouteGetsNoRecord` | S3 | 4 |
+`test/envtest/findings_test.go` holds regression tests for the 2026-10-12 audit findings (IDs such as S1 and B2); each failed on the code the audit reviewed.
 
 ## End-to-end
 

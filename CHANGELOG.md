@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- `--require-accepted-routes` (chart value `requireAcceptedRoutes`, off by default) limits DNS to HTTPRoutes that a parent Gateway has accepted.
+- `--cleanup-grace-period` (default 5m): how long a failing DNS cleanup of a deleted HTTPRoute is retried.
+- Events on HTTPRoutes for created, updated, released, conflicting and failing DNS records, and the `yk_dns_manager_records_total` and `yk_dns_manager_dns_errors_total` metrics. The ClusterRole gains create/patch on `events.k8s.io` events.
 - Ownership marking: every DNS record the controller writes is marked (the OPNsense override description `yk-dns-manager: managed record, do not edit`), and only marked records are ever changed or deleted.
 - Provider conformance suite (`internal/dns/dnstest`) that every provider runs.
 - `networkPolicy.apiServer` and `networkPolicy.provider` set the egress ports, and optionally CIDRs, for the API server and the DNS provider.
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- A failing DNS cleanup of a deleted HTTPRoute holds the finalizer and is retried for `--cleanup-grace-period` instead of being given up after one attempt; the route is still released after that.
+- The reconcile that adds the finalizer also publishes the records, routes are read from the informer cache, and the ownership annotation is written as a merge patch. Another controller's finalizer changes no longer trigger a reconcile.
 - **Breaking:** a record for a route's hostname that the controller did not create is no longer overwritten or deleted; it is logged as a conflict. Records created by earlier versions are adopted automatically by the route whose `dns.yk/managed-hostnames` annotation lists them, and re-marked once.
 - A hostname shared by several routes keeps its record until the last of them stops claiming it.
 - The provider works in one batch per reconcile: it lists the appliance's overrides once, writes only what differs, and reconfigures Unbound only when something changed. A controller restart no longer reloads Unbound once per route.
@@ -29,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- A deleted HTTPRoute's DNS cleanup could stay unpublished when the reconfigure failed, because the finalizer was already gone; the cleanup is now published before the finalizer is removed.
 - In create-only mode a disabled override counted as an existing record, so the name never resolved again; it is now re-enabled.
 - A failed reconfigure left changes staged but unpublished once the retry found nothing left to write; a failed publish now stays owed until a later one succeeds, and a new process publishes once in case an earlier one died with changes staged.
 - A reconfigure answering a status other than `ok` was treated as success.

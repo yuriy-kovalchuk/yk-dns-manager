@@ -4,7 +4,7 @@
 A Kubernetes controller built with `controller-runtime` that watches Gateway API HTTPRoute resources and automatically manages DNS A records on pluggable backends. When an HTTPRoute with a domain-map-matched hostname is created/updated, the controller creates or updates the corresponding DNS record via the configured provider API. On deletion, a finalizer (`dns.yk/cleanup`) triggers cleanup of stale DNS records.
 
 ## Architecture
-Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) config packages (`config.DomainMap`, `config.ProviderConfig`) are pure structs with no business logic. The controller uses `APIReader` (cache-bypassing) for reads inside conflict-retry loops to ensure read-after-write consistency on finalizer updates.
+Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) config packages (`config.DomainMap`, `config.ProviderConfig`) are pure structs with no business logic. The controller reads routes from the informer cache, re-reads through `APIReader` only inside the finalizer conflict-retry loops, and writes its annotation as a merge patch.
 
 ## Design Decisions
 - **Provider factory list over `init()` registry:** `newProviders()` in `main.go` iterates configured providers at startup. More explicit than blank-import registration, easier to test and debug. Restore the aggregation pattern only if the provider count grows substantially.
@@ -35,5 +35,6 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 - **Domain map walk-up matching:** exact → wildcard at each parent level → nil. One controller serves multiple domains/ILBs via one domain map file.
 - **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
 - **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
-- **Finalizer cleanup is best-effort.** Individual DNS deletion failures are logged but never block finalizer removal — the HTTPRoute must always be deletable.
+- **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.
+- **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` counter.
 - **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files.
