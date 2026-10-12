@@ -82,7 +82,7 @@ build:
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@echo "reconciling against kubecontext: $$(kubectl config current-context 2>/dev/null || echo unknown)"
-	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug
+	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug --leader-elect=false
 
 # ── Testing ────────────────────────────────────────────────────────────────────
 ## test: run all tests (unit + integration + envtest)

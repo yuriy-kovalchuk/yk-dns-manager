@@ -102,6 +102,7 @@ func run() error {
 		domainMap          *config.DomainMap
 		cleanupGracePeriod time.Duration
 		requireAccepted    bool
+		leaderElect        bool
 	)
 
 	ctx := context.Background()
@@ -109,6 +110,7 @@ func run() error {
 
 	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
+	flag.BoolVar(&leaderElect, "leader-elect", true, "elect a leader so only one replica manages DNS at a time; turn off only when running a single instance outside a cluster")
 	flag.BoolVar(&requireAccepted, "require-accepted-routes", false, "only publish DNS for HTTPRoutes that at least one parent Gateway has accepted")
 	flag.DurationVar(&cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
 	flag.Parse()
@@ -175,6 +177,13 @@ func run() error {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: ":9090"},
 		HealthProbeBindAddress: ":8081",
+		// Two replicas reconciling at once race on the appliance and create
+		// duplicate overrides, so only the Lease holder reconciles. The Lease
+		// lives in the pod's namespace. Releasing it on shutdown lets the next
+		// pod take over without waiting for it to expire.
+		LeaderElection:                leaderElect,
+		LeaderElectionID:              "yk-dns-manager.dns.yk",
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		return fmt.Errorf("unable to create manager: %w", err)

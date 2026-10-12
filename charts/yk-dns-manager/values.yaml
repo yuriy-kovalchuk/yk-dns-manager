@@ -13,7 +13,15 @@ image:
 
 imagePullSecrets: []
 
+# -- Replicas. More than one needs leaderElection.enabled; only the leader
+# manages DNS, the others stand by.
 replicaCount: 1
+
+leaderElection:
+  # -- Elect a leader through a Lease in the release namespace, so only one
+  # replica manages DNS at a time. Keep it on unless you are sure only one pod
+  # can ever run, which a RollingUpdate does not guarantee.
+  enabled: true
 
 # -- Log level for the controller: debug, info, warn, error, or a numeric logr
 # verbosity such as -3 for V(3).
@@ -25,6 +33,10 @@ logLevel: info
 # admitted, so anyone who can create an HTTPRoute can claim a name.
 requireAcceptedRoutes: false
 
+# -- Deployment strategy. Recreate stops the old pod before starting the new
+# one. With leader election on, RollingUpdate is safe too; set
+# strategy.rollingUpdate to tune it, or leave it out for Kubernetes' defaults
+# (maxSurge and maxUnavailable 25%).
 strategy:
   type: Recreate
 
