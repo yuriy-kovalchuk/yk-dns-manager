@@ -11,9 +11,9 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-// The tests in this file are regression tests for findings from the
-// 2026-10-12 audit (IDs such as S1 and B2). Each one failed on the code the
-// audit reviewed.
+// The tests in this file are regression tests for audit findings (IDs such as
+// S1 and B2 from the 2026-10-12 audit, H1 and H2 from the follow-up audit).
+// Each one failed on the code the audit reviewed.
 
 // unaccepted leaves the route without an Accepted parent, as if no Gateway
 // admitted it.
@@ -212,5 +212,26 @@ func TestUnacceptedRouteGetsNoRecord(t *testing.T) {
 	h.consistently("no finalizer and no appliance writes", func() bool {
 		r := h.getRoute("app")
 		return r != nil && !hasFinalizer(r) && h.countCalls(testenv.EndpointAdd) == 0
+	})
+}
+
+// TestWildcardRouteHostnameGetsNoRecord is audit H2: a route hostname of
+// "*.example.com" matched the domain map's wildcard key and became a wildcard
+// override, so one route answered for every name below the domain.
+func TestWildcardRouteHostnameGetsNoRecord(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h.createRoute("wild", []string{"*.example.com", "app.example.com"})
+	h.waitOwned("wild", `["app.example.com"]`)
+
+	h.eventually("app.example.com published", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
+	})
+	h.consistently("no wildcard override exists", func() bool {
+		for _, row := range h.fake.Snapshot() {
+			if row.Hostname == "*" {
+				return false
+			}
+		}
+		return true
 	})
 }

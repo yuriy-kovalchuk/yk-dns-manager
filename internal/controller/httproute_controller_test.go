@@ -800,6 +800,33 @@ func TestHTTPRouteReconciler_ConflictIsNotOwned(t *testing.T) {
 	}
 }
 
+// TestHTTPRouteReconciler_WildcardHostnameIsIgnored: a route hostname of
+// "*.my-domain1.com" matches the domain map's wildcard key, and managing it
+// would put a wildcard record on the appliance, so it is skipped and the exact
+// names of the same route still get their records.
+func TestHTTPRouteReconciler_WildcardHostnameIsIgnored(t *testing.T) {
+	mock := &mockDNSProvider{}
+	r := reconcileOnce(t, mock, "route", managedRoute("route", "", "*.my-domain1.com", "app.my-domain1.com"))
+
+	if len(mock.ensureOpts) != 1 {
+		t.Fatalf("ensured %v, want only app.my-domain1.com", mock.ensureOpts)
+	}
+	if _, ok := mock.ensureOpts["*.my-domain1.com"]; ok {
+		t.Error("the wildcard hostname was ensured")
+	}
+	if _, ok := mock.ensureOpts["app.my-domain1.com"]; !ok {
+		t.Error("app.my-domain1.com was not ensured")
+	}
+
+	var updated gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "route", Namespace: "default"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Annotations[managedHostnamesAnnotation]; got != `["app.my-domain1.com"]` {
+		t.Errorf("annotation = %s, want only the exact hostname", got)
+	}
+}
+
 // TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames: a record written
 // before ownership was marked is adopted only for a name the route already
 // recorded owning.

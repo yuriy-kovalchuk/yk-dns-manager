@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - A failed reconfigure left changes staged but unpublished once the retry found nothing left to write; a failed publish now stays owed until a later one succeeds, and a new process publishes once in case an earlier one died with changes staged.
 - A reconfigure answering a status other than `ok` was treated as success.
 - Any user able to edit an HTTPRoute could delete arbitrary DNS host overrides by writing their names into the ownership annotation.
+- An HTTPRoute with a wildcard hostname (`*.example.com`) matched the domain map's wildcard key and created a wildcard override, so that one route answered for every name below the domain. Wildcard route hostnames are now ignored, with a warning Event on the route.
 - In upsert mode a route could repoint a hand-made record for its hostname, and deleting the route deleted it.
 - Deleting one of two routes that share a hostname deleted the record the other still needed.
 - Enabling the NetworkPolicy blocked the API server on clusters that serve it on 6443.

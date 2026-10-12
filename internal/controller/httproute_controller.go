@@ -78,9 +78,18 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.Log.V(1).Info("route is not accepted by any parent; not publishing DNS for it", "route", req.NamespacedName)
 	} else {
 		for _, h := range route.Spec.Hostnames {
-			if _, ok := r.DomainMap.LookupIP(string(h)); ok {
-				wanted = append(wanted, string(h))
+			if _, ok := r.DomainMap.LookupIP(string(h)); !ok {
+				continue
 			}
+			// A wildcard route hostname matches the domain map's wildcard key and
+			// would become a wildcard record on the backend, answering for every
+			// name below the domain, including names other routes serve. Only
+			// exact names are managed.
+			if strings.HasPrefix(string(h), "*.") {
+				r.report(route, corev1.EventTypeWarning, "DNSWildcardHostnameIgnored", string(h)+" is a wildcard hostname; only exact names get DNS records")
+				continue
+			}
+			wanted = append(wanted, string(h))
 		}
 	}
 
