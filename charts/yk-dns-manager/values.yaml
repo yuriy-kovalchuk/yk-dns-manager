@@ -33,6 +33,11 @@ logLevel: info
 # admitted, so anyone who can create an HTTPRoute can claim a name.
 requireAcceptedRoutes: false
 
+# -- How often every HTTPRoute is reconciled again even when nothing changed in
+# the cluster. This is what republishes a DNS record someone changed or deleted
+# on the DNS backend. Set to 0 to turn it off.
+resyncPeriod: 1h
+
 # -- Deployment strategy. Recreate stops the old pod before starting the new
 # one. With leader election on, RollingUpdate is safe too; set
 # strategy.rollingUpdate to tune it, or leave it out for Kubernetes' defaults

@@ -3,6 +3,7 @@ package envtest
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -233,5 +234,25 @@ func TestWildcardRouteHostnameGetsNoRecord(t *testing.T) {
 			}
 		}
 		return true
+	})
+}
+
+// TestDriftOnTheApplianceIsHealed is audit M1: the event filter dropped informer
+// resyncs, so a record an operator deleted on the appliance stayed deleted, even
+// in upsert mode, until something in the cluster changed.
+func TestDriftOnTheApplianceIsHealed(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, syncPeriod: 500 * time.Millisecond})
+	h.createRoute("app", []string{"app.example.com"})
+	h.eventually("app.example.com published", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
+	})
+
+	h.dropOnAppliance("app.example.com")
+	h.eventually("the override is gone from the appliance", func() bool {
+		return len(h.fake.Snapshot()) == 0
+	})
+
+	h.eventually("a resync republishes it", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
 	})
 }

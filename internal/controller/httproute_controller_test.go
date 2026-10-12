@@ -989,8 +989,10 @@ func TestHTTPRouteReconciler_OneReconcilePublishes(t *testing.T) {
 func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
 	base := managedRoute("route", "", "app.my-domain1.com")
 	base.Generation = 1
+	base.ResourceVersion = "1"
 	with := func(mutate func(*gatewayv1.HTTPRoute)) *gatewayv1.HTTPRoute {
 		r := base.DeepCopy()
+		r.ResourceVersion = "2" // every write to the API server bumps it
 		mutate(r)
 		return r
 	}
@@ -1014,6 +1016,9 @@ func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
 		}), false, false},
 		{"acceptance flips, not required", with(func(r *gatewayv1.HTTPRoute) { r.Status.Parents = acceptedParent }), false, false},
 		{"acceptance flips, required", with(func(r *gatewayv1.HTTPRoute) { r.Status.Parents = acceptedParent }), true, true},
+		// The informer re-delivers the object unchanged on its resync period.
+		// Only a reconcile can notice that the appliance no longer matches.
+		{"informer resync", base.DeepCopy(), false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -121,6 +122,7 @@ func run() error {
 		cleanupGracePeriod time.Duration
 		requireAccepted    bool
 		leaderElect        bool
+		resyncPeriod       time.Duration
 	)
 
 	ctx := context.Background()
@@ -131,6 +133,7 @@ func run() error {
 	flag.BoolVar(&leaderElect, "leader-elect", true, "elect a leader so only one replica manages DNS at a time; turn off only when running a single instance outside a cluster")
 	flag.BoolVar(&requireAccepted, "require-accepted-routes", false, "only publish DNS for HTTPRoutes that at least one parent Gateway has accepted")
 	flag.DurationVar(&cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
+	flag.DurationVar(&resyncPeriod, "resync-period", time.Hour, "how often every HTTPRoute is reconciled again even when nothing changed in the cluster, which is what republishes a record someone changed or deleted on the DNS backend; 0 turns it off")
 	flag.Parse()
 
 	level, err := parseLogLevel(logLevel)
@@ -201,6 +204,10 @@ func run() error {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: ":9090"},
 		HealthProbeBindAddress: ":8081",
+		// The informer re-delivers every route on this interval. The event
+		// filter lets those resyncs through, so a record that changed or
+		// disappeared on the appliance is republished without a cluster edit.
+		Cache: cache.Options{SyncPeriod: &resyncPeriod},
 		// Two replicas reconciling at once race on the appliance and create
 		// duplicate overrides, so only the Lease holder reconciles. The Lease
 		// lives in the pod's namespace. Releasing it on shutdown lets the next

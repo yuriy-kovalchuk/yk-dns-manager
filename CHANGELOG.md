@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - Leader election (`--leader-elect`, chart value `leaderElection.enabled`, on by default) through a Lease in the release namespace, so only one replica manages DNS. More replicas and a `RollingUpdate` strategy are now safe; the chart refuses `replicaCount` > 1 with leader election off. The chart adds a Role for Leases and leader-election Events.
 - `--require-accepted-routes` (chart value `requireAcceptedRoutes`, off by default) limits DNS to HTTPRoutes that a parent Gateway has accepted.
 - `--cleanup-grace-period` (default 5m): how long a failing DNS cleanup of a deleted HTTPRoute is retried.
+- `--resync-period` (default 1h, chart value `resyncPeriod`): how often every HTTPRoute is reconciled again even when nothing changed in the cluster, which republishes a record someone changed or deleted on the DNS backend. `0` turns it off.
 - Events on HTTPRoutes for created, updated, released, conflicting and failing DNS records, and the `yk_dns_manager_records_total` and `yk_dns_manager_dns_errors_total` metrics. The ClusterRole gains create/patch on `events.k8s.io` events.
 - Ownership marking: every DNS record the controller writes is marked (the OPNsense override description `yk-dns-manager: managed record, do not edit`), and only marked records are ever changed or deleted.
 - Provider conformance suite (`internal/dns/dnstest`) that every provider runs.
@@ -47,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - A reconfigure answering a status other than `ok` was treated as success.
 - Any user able to edit an HTTPRoute could delete arbitrary DNS host overrides by writing their names into the ownership annotation.
 - An HTTPRoute with a wildcard hostname (`*.example.com`) matched the domain map's wildcard key and created a wildcard override, so that one route answered for every name below the domain. Wildcard route hostnames are now ignored, with a warning Event on the route.
+- A record an operator deleted or edited on the DNS backend stayed wrong until something in the cluster changed: the event filter dropped informer resyncs, so nothing ever re-checked a route whose spec was untouched.
 - A write the appliance rejected failed as `unexpected result: failed`. The appliance answers HTTP 200 with a per-field reason in `validations`, and that reason is now part of the error and of the `DNSSyncFailed` Event — for example `host.domain: A domain is required.` for a single-label hostname.
 - In upsert mode a route could repoint a hand-made record for its hostname, and deleting the route deleted it.
 - Deleting one of two routes that share a hostname deleted the record the other still needed.

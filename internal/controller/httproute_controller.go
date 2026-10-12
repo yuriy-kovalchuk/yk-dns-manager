@@ -303,15 +303,19 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // wantsUpdate decides which HTTPRoute updates trigger a reconcile. Status- and
-// metadata-only updates, including our own annotation patch, are ignored.
+// metadata-only updates, including our own annotation patch, are ignored. An
+// informer resync — the same object arriving again, resource version and all —
+// passes on purpose: it is the only event that reaches a route whose record was
+// changed or deleted on the DNS backend while its spec stayed the same.
 func (r *HTTPRouteReconciler) wantsUpdate(e event.UpdateEvent) bool {
 	oldRoute, okOld := e.ObjectOld.(*gatewayv1.HTTPRoute)
 	newRoute, okNew := e.ObjectNew.(*gatewayv1.HTTPRoute)
 	if !okOld || !okNew {
 		return false
 	}
+	resynced := oldRoute.ResourceVersion == newRoute.ResourceVersion
 	specChanged := oldRoute.Generation != newRoute.Generation // includes a deletion request
 	finalizerChanged := controllerutil.ContainsFinalizer(oldRoute, finalizerName) != controllerutil.ContainsFinalizer(newRoute, finalizerName)
 	acceptanceChanged := r.RequireAccepted && isAccepted(oldRoute) != isAccepted(newRoute) // status does not bump the generation
-	return specChanged || finalizerChanged || acceptanceChanged
+	return resynced || specChanged || finalizerChanged || acceptanceChanged
 }

@@ -58,6 +58,7 @@ spec:
             - --zap-log-level={{ .Values.logLevel }}
             - --require-accepted-routes={{ .Values.requireAcceptedRoutes }}
             - --leader-elect={{ .Values.leaderElection.enabled }}
+            - --resync-period={{ .Values.resyncPeriod }}
           env:
             - name: DOMAIN_MAP_PATH
               value: /etc/yk-dns-manager/domain-map/domain-map.yaml
