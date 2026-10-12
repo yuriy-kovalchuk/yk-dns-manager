@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -42,10 +44,36 @@ func LoadProviderConfigFromPath(path string) (*ProviderConfig, error) {
 		return nil, fmt.Errorf("provider config: missing required field 'provider'")
 	}
 
-	// Expand ${ENV_VAR} references in setting values.
 	for k, v := range cfg.Settings {
-		cfg.Settings[k] = os.ExpandEnv(v)
+		expanded, err := expandEnv(v)
+		if err != nil {
+			return nil, fmt.Errorf("provider config: settings.%s: %w", k, err)
+		}
+		cfg.Settings[k] = expanded
 	}
 
 	return &cfg, nil
+}
+
+// envRef matches a ${NAME} reference.
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnv replaces each ${NAME} with the value of environment variable
+// NAME. Nothing else is touched, so a literal "$" in a value survives, which
+// os.ExpandEnv would not allow ("pa$word" became "pa"). A reference to an
+// unset variable is an error rather than a silent empty string.
+func expandEnv(value string) (string, error) {
+	var missing []string
+	expanded := envRef.ReplaceAllStringFunc(value, func(ref string) string {
+		name := envRef.FindStringSubmatch(ref)[1]
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			missing = append(missing, name)
+		}
+		return v
+	})
+	if len(missing) > 0 {
+		return "", fmt.Errorf("environment variable %s is not set", strings.Join(missing, ", "))
+	}
+	return expanded, nil
 }
