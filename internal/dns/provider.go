@@ -12,6 +12,12 @@ type Record struct {
 	Hostname string // FQDN, e.g. "app.example.com"
 	Type     string // "A"
 	Value    string // IP address
+	// Owner says who asked for the record, in a form only the caller
+	// understands; the controller uses "httproute/<namespace>/<name>". The
+	// provider stores it with the record so a later Remove can tell a record
+	// this owner wrote from one another owner wrote. Empty means no owner is
+	// recorded, which is how records written before owners existed look.
+	Owner string
 }
 
 // Result reports what Ensure did.
@@ -80,12 +86,14 @@ type Provider interface {
 type Batch interface {
 	// Ensure makes record.Hostname resolve to record.Value as a managed
 	// record. A disabled record does not count as live. Nothing is written
-	// when the record already matches.
+	// when the record already matches, except that a record missing
+	// record.Owner gains it: the owner is what authorizes a later Remove.
 	Ensure(ctx context.Context, record Record, opts EnsureOptions) (Result, error)
-	// Remove deletes the managed records for hostname and recordType, and
-	// legacy ones when adoptLegacy is set. Other records are left alone.
+	// Remove deletes the records for hostname and recordType that owner owns,
+	// and legacy ones when adoptLegacy is set. A record whose owners are known
+	// and do not include owner belongs to someone else and is left alone.
 	// Removing a record that does not exist is not an error.
-	Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error
+	Remove(ctx context.Context, hostname, recordType, owner string, adoptLegacy bool) error
 	// Commit publishes anything staged and not yet published, including
 	// writes from earlier batches whose publish failed. It does nothing for a
 	// batch that was never used. A provider that coalesces publishes may hold

@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
@@ -51,10 +52,11 @@ func toRecords(rows []testenv.HostOverride) []dnstest.Record {
 	var out []dnstest.Record
 	for _, h := range rows {
 		origin := dnstest.Foreign
-		switch h.Description {
-		case opnsense.ManagedDescription:
+		switch {
+		// The mark may carry the owners that asked for the record after it.
+		case strings.HasPrefix(h.Description, opnsense.ManagedDescription):
 			origin = dnstest.Managed
-		case opnsense.LegacyDescription:
+		case h.Description == opnsense.LegacyDescription:
 			origin = dnstest.Legacy
 		}
 		out = append(out, dnstest.Record{FQDN: h.FQDN(), Value: h.Server, Origin: origin, Disabled: h.Enabled != "1"})

@@ -118,6 +118,7 @@ The contract every provider must meet, written once against `dns.Provider` and r
 
 - creating, updating, keeping (create-only mode) and re-enabling managed records, and writing nothing when a record already matches;
 - never touching someone else's record: a live one is a `Conflict`, a disabled one is ignored, and `Remove` leaves both;
+- owner scoping: only an owner named on the record can delete it, a caller that is not one leaves it alone, `Ensure` adds an owner to a record another owner wrote, and a record whose owners are unknown (written before owners existed) is deletable by any caller;
 - legacy records: foreign unless adopted, rewritten with the marker when adopted, removed only when adopting;
 - converging duplicate managed records, removing a missing record, and a batch seeing its own writes.
 
@@ -127,7 +128,7 @@ The contract every provider must meet, written once against `dns.Provider` and r
 |---|---|
 | `TestEnsureWritesTheOverrideFields` | The FQDN is split into hostname and domain, and the description carries the ownership marker |
 | `TestEnsureUnchangedWritesNothing` | A matching record costs one list, no write and no reconfigure (B2) |
-| `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error, not a success |
+| `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error carrying the appliance's reason, not a success (M3) |
 | `TestRemoveOfMissingRecordIssuesNoDelete` | Removing a record that does not exist issues no delete |
 | `TestRemoveToleratesVanishedRecord` | A row deleted by someone else since the batch listed is not an error |
 | `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
@@ -136,6 +137,7 @@ The contract every provider must meet, written once against `dns.Provider` and r
 | `TestFailedPublishStaysOwed` | After a failed reconfigure, a later batch that writes nothing still publishes (B10) |
 | `TestWriteDuringPublishStaysOwed` | A write made during another batch's reconfigure is still published by its own commit (D3) |
 | `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
+| `TestPublishIntervalCoalescesPublishes` | Inside `publish_interval` a publish is held back, its changes stay owed, and one reconfigure covers them all (M4) |
 
 ## Envtest
 
@@ -166,8 +168,14 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestAcceptanceControlsRecord` | With `--require-accepted-routes`, a route gets its record once accepted and loses it when acceptance goes |
 | `TestDeleteIsPublishedAfterReconfigureRecovers` | A route is held while its deletion cannot be published, then goes with its record (B9) |
 | `TestUnacceptedRouteGetsNoRecord` | With `--require-accepted-routes`, an unaccepted route gets no finalizer and no record (S3) |
+| `TestWildcardRouteHostnameGetsNoRecord` | A route hostname of `*.example.com` creates no wildcard override (H2) |
+| `TestDriftOnTheApplianceIsHealed` | A record deleted on the appliance is republished on the next resync (M1) |
+| `TestBurstOfRoutesCostsOnePublish` | Five routes applied at once cost at most two reconfigures (M4) |
+| `TestAnnotationCannotDeleteAnotherRoutesRecord` | A route cannot delete a record another route wrote, whatever its annotation claims (H1) |
+| `TestSharedHostnameIsReleasedByTheLastRoute` | The last of two routes sharing a hostname releases the record |
+| `TestRecordFromBeforeOwnersIsStillReleased` | A record marked before owners existed is still released when its route goes |
 
-`test/envtest/findings_test.go` holds regression tests for the 2026-10-12 audit findings (IDs such as S1 and B2); each failed on the code the audit reviewed.
+`test/envtest/findings_test.go` holds regression tests for the audit findings (IDs such as S1 and B2 from 2026-10-12, H1 and H2 from the follow-up audit); each failed on the code the audit reviewed.
 
 ## End-to-end
 

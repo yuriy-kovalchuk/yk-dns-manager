@@ -32,7 +32,7 @@ func TestResponseBodyLimit(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	err = p.Batch().Remove(context.Background(), "app.example.com", "A", false)
+	err = p.Batch().Remove(context.Background(), "app.example.com", "A", "route/app", false)
 	if err == nil {
 		t.Fatal("expected an oversized body to be rejected")
 	}
@@ -106,7 +106,7 @@ func TestCommitChecksReconfigureStatus(t *testing.T) {
 
 	// A fresh provider owes one publish, so a used batch commits.
 	b := p.Batch()
-	if err := b.Remove(ctx, "app.example.com", "A", false); err != nil {
+	if err := b.Remove(ctx, "app.example.com", "A", "route/app", false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if err := b.Commit(ctx); err == nil || !strings.Contains(err.Error(), `"failed"`) {
