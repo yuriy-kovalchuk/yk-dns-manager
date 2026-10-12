@@ -277,7 +277,9 @@ func TestNew_Scheme(t *testing.T) {
 	}{
 		{name: "https", url: "https://opnsense.local"},
 		{name: "http refused", url: "http://opnsense.local", wantErr: "cleartext"},
-		{name: "http with a value other than true", url: "http://opnsense.local", allow: "yes", wantErr: "cleartext"},
+		{name: "http refused with False", url: "http://opnsense.local", allow: "False", wantErr: "cleartext"},
+		{name: "http with a value that is not a boolean", url: "http://opnsense.local", allow: "yes", wantErr: "must be true or false"},
+		{name: "http allowed with True", url: "http://opnsense.local", allow: "True", warns: true},
 		{name: "http allowed", url: "http://opnsense.local", allow: "true", warns: true},
 		{name: "other scheme", url: "ftp://opnsense.local", allow: "true", wantErr: "must use https"},
 	}
@@ -300,6 +302,45 @@ func TestNew_Scheme(t *testing.T) {
 			warned := strings.Contains(strings.Join(*msgs, "\n"), "allow_insecure_http")
 			if warned != tc.warns {
 				t.Errorf("warned = %v, want %v (messages %v)", warned, tc.warns, *msgs)
+			}
+		})
+	}
+}
+
+// TestNew_SkipTLSVerifyIsABoolean is the deferred part of audit D11: the value
+// is parsed as a boolean, so "True" turns verification off and a value that
+// is not a boolean fails instead of quietly meaning "off".
+func TestNew_SkipTLSVerifyIsABoolean(t *testing.T) {
+	cases := []struct {
+		value    string
+		wantSkip bool
+		wantErr  bool
+	}{
+		{"true", true, false},
+		{"True", true, false},
+		{"1", true, false},
+		{"false", false, false},
+		{"", false, false},
+		{"yes", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			settings := baseSettings("https://opnsense.local")
+			settings["skip_tls_verify"] = tc.value
+			p, err := New(logr.Discard(), settings)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "must be true or false") {
+					t.Fatalf("New = %v, want a boolean parse error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			tlsConfig := p.client.Transport.(*http.Transport).TLSClientConfig
+			skipped := tlsConfig != nil && tlsConfig.InsecureSkipVerify
+			if skipped != tc.wantSkip {
+				t.Errorf("verification skipped = %v, want %v", skipped, tc.wantSkip)
 			}
 		})
 	}

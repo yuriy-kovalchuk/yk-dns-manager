@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,21 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		}
 	}
 
+	// The two opt-outs of transport security are real booleans: "True" or
+	// "1" work, and a value such as "yes" fails rather than quietly meaning
+	// "off". Empty means off.
+	flags := map[string]bool{}
+	for _, key := range []string{"allow_insecure_http", "skip_tls_verify"} {
+		if settings[key] == "" {
+			continue
+		}
+		value, err := strconv.ParseBool(settings[key])
+		if err != nil {
+			return nil, fmt.Errorf("opnsense: %s must be true or false, got %q", key, settings[key])
+		}
+		flags[key] = value
+	}
+
 	// base_url must point at the API, and use https: the API key and secret
 	// go out as basic auth on every request. Plain http is allowed only with
 	// an explicit opt-in, meant for the local test appliance.
@@ -84,7 +100,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 	switch {
 	case baseURL.Scheme == "https":
-	case baseURL.Scheme == "http" && settings["allow_insecure_http"] == "true":
+	case baseURL.Scheme == "http" && flags["allow_insecure_http"]:
 		log.Info("opnsense: allow_insecure_http is ENABLED - the API credentials are sent in cleartext. Use it only for a local test appliance.")
 	case baseURL.Scheme == "http":
 		return nil, fmt.Errorf("opnsense: base_url %q uses http, which sends the API credentials in cleartext; use https, or set allow_insecure_http: \"true\" for a local test appliance", baseURL.Redacted())
@@ -100,7 +116,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	// skip_tls_verify turns verification off and hands the credentials to
 	// anyone on the network path, so it warns on every start.
 	caFile := settings["ca_file"]
-	skipVerify := settings["skip_tls_verify"] == "true"
+	skipVerify := flags["skip_tls_verify"]
 	if caFile != "" && skipVerify {
 		return nil, fmt.Errorf("opnsense: ca_file and skip_tls_verify are mutually exclusive; pin the CA with ca_file instead of disabling verification")
 	}
