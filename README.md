@@ -81,6 +81,8 @@ Matching walks up the hostname one label at a time and returns the first hit. At
 |---|---|---|---|
 | `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
 | `--zap-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or a numeric logr verbosity such as `-3` for `V(3)` |
+| `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
+| `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
 
 ### DNS Provider Config
 
@@ -127,7 +129,13 @@ Key values:
 | `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
 | `dnsProvider.provider` | DNS provider name |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
+| `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
+
+## Observability
+
+- **Events** on each HTTPRoute: `kubectl describe httproute <name>` shows records created, updated and released, and warnings for conflicts, drift in create-only mode, and failures.
+- **Metrics** on port 9090: `yk_dns_manager_records_total{result}` and `yk_dns_manager_dns_errors_total{stage}`, alongside controller-runtime's reconcile metrics.
 
 ## Testing
 

@@ -53,11 +53,11 @@ The controller starts one `Batch` per reconcile. A batch reads the backend's rec
 
 ### Create/Update Reconciliation
 
-1. **HTTPRoute triggers reconcile** — controller-runtime watches HTTPRoutes and calls `Reconcile(ctx, req)`.
-2. **Read route** — uses `APIReader` (bypasses cache) for read-after-write consistency during conflict retries.
-3. **Filter by domain map** — hostnames that have no entry in the domain map are silently skipped. This lets a single controller serve multiple load balancers via different domain maps.
-4. **If deletion timestamp set:** remove DNS records, then remove the finalizer (`dns.yk/cleanup`). If record deletion fails, errors are logged but never block the finalizer — the route must always be removed.
-5. **If new or updated:** add finalizer (first reconcile), release owned hostnames that left the spec or the domain map, then `Ensure` a record for each matching hostname with `Overwrite` set from `upsert`, and `Commit` the batch at the end of the reconcile.
+1. **HTTPRoute triggers reconcile** — controller-runtime watches HTTPRoutes and calls `Reconcile(ctx, req)` for a spec change, a deletion request, our finalizer coming or going, and, with `--require-accepted-routes`, a change in acceptance. Status- and annotation-only updates are ignored.
+2. **Read route** from the informer cache.
+3. **Filter by domain map** — hostnames that have no entry in the domain map are skipped. With `--require-accepted-routes`, a route no parent Gateway reports `Accepted=True` for has no hostnames to manage at all.
+4. **If deletion timestamp set:** release the route's records and publish the change, then remove the finalizer (`dns.yk/cleanup`). A failing cleanup holds the finalizer and is retried every 10s until `--cleanup-grace-period` (default 5m) after the deletion request; after that the finalizer is removed anyway, because a route must always be deletable.
+5. **If new or updated:** add the finalizer if missing and carry on in the same reconcile, release owned hostnames that left the spec or the domain map, then `Ensure` a record for each matching hostname with `Overwrite` set from `upsert`, and `Commit` the batch at the end of the reconcile.
 6. **Update annotation** (`dns.yk/managed-hostnames`): the hostnames this route actually manages. A hostname that hit a conflict is left out.
 
 ### Ownership
@@ -107,9 +107,13 @@ After initialization the controller runs `HealthCheck()` once. A failure is logg
 
 The project has only one domain (HTTPRoute → DNS) and one reconciler. Layer-first (`handler/`, `service/`, `repository/`) would add unnecessary indirection. The reconciler is thin enough to be monolithic, and the provider abstraction already provides clean separation from DNS-specific logic.
 
-### Why `APIReader` instead of `Client` for reads?
+### Reads and writes
 
-The reconciler uses `r.APIReader.Get()` (bypasses the informer cache) inside conflict-retry loops. This ensures it sees the latest state of the HTTPRoute after another controller or process might have modified it, preventing stale-cache conflicts on the finalizer update step.
+The reconciler reads routes from the informer cache. Finalizer changes re-read the route through `APIReader` (bypassing the cache) inside a conflict-retry loop: a merge patch would replace the whole finalizer list and could drop another controller's finalizer. The managed-hostnames annotation is written as a merge patch of that one key, which cannot conflict with anyone else's change.
+
+### Observability
+
+The controller records Events on each HTTPRoute (`DNSRecordCreated`, `DNSRecordUpdated`, `DNSRecordReleased`, and warnings `DNSConflict`, `DNSRecordDrift`, `DNSSyncFailed`, `DNSCleanupFailed`, `DNSCleanupAbandoned`) and exports `yk_dns_manager_records_total{result}` and `yk_dns_manager_dns_errors_total{stage}` next to controller-runtime's own metrics. Readiness does not track the provider, so an unreachable appliance does not make the pod unready.
 
 ### Why no `init()` for provider registration anymore?
 
