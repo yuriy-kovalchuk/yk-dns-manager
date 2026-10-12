@@ -98,6 +98,7 @@ Earlier versions let an exact key cover every name below it too. The controller 
 | `--leader-elect` | — | `true` | Elect a leader through a Lease so only one replica manages DNS; turn off only for a single instance outside a cluster (`make run` does) |
 | `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
 | `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
+| `--resync-period` | — | `1h` | How often every HTTPRoute is reconciled again even when nothing changed in the cluster; this republishes a record someone changed or deleted on the DNS backend. `0` turns it off |
 
 ### DNS Provider Config
 

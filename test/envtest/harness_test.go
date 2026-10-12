@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -123,6 +124,9 @@ type harnessOptions struct {
 	// cleanupGrace defaults to 30s, long enough for any test that waits for
 	// a failing cleanup to recover.
 	cleanupGrace time.Duration
+	// syncPeriod is the informer resync period; it defaults to the controller's
+	// own default of one hour.
+	syncPeriod time.Duration
 }
 
 // harness is one running controller, watching its own namespace and talking to
@@ -132,6 +136,7 @@ type harness struct {
 	ns     string
 	fake   *testenv.OPNsense
 	client client.Client
+	srvURL string
 }
 
 // start creates a namespace, a fake appliance and a manager running the real
@@ -182,7 +187,10 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
-		Cache:                  cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}},
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{ns: {}},
+			SyncPeriod:        ptr.To(cmp.Or(opts.syncPeriod, time.Hour)),
+		},
 		// Every test starts its own manager in the same process, and
 		// controller-runtime rejects a second controller with the same name.
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
@@ -220,7 +228,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		}
 	})
 
-	h := &harness{t: t, ns: ns, fake: fake, client: c}
+	h := &harness{t: t, ns: ns, fake: fake, client: c, srvURL: srv.URL}
 	t.Cleanup(h.deleteAllRoutes)
 	return h
 }
@@ -385,6 +393,43 @@ func (h *harness) consistently(what string, cond func() bool) {
 			h.t.Fatalf("expected to hold for %s, but it stopped: %s", settleTime, what)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// dropOnAppliance deletes an override through the appliance's own API and
+// republishes Unbound, the way an operator editing the appliance by hand would.
+// The controller is left with a backend that no longer matches the route.
+func (h *harness) dropOnAppliance(fqdn string) {
+	h.t.Helper()
+	settings := h.srvURL + "/api/unbound/settings/"
+	found := false
+	for uuid, row := range h.fake.Snapshot() {
+		if row.FQDN() != fqdn {
+			continue
+		}
+		found = true
+		h.postToAppliance(settings + testenv.EndpointDel + "/" + uuid)
+	}
+	if !found {
+		h.t.Fatalf("no override for %s to delete", fqdn)
+	}
+	h.postToAppliance(h.srvURL + "/api/unbound/service/" + testenv.EndpointReconfigure)
+}
+
+func (h *harness) postToAppliance(url string) {
+	h.t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	req.SetBasicAuth("envtest-key", "envtest-secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatalf("posting to %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		h.t.Fatalf("posting to %s: status %d", url, resp.StatusCode)
 	}
 }
 

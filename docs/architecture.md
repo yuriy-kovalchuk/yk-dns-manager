@@ -58,7 +58,7 @@ The controller starts one `Batch` per reconcile. A batch reads the backend's rec
 
 ### Create/Update Reconciliation
 
-1. **HTTPRoute triggers reconcile** — controller-runtime watches HTTPRoutes and calls `Reconcile(ctx, req)` for a spec change, a deletion request, our finalizer coming or going, and, with `--require-accepted-routes`, a change in acceptance. Status- and annotation-only updates are ignored.
+1. **HTTPRoute triggers reconcile** — controller-runtime watches HTTPRoutes and calls `Reconcile(ctx, req)` for a spec change, a deletion request, our finalizer coming or going, and, with `--require-accepted-routes`, a change in acceptance. Status- and annotation-only updates are ignored. Every `--resync-period` (default 1h) the informer re-delivers every route and the controller reconciles it again, which is what republishes a record someone changed or deleted on the DNS backend.
 2. **Read route** from the informer cache.
 3. **Filter by domain map** — hostnames that have no entry in the domain map are skipped. A hostname that is itself a wildcard (`*.example.com`) is skipped too, with a warning Event: it matches the wildcard key, but managing it would put a wildcard record on the backend that answers for every name below the domain. With `--require-accepted-routes`, a route no parent Gateway reports `Accepted=True` for has no hostnames to manage at all.
 4. **If deletion timestamp set:** release the route's records and publish the change, then remove the finalizer (`dns.yk/cleanup`). A failing cleanup holds the finalizer and is retried every 10s until `--cleanup-grace-period` (default 5m) after the deletion request; after that the finalizer is removed anyway, because a route must always be deletable.
