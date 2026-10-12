@@ -3,6 +3,8 @@ package dns
 
 import (
 	"context"
+	"fmt"
+	"time"
 )
 
 // Record represents a DNS record to be managed.
@@ -86,6 +88,20 @@ type Batch interface {
 	Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error
 	// Commit publishes anything staged and not yet published, including
 	// writes from earlier batches whose publish failed. It does nothing for a
-	// batch that was never used.
+	// batch that was never used. A provider that coalesces publishes may hold
+	// one back and return *PublishDeferred: the changes stay owed, and Commit
+	// has to be called again once the wait has passed.
 	Commit(ctx context.Context) error
+}
+
+// PublishDeferred reports that a provider held a publish back on purpose, to
+// coalesce several changes into one publish of a backend that is expensive to
+// reload. Nothing is lost: the changes stay owed, and the caller has to call
+// Commit again after After, when the publish is due.
+type PublishDeferred struct {
+	After time.Duration
+}
+
+func (d *PublishDeferred) Error() string {
+	return fmt.Sprintf("publish held back, retry in %s", d.After.Round(time.Millisecond))
 }

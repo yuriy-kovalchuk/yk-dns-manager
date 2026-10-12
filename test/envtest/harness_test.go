@@ -127,6 +127,10 @@ type harnessOptions struct {
 	// syncPeriod is the informer resync period; it defaults to the controller's
 	// own default of one hour.
 	syncPeriod time.Duration
+	// publishInterval is the provider's publish_interval setting: the shortest
+	// gap between two publishes. Zero means the provider publishes every batch
+	// that owes one.
+	publishInterval time.Duration
 }
 
 // harness is one running controller, watching its own namespace and talking to
@@ -164,12 +168,16 @@ func start(t *testing.T, opts harnessOptions) *harness {
 
 	log := testr.NewWithOptions(t, testr.Options{Verbosity: 1})
 
-	provider, err := opnsense.New(log.WithName("dns-opnsense"), map[string]string{
+	settings := map[string]string{
 		"base_url":            srv.URL + "/api",
 		"api_key":             "envtest-key",
 		"api_secret":          "envtest-secret",
 		"allow_insecure_http": "true",
-	})
+	}
+	if opts.publishInterval > 0 {
+		settings["publish_interval"] = opts.publishInterval.String()
+	}
+	provider, err := opnsense.New(log.WithName("dns-opnsense"), settings)
 	if err != nil {
 		t.Fatalf("creating provider: %v", err)
 	}
@@ -427,7 +435,7 @@ func (h *harness) postToAppliance(url string) {
 	if err != nil {
 		h.t.Fatalf("posting to %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		h.t.Fatalf("posting to %s: status %d", url, resp.StatusCode)
 	}

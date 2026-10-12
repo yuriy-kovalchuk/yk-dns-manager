@@ -63,6 +63,12 @@ type Provider struct {
 	mu        sync.Mutex
 	staged    uint64
 	published uint64
+	// publishInterval is the shortest gap between two reconfigures: publishing
+	// restarts Unbound, so a burst of route changes must not cost one restart
+	// per change. Zero publishes every batch that owes one. lastPublish, under
+	// the same mutex, is when a reconfigure last succeeded.
+	publishInterval time.Duration
+	lastPublish     time.Time
 }
 
 // New creates an OPNsense provider from its settings.
@@ -112,6 +118,21 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		log.Info("opnsense: default_ttl is ignored and will be removed: Unbound host overrides have no per-record TTL", "default_ttl", v)
 	}
 
+	// reconfigure restarts Unbound, which takes seconds and costs resolution in
+	// the middle of a burst of changes. publish_interval is the shortest gap
+	// between two of them; empty or 0 publishes on every batch that owes one.
+	publishInterval := time.Duration(0)
+	if v := settings["publish_interval"]; v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("opnsense: publish_interval must be a duration such as \"5s\", got %q", v)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("opnsense: publish_interval must not be negative, got %q", v)
+		}
+		publishInterval = d
+	}
+
 	// TLS: ca_file pins the CA of a self-signed appliance, the safe option.
 	// skip_tls_verify turns verification off and hands the credentials to
 	// anyone on the network path, so it warns on every start.
@@ -148,6 +169,8 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		log:       log,
 		staged:    1,
+
+		publishInterval: publishInterval,
 	}, nil
 }
 
@@ -274,9 +297,16 @@ func (b *batch) Commit(ctx context.Context) error {
 	p.mu.Lock()
 	target := p.staged
 	owed := p.published < target
+	wait := p.publishInterval - time.Since(p.lastPublish)
 	p.mu.Unlock()
 	if !owed {
 		return nil
+	}
+	if wait > 0 {
+		// The writes stay owed, so the next Commit after the wait publishes
+		// everything a burst of reconciles staged, instead of each of them
+		// restarting Unbound.
+		return &dns.PublishDeferred{After: wait}
 	}
 
 	var res apiResult
@@ -292,6 +322,7 @@ func (b *batch) Commit(ctx context.Context) error {
 	// owed.
 	p.mu.Lock()
 	p.published = max(p.published, target)
+	p.lastPublish = time.Now()
 	p.mu.Unlock()
 	return nil
 }

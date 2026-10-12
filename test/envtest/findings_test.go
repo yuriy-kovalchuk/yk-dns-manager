@@ -256,3 +256,27 @@ func TestDriftOnTheApplianceIsHealed(t *testing.T) {
 		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
 	})
 }
+
+// TestBurstOfRoutesCostsOnePublish is audit M4: every batch that changed
+// something reconfigured Unbound, so applying a burst of routes at once
+// restarted the resolver once per route.
+func TestBurstOfRoutesCostsOnePublish(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, publishInterval: 5 * time.Second})
+	var names []string
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		h.createRoute(n, []string{n + ".example.com"})
+		names = append(names, n+".example.com")
+	}
+
+	h.eventually("all five records published", func() bool {
+		for _, fqdn := range names {
+			if !hasRow(h.fake.Published(), fqdn, "10.0.0.1") {
+				return false
+			}
+		}
+		return true
+	})
+	if n := h.countCalls(testenv.EndpointReconfigure); n > 2 {
+		t.Errorf("%d reconfigures for five routes created at once, want at most 2", n)
+	}
+}

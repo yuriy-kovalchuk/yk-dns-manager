@@ -2,11 +2,13 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	logrtesting "github.com/go-logr/logr/testing"
 
@@ -338,4 +340,102 @@ func TestHealthCheckRejectsWrongCredentials(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
 		t.Fatalf("HealthCheck = %v, want an authentication failure", err)
 	}
+}
+
+// newProviderWith is newProvider with extra settings.
+func newProviderWith(t *testing.T, serverURL string, extra map[string]string) *opnsense.Provider {
+	t.Helper()
+	settings := map[string]string{
+		"base_url":            serverURL + "/api",
+		"api_key":             "test-key",
+		"api_secret":          "test-secret",
+		"allow_insecure_http": "true",
+	}
+	for k, v := range extra {
+		settings[k] = v
+	}
+	p, err := opnsense.New(logrtesting.NewTestLogger(t), settings)
+	if err != nil {
+		t.Fatalf("creating provider: %v", err)
+	}
+	return p
+}
+
+// TestPublishIntervalCoalescesPublishes is audit M4: every batch that changed
+// something reconfigured Unbound, so a burst of route changes restarted the
+// resolver once per change.
+func TestPublishIntervalCoalescesPublishes(t *testing.T) {
+	t.Run("held back and still owed", func(t *testing.T) {
+		fake, url := newFake(t)
+		p := newProviderWith(t, url, map[string]string{"publish_interval": "1h"})
+		ctx := context.Background()
+
+		// The first publish goes out at once: the provider does not know when
+		// the last one was, and a previous process may have died with changes
+		// staged.
+		b := p.Batch()
+		ensure(t, b, record("a.example.com", "10.0.0.1"), false)
+		commit(t, b)
+		only(t, fake.Published(), "a.example.com")
+
+		b2 := p.Batch()
+		ensure(t, b2, record("b.example.com", "10.0.0.2"), false)
+		var deferred *dns.PublishDeferred
+		if err := b2.Commit(ctx); !errors.As(err, &deferred) {
+			t.Fatalf("Commit returned %v, want a *dns.PublishDeferred", err)
+		}
+		if deferred.After <= 0 || deferred.After > time.Hour {
+			t.Errorf("After = %s, want a wait inside the interval", deferred.After)
+		}
+		if n := len(rowsFor(fake.Published(), "b.example.com")); n != 0 {
+			t.Errorf("b.example.com was published %d times despite the hold", n)
+		}
+	})
+
+	t.Run("published once the wait is over", func(t *testing.T) {
+		fake, url := newFake(t)
+		p := newProviderWith(t, url, map[string]string{"publish_interval": "50ms"})
+		ctx := context.Background()
+
+		b := p.Batch()
+		ensure(t, b, record("a.example.com", "10.0.0.1"), false)
+		commit(t, b)
+
+		b2 := p.Batch()
+		ensure(t, b2, record("b.example.com", "10.0.0.2"), false)
+		if err := b2.Commit(ctx); err == nil {
+			t.Fatal("the second publish should be held back")
+		}
+		// A second batch inside the same wait is held back too, and its change
+		// joins what is owed: one reconfigure covers both.
+		b3 := p.Batch()
+		ensure(t, b3, record("c.example.com", "10.0.0.3"), false)
+		if err := b3.Commit(ctx); err == nil {
+			t.Fatal("the third publish should be held back too")
+		}
+
+		time.Sleep(60 * time.Millisecond)
+		if err := b2.Commit(ctx); err != nil {
+			t.Fatalf("Commit after the wait: %v", err)
+		}
+		only(t, fake.Published(), "b.example.com")
+		only(t, fake.Published(), "c.example.com")
+		if n := countCalls(fake, testenv.EndpointReconfigure); n != 2 {
+			t.Errorf("%d reconfigures for three batches, want 2", n)
+		}
+	})
+
+	t.Run("a nonsense interval fails startup", func(t *testing.T) {
+		_, url := newFake(t)
+		settings := map[string]string{
+			"base_url":            url + "/api",
+			"api_key":             "test-key",
+			"api_secret":          "test-secret",
+			"allow_insecure_http": "true",
+			"publish_interval":    "hourly",
+		}
+		if _, err := opnsense.New(logrtesting.NewTestLogger(t), settings); err == nil {
+			t.Fatal(`publish_interval "hourly" should fail startup`)
+		}
+	})
 }

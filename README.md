@@ -111,6 +111,10 @@ settings:
   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
+  # Reconfiguring Unbound restarts the resolver, so a burst of route changes
+  # costs one reconfigure instead of one per change. Empty or "0" publishes on
+  # every change.
+  publish_interval: "10s"
 ```
 
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
@@ -119,6 +123,7 @@ settings:
 - `skip_tls_verify` and `allow_insecure_http` are booleans (`true`/`false`, also `True`, `1`, `0`); any other value fails startup.
 - `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for the local fake.
 - `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
+- `publish_interval` is the shortest gap between two publishes of the backend (for OPNsense, an Unbound reconfigure, which restarts the resolver). A burst of route changes then costs one publish instead of one per change: the held-back changes stay owed and go out as soon as the wait is over. Empty or `0` publishes on every change.
 
 Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
 
