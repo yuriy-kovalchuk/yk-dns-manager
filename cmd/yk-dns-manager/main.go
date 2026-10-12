@@ -140,7 +140,8 @@ func run() error {
 	// The level is what turns debug output on.
 	ctrl.SetLogger(newLogger(level))
 
-	log.Info("starting yk-dns-manager", "version", version.Version, "logLevel", level.String())
+	log.Info("starting yk-dns-manager", "version", version.Version, "commit", version.Commit,
+		"buildDate", version.BuildDate, "goVersion", version.GoVersion(), "logLevel", level.String())
 
 	if domainMapPath == "" {
 		return fmt.Errorf("--domain-map-path flag or DOMAIN_MAP_PATH environment variable is required")
