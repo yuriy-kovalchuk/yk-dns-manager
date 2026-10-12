@@ -1,4 +1,9 @@
-// Package opnsense provides a DNS provider implementation for OPNsense Unbound.
+// Package opnsense manages DNS records as OPNsense Unbound host overrides.
+//
+// OPNsense keeps edits to host overrides in a staged config; they only reach
+// Unbound when "reconfigure" publishes them. Every override the controller
+// writes carries ManagedDescription, and only such overrides are ever changed
+// or deleted.
 package opnsense
 
 import (
@@ -23,86 +28,105 @@ import (
 )
 
 const (
+	// ManagedDescription marks the overrides the controller manages. Route
+	// editors cannot write it, so it decides what may be changed.
+	ManagedDescription = "yk-dns-manager: managed record, do not edit"
+	// LegacyDescription is what versions before ownership marking wrote. Such
+	// an override is only treated as managed when the caller adopts it.
+	LegacyDescription = "managed by yk-dns-manager"
+
 	searchPath      = "unbound/settings/searchHostOverride"
 	addPath         = "unbound/settings/addHostOverride"
 	setPath         = "unbound/settings/setHostOverride/"
 	delPath         = "unbound/settings/delHostOverride/"
 	reconfigurePath = "unbound/service/reconfigure"
-)
 
-// Descriptions that mark an override as the controller's. The description is
-// the only field OPNsense lets the controller tag a row with, and route
-// editors cannot write it, so it is what decides which rows may be changed.
-const (
-	// ManagedDescription is written on every override the controller manages.
-	ManagedDescription = "yk-dns-manager: managed record, do not edit"
-	// LegacyDescription is what versions before ownership marking wrote. A row
-	// carrying it is only treated as managed when the caller adopts it.
-	LegacyDescription = "managed by yk-dns-manager"
-)
-
-// Bounds on how much of an OPNsense response body is read, so a hostile or
-// misbehaving appliance cannot exhaust the pod's memory. 8MiB covers tens of
-// thousands of override rows at roughly 200 bytes each.
-const (
-	maxResponseBytes = 8 << 20
-	// Error bodies are only ever logged, so a short snippet is enough.
-	maxErrorBodyBytes = 1 << 10
+	// Response size limits, so a misbehaving appliance cannot exhaust the
+	// pod's memory. 8MiB covers tens of thousands of override rows.
+	maxResponseBytes  = 8 << 20
+	maxErrorBodyBytes = 1 << 10 // error bodies are only logged
 )
 
 // Provider implements dns.Provider for OPNsense Unbound DNS.
 type Provider struct {
-	baseURL   string
+	baseURL   string // ends in "/", so API paths append directly
 	apiKey    string
 	apiSecret string
 	client    *http.Client
 	log       logr.Logger
 
-	// OPNsense keeps override edits in its staged config until reconfigure
-	// publishes them. staged counts writes made through any batch; published
-	// is the value staged had when the last successful reconfigure started.
-	// A commit owes a publish while published < staged. Counting, rather than
-	// a flag, keeps a write made during another batch's reconfigure from being
-	// marked published by it, and keeps a failed publish owed until a later
-	// commit succeeds.
-	//
-	// A new provider starts one write behind: a previous process may have
-	// staged changes it never published, and nothing short of a reconfigure
-	// can tell.
+	// staged counts writes made by any batch; published is the value staged
+	// had when the last successful reconfigure started. A publish is owed
+	// while published < staged. A new provider starts owing one, since a
+	// previous process may have died with changes staged.
 	mu        sync.Mutex
 	staged    uint64
 	published uint64
 }
 
-// New creates an OPNsense DNS provider from the given settings map.
+// New creates an OPNsense provider from its settings.
 func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	for _, key := range []string{"base_url", "api_key", "api_secret"} {
 		if settings[key] == "" {
 			return nil, fmt.Errorf("opnsense: missing required setting '%s'", key)
 		}
 	}
-	baseURL := settings["base_url"]
-	parsedURL, err := url.Parse(baseURL)
+
+	// base_url must point at the API, and use https: the API key and secret
+	// go out as basic auth on every request. Plain http is allowed only with
+	// an explicit opt-in, meant for the local test appliance.
+	baseURL, err := url.Parse(settings["base_url"])
 	if err != nil {
-		return nil, fmt.Errorf("opnsense: invalid base_url %q: %w", baseURL, err)
+		return nil, fmt.Errorf("opnsense: invalid base_url %q: %w", settings["base_url"], err)
 	}
-	if !strings.HasPrefix(parsedURL.Path, "/api") {
-		return nil, fmt.Errorf("opnsense: base_url path must start with '/api' (e.g. https://opnsense.example.com/api), got %q", parsedURL.Path)
+	if !strings.HasPrefix(baseURL.Path, "/api") {
+		return nil, fmt.Errorf("opnsense: base_url path must start with '/api' (e.g. https://opnsense.example.com/api), got %q", baseURL.Path)
 	}
-	if err := checkScheme(parsedURL, settings, log); err != nil {
-		return nil, err
+	switch {
+	case baseURL.Scheme == "https":
+	case baseURL.Scheme == "http" && settings["allow_insecure_http"] == "true":
+		log.Info("opnsense: allow_insecure_http is ENABLED - the API credentials are sent in cleartext. Use it only for a local test appliance.")
+	case baseURL.Scheme == "http":
+		return nil, fmt.Errorf("opnsense: base_url %q uses http, which sends the API credentials in cleartext; use https, or set allow_insecure_http: \"true\" for a local test appliance", baseURL.Redacted())
+	default:
+		return nil, fmt.Errorf("opnsense: base_url %q must use https", baseURL.Redacted())
 	}
+
 	if v := settings["default_ttl"]; v != "" {
 		log.Info("opnsense: default_ttl is ignored and will be removed: Unbound host overrides have no per-record TTL", "default_ttl", v)
 	}
 
+	// TLS: ca_file pins the CA of a self-signed appliance, the safe option.
+	// skip_tls_verify turns verification off and hands the credentials to
+	// anyone on the network path, so it warns on every start.
+	caFile := settings["ca_file"]
+	skipVerify := settings["skip_tls_verify"] == "true"
+	if caFile != "" && skipVerify {
+		return nil, fmt.Errorf("opnsense: ca_file and skip_tls_verify are mutually exclusive; pin the CA with ca_file instead of disabling verification")
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if err := applyTLSConfig(transport, settings, log); err != nil {
-		return nil, err
+	if caFile != "" || skipVerify {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator-set provider config
+		if err != nil {
+			return nil, fmt.Errorf("opnsense: reading ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("opnsense: ca_file %q contains no valid PEM certificate", caFile)
+		}
+		transport.TLSClientConfig.RootCAs = pool
+		log.V(1).Info("opnsense: pinning appliance CA", "ca_file", caFile)
+	}
+	if skipVerify {
+		log.Info("opnsense: skip_tls_verify is ENABLED - TLS certificates are not verified, so the API credentials are sent to anyone who answers on the network path. Set ca_file to pin the appliance CA instead.")
+		transport.TLSClientConfig.InsecureSkipVerify = true // #nosec G402 -- deliberate operator opt-in, warned on every start
 	}
 
 	return &Provider{
-		baseURL:   strings.TrimRight(baseURL, "/") + "/",
+		baseURL:   strings.TrimRight(settings["base_url"], "/") + "/",
 		apiKey:    settings["api_key"],
 		apiSecret: settings["api_secret"],
 		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
@@ -111,64 +135,244 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}, nil
 }
 
-// checkScheme refuses plain HTTP unless the operator opts in. The API key and
-// secret go out as basic auth on every request, so over http they cross the
-// network in cleartext. The opt-in exists for the in-memory fake used in local
-// development.
-func checkScheme(u *url.URL, settings map[string]string, log logr.Logger) error {
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		if settings["allow_insecure_http"] != "true" {
-			return fmt.Errorf("opnsense: base_url %q uses http, which sends the API credentials in cleartext; use https, or set allow_insecure_http: \"true\" for a local test appliance", u.Redacted())
-		}
-		log.Info("opnsense: allow_insecure_http is ENABLED - the API credentials are sent in cleartext. Use it only for a local test appliance.")
-		return nil
-	default:
-		return fmt.Errorf("opnsense: base_url %q must use https", u.Redacted())
-	}
+// HealthCheck verifies the API is reachable and accepts the credentials.
+func (p *Provider) HealthCheck(ctx context.Context) error {
+	return p.call(ctx, http.MethodGet, searchPath, nil, nil)
 }
 
-// applyTLSConfig wires the two TLS knobs an operator controls. ca_file pins a
-// private CA, the safe answer to a self-signed appliance. skip_tls_verify
-// switches verification off and is loudly discouraged: it hands the basic-auth
-// credentials to anyone on the network path.
-func applyTLSConfig(transport *http.Transport, settings map[string]string, log logr.Logger) error {
-	caFile := settings["ca_file"]
-	skipVerify := settings["skip_tls_verify"] == "true"
+// Batch starts one reconcile's unit of work.
+func (p *Provider) Batch() dns.Batch {
+	return &batch{p: p}
+}
 
-	if caFile != "" && skipVerify {
-		return fmt.Errorf("opnsense: ca_file and skip_tls_verify are mutually exclusive; pin the CA with ca_file instead of disabling verification")
-	}
-	if caFile == "" && !skipVerify {
-		return nil
+// batch is one reconcile's view of the appliance: the override list, read
+// once on first use and kept in step with the batch's own writes.
+type batch struct {
+	p      *Provider
+	used   bool // any call made; Commit only publishes for a used batch
+	loaded bool
+	rows   []hostRow
+}
+
+// Ensure makes record.Hostname resolve to record.Value. See dns.Batch.
+//
+// An enabled override without our mark is someone else's record: Ensure
+// reports a conflict and touches nothing. OPNsense accepts several
+// overrides for one name, and a stale duplicate keeps answering, so whenever
+// Ensure writes it first deletes our duplicates.
+func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) {
+	want := rowFor(record)
+	matching, err := b.find(ctx, want)
+	if err != nil {
+		return 0, err
 	}
 
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if caFile != "" {
-		// #nosec G304 -- path comes from operator-set provider config, not request input
-		pem, err := os.ReadFile(caFile)
+	var ours []hostRow
+	for _, r := range matching {
+		if r.ours(opts.AdoptLegacy) {
+			ours = append(ours, r)
+		} else if r.Enabled == "1" {
+			return dns.Conflict, nil
+		}
+	}
+
+	if len(ours) == 0 {
+		res, err := b.p.write(ctx, addPath, want, "saved")
 		if err != nil {
-			return fmt.Errorf("opnsense: reading ca_file %q: %w", caFile, err)
+			return 0, err
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return fmt.Errorf("opnsense: ca_file %q contains no valid PEM certificate", caFile)
+		want.UUID = res.UUID
+		b.rows = append(b.rows, want)
+		return dns.Created, nil
+	}
+
+	// Keep the first enabled override, or the first one if all are disabled.
+	keep := ours[0]
+	for _, r := range ours {
+		if r.Enabled == "1" {
+			keep = r
+			break
 		}
-		cfg.RootCAs = pool
-		log.V(1).Info("opnsense: pinning appliance CA", "ca_file", caFile)
 	}
-	if skipVerify {
-		log.Info("opnsense: skip_tls_verify is ENABLED - TLS certificates are not verified, so the API credentials are sent to anyone who answers on the network path. Set ca_file to pin the appliance CA instead.")
-		cfg.InsecureSkipVerify = true // #nosec G402 -- deliberate operator opt-in, warned on every startup
+
+	// Create-only mode leaves a live override with another value alone. A
+	// disabled one answers nothing, so it is re-enabled instead.
+	if !opts.Overwrite && keep.Enabled == "1" && keep.Server != want.Server {
+		return dns.Kept, nil
 	}
-	transport.TLSClientConfig = cfg
+
+	for _, r := range ours {
+		if r.UUID != keep.UUID {
+			if err := b.deleteRow(ctx, r.UUID); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if len(ours) > 1 {
+		b.p.log.Info("removed duplicate host overrides", "hostname", record.Hostname, "removed", len(ours)-1)
+	}
+
+	upToDate := keep.Enabled == "1" && keep.Server == want.Server && keep.Description == want.Description
+	switch {
+	case upToDate && len(ours) > 1:
+		return dns.Updated, nil // only duplicates were removed
+	case upToDate:
+		return dns.Unchanged, nil
+	}
+	if _, err := b.p.write(ctx, setPath+url.PathEscape(keep.UUID), want, "saved"); err != nil {
+		return 0, err
+	}
+	want.UUID = keep.UUID
+	for i := range b.rows {
+		if b.rows[i].UUID == keep.UUID {
+			b.rows[i] = want
+		}
+	}
+	return dns.Updated, nil
+}
+
+// Remove deletes our overrides for hostname, and legacy ones when adopting.
+// Anyone else's are left alone.
+func (b *batch) Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error {
+	matching, err := b.find(ctx, rowFor(dns.Record{Hostname: hostname, Type: recordType}))
+	if err != nil {
+		return err
+	}
+	for _, r := range matching {
+		if r.ours(adoptLegacy) {
+			if err := b.deleteRow(ctx, r.UUID); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
+// Commit publishes with one reconfigure, if any write is still unpublished,
+// including writes of earlier batches whose publish failed.
+func (b *batch) Commit(ctx context.Context) error {
+	p := b.p
+	if !b.used {
+		return nil
+	}
+	p.mu.Lock()
+	target := p.staged
+	owed := p.published < target
+	p.mu.Unlock()
+	if !owed {
+		return nil
+	}
+
+	var res apiResult
+	if err := p.call(ctx, http.MethodPost, reconfigurePath, struct{}{}, &res); err != nil {
+		return err
+	}
+	if !strings.EqualFold(strings.TrimSpace(res.Status), "ok") {
+		return fmt.Errorf("opnsense: reconfigure returned status %q", res.Status)
+	}
+	p.log.V(1).Info("reconfigure completed")
+
+	// A write made while this reconfigure ran is above target, so it stays
+	// owed.
+	p.mu.Lock()
+	p.published = max(p.published, target)
+	p.mu.Unlock()
+	return nil
+}
+
+// find returns the overrides with want's hostname, domain and record type,
+// reading the override list on the batch's first call.
+func (b *batch) find(ctx context.Context, want hostRow) ([]hostRow, error) {
+	b.used = true
+	if !b.loaded {
+		var res struct {
+			Rows []hostRow `json:"rows"`
+		}
+		if err := b.p.call(ctx, http.MethodGet, searchPath, nil, &res); err != nil {
+			return nil, err
+		}
+		b.rows, b.loaded = res.Rows, true
+	}
+	var matching []hostRow
+	for _, r := range b.rows {
+		if strings.EqualFold(r.Hostname, want.Hostname) && strings.EqualFold(r.Domain, want.Domain) && strings.EqualFold(r.RR, want.RR) {
+			matching = append(matching, r)
+		}
+	}
+	return matching, nil
+}
+
+// deleteRow deletes one override. "not found" means someone else deleted it
+// already, which is the goal.
+func (b *batch) deleteRow(ctx context.Context, uuid string) error {
+	if _, err := b.p.write(ctx, delPath+url.PathEscape(uuid), nil, "deleted", "not found"); err != nil {
+		return err
+	}
+	b.rows = slices.DeleteFunc(b.rows, func(r hostRow) bool { return r.UUID == uuid })
+	return nil
+}
+
+// hostRow is one host override: a row of the search response, and the body
+// of an add or set.
+type hostRow struct {
+	UUID        string `json:"uuid,omitempty"`
+	Enabled     string `json:"enabled"`
+	Hostname    string `json:"hostname"`
+	Domain      string `json:"domain"`
+	RR          string `json:"rr"`
+	Server      string `json:"server"`
+	Description string `json:"description"`
+	MXPrio      string `json:"mxprio"`
+	MX          string `json:"mx"`
+}
+
+// rowFor is the managed override for record. OPNsense splits the name:
+// "sub.app.example.com" is hostname "sub" in domain "app.example.com".
+func rowFor(record dns.Record) hostRow {
+	hostname, domain, _ := strings.Cut(strings.TrimSuffix(record.Hostname, "."), ".")
+	return hostRow{
+		Enabled: "1", Hostname: hostname, Domain: domain, RR: record.Type,
+		Server: record.Value, Description: ManagedDescription,
+	}
+}
+
+// ours reports whether the controller may change or delete the override.
+func (r hostRow) ours(adoptLegacy bool) bool {
+	return r.Description == ManagedDescription || (adoptLegacy && r.Description == LegacyDescription)
+}
+
+// apiResult is the answer to a write: "result" for add, set and del, plus
+// "uuid" for add, and "status" for reconfigure.
+type apiResult struct {
+	Result string `json:"result"`
+	UUID   string `json:"uuid"`
+	Status string `json:"status"`
+}
+
+// write POSTs a change to the staged config and counts it as owing a
+// publish. OPNsense rejects a write with HTTP 200 and a result other than
+// the accepted ones, so the status code alone proves nothing.
+func (p *Provider) write(ctx context.Context, path string, row any, accepted ...string) (apiResult, error) {
+	var body any = struct{}{}
+	if row != nil {
+		body = map[string]any{"host": row}
+	}
+	var res apiResult
+	if err := p.call(ctx, http.MethodPost, path, body, &res); err != nil {
+		return res, err
+	}
+	if !slices.Contains(accepted, res.Result) {
+		return res, fmt.Errorf("opnsense: %s unexpected result: %s", path, res.Result)
+	}
+	p.mu.Lock()
+	p.staged++
+	p.mu.Unlock()
+	return res, nil
+}
+
 // call sends one API request and decodes the JSON answer into out, which may
-// be nil. A non-200 status is an error carrying a bounded snippet of the body.
+// be nil. A status other than 200 is an error carrying a short snippet of the
+// body.
 func (p *Provider) call(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {
@@ -205,8 +409,6 @@ func (p *Provider) call(ctx context.Context, method, path string, body, out any)
 		return nil
 	}
 
-	// A body that hits the limit is reported as such instead of surfacing a
-	// confusing truncated-JSON error.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("opnsense: read %s response: %w", path, err)
@@ -218,258 +420,4 @@ func (p *Provider) call(ctx context.Context, method, path string, body, out any)
 		return fmt.Errorf("opnsense: decode %s response: %w", path, err)
 	}
 	return nil
-}
-
-// apiResult is the answer to every write: add, set and del report "result",
-// add also the new "uuid", and reconfigure reports "status".
-type apiResult struct {
-	Result string `json:"result"`
-	UUID   string `json:"uuid"`
-	Status string `json:"status"`
-}
-
-// write POSTs body to path and requires one of the accepted results. OPNsense
-// answers a rejected write with HTTP 200, so the status code alone proves
-// nothing.
-func (p *Provider) write(ctx context.Context, path string, body any, accepted ...string) (apiResult, error) {
-	var res apiResult
-	if err := p.call(ctx, http.MethodPost, path, body, &res); err != nil {
-		return res, err
-	}
-	if !slices.Contains(accepted, res.Result) {
-		return res, fmt.Errorf("opnsense: %s unexpected result: %s", path, res.Result)
-	}
-	return res, nil
-}
-
-// HealthCheck verifies the OPNsense API is reachable and credentials are valid.
-func (p *Provider) HealthCheck(ctx context.Context) error {
-	return p.call(ctx, http.MethodGet, searchPath, nil, nil)
-}
-
-// publish reconfigures if any staged write is not yet published.
-func (p *Provider) publish(ctx context.Context) error {
-	p.mu.Lock()
-	target := p.staged
-	owed := p.published < target
-	p.mu.Unlock()
-	if !owed {
-		return nil
-	}
-
-	var res apiResult
-	if err := p.call(ctx, http.MethodPost, reconfigurePath, struct{}{}, &res); err != nil {
-		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(res.Status), "ok") {
-		return fmt.Errorf("opnsense: reconfigure returned status %q", res.Status)
-	}
-	p.log.V(1).Info("reconfigure completed")
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.published = max(p.published, target)
-	return nil
-}
-
-func (p *Provider) markStaged() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.staged++
-}
-
-// hostRow is one host override: a row of the search response, and with an
-// empty UUID the body of an add or set.
-type hostRow struct {
-	UUID        string `json:"uuid,omitempty"`
-	Enabled     string `json:"enabled"`
-	Hostname    string `json:"hostname"`
-	Domain      string `json:"domain"`
-	RR          string `json:"rr"`
-	Server      string `json:"server"`
-	Description string `json:"description"`
-	MXPrio      string `json:"mxprio"`
-	MX          string `json:"mx"`
-}
-
-// rowFor is the managed override record asks for.
-func rowFor(record dns.Record) hostRow {
-	host, domain := splitHostname(record.Hostname)
-	return hostRow{
-		Enabled: "1", Hostname: host, Domain: domain, RR: record.Type,
-		Server: record.Value, Description: ManagedDescription,
-	}
-}
-
-// splitHostname splits an FQDN into OPNsense's hostname and domain fields:
-// "sub.app.example.com" becomes ("sub", "app.example.com").
-func splitHostname(fqdn string) (hostname, domain string) {
-	hostname, domain, _ = strings.Cut(strings.TrimSuffix(fqdn, "."), ".")
-	return hostname, domain
-}
-
-func (r hostRow) enabled() bool { return r.Enabled == "1" }
-
-// ours reports whether the controller may change or delete the row.
-func (r hostRow) ours(adoptLegacy bool) bool {
-	return r.Description == ManagedDescription || (adoptLegacy && r.Description == LegacyDescription)
-}
-
-// is reports whether the row is the override want names.
-func (r hostRow) is(want hostRow) bool {
-	return strings.EqualFold(r.Hostname, want.Hostname) &&
-		strings.EqualFold(r.Domain, want.Domain) &&
-		strings.EqualFold(r.RR, want.RR)
-}
-
-// matches reports whether the row already says what want says.
-func (r hostRow) matches(want hostRow) bool {
-	return r.enabled() && r.Server == want.Server && r.Description == want.Description
-}
-
-// Batch starts a unit of work against the appliance.
-func (p *Provider) Batch() dns.Batch {
-	return &batch{p: p}
-}
-
-// batch is one reconcile's view of the appliance. It lists the overrides once,
-// on first use, and keeps that list in step with its own writes, so later
-// calls in the same batch see them.
-type batch struct {
-	p      *Provider
-	used   bool
-	loaded bool
-	rows   []hostRow
-}
-
-func (b *batch) load(ctx context.Context) error {
-	b.used = true
-	if b.loaded {
-		return nil
-	}
-	var res struct {
-		Rows []hostRow `json:"rows"`
-	}
-	if err := b.p.call(ctx, http.MethodGet, searchPath, nil, &res); err != nil {
-		return err
-	}
-	b.rows, b.loaded = res.Rows, true
-	return nil
-}
-
-func (b *batch) find(want hostRow) []hostRow {
-	var out []hostRow
-	for _, r := range b.rows {
-		if r.is(want) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func (b *batch) remove(ctx context.Context, uuid string) error {
-	// "not found" means someone else already deleted it, which is the goal.
-	if _, err := b.p.write(ctx, delPath+url.PathEscape(uuid), struct{}{}, "deleted", "not found"); err != nil {
-		return err
-	}
-	b.p.markStaged()
-	b.rows = slices.DeleteFunc(b.rows, func(r hostRow) bool { return r.UUID == uuid })
-	return nil
-}
-
-// Ensure implements dns.Batch.
-//
-// Only rows carrying the managed marker (or the legacy one, when adopted) are
-// ever changed. An enabled row without it is someone else's record for the
-// name, and Ensure reports a conflict rather than shadow or replace it.
-//
-// OPNsense accepts several overrides for one name, and a stale duplicate keeps
-// answering after the live one is updated. Whenever Ensure writes, it first
-// removes every managed override for the name except the one it keeps.
-func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) {
-	if err := b.load(ctx); err != nil {
-		return 0, err
-	}
-	want := rowFor(record)
-
-	var ours []hostRow
-	for _, r := range b.find(want) {
-		switch {
-		case r.ours(opts.AdoptLegacy):
-			ours = append(ours, r)
-		case r.enabled():
-			return dns.Conflict, nil
-		}
-	}
-
-	if len(ours) == 0 {
-		res, err := b.p.write(ctx, addPath, map[string]hostRow{"host": want}, "saved")
-		if err != nil {
-			return 0, err
-		}
-		b.p.markStaged()
-		want.UUID = res.UUID
-		b.rows = append(b.rows, want)
-		return dns.Created, nil
-	}
-
-	keep := ours[0]
-	if i := slices.IndexFunc(ours, hostRow.enabled); i >= 0 {
-		keep = ours[i]
-	}
-
-	// A disabled override answers nothing, so only a live one holding another
-	// value is something create-only mode must leave alone.
-	if !opts.Overwrite && keep.enabled() && keep.Server != want.Server {
-		return dns.Kept, nil
-	}
-
-	for _, r := range ours {
-		if r.UUID != keep.UUID {
-			if err := b.remove(ctx, r.UUID); err != nil {
-				return 0, err
-			}
-		}
-	}
-	if removed := len(ours) - 1; removed > 0 {
-		b.p.log.Info("removed duplicate host overrides", "hostname", record.Hostname, "removed", removed)
-	}
-
-	if keep.matches(want) {
-		if len(ours) > 1 {
-			return dns.Updated, nil
-		}
-		return dns.Unchanged, nil
-	}
-	if _, err := b.p.write(ctx, setPath+url.PathEscape(keep.UUID), map[string]hostRow{"host": want}, "saved"); err != nil {
-		return 0, err
-	}
-	b.p.markStaged()
-	want.UUID = keep.UUID
-	b.rows[slices.IndexFunc(b.rows, func(r hostRow) bool { return r.UUID == keep.UUID })] = want
-	return dns.Updated, nil
-}
-
-// Remove implements dns.Batch.
-func (b *batch) Remove(ctx context.Context, hostname, recordType string, adoptLegacy bool) error {
-	if err := b.load(ctx); err != nil {
-		return err
-	}
-	for _, r := range b.find(rowFor(dns.Record{Hostname: hostname, Type: recordType})) {
-		if !r.ours(adoptLegacy) {
-			continue
-		}
-		if err := b.remove(ctx, r.UUID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Commit implements dns.Batch.
-func (b *batch) Commit(ctx context.Context) error {
-	if !b.used {
-		return nil
-	}
-	return b.p.publish(ctx)
 }
