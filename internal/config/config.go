@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -41,6 +42,16 @@ func LoadDomainMap(path string) (*DomainMap, error) {
 		if strings.TrimSpace(domain) == "" {
 			return nil, fmt.Errorf("domain map file %s: entry with an empty domain key", path)
 		}
+		// Keys are compared with route hostnames, which Gateway API keeps
+		// lowercase and without a trailing dot, so a key written any other way
+		// would silently never match.
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+		if !validDomainKey(key) {
+			return nil, fmt.Errorf("domain map entry %q: not a valid domain name or *.domain wildcard", domain)
+		}
+		if _, dup := entries[key]; dup {
+			return nil, fmt.Errorf("domain map entry %q: duplicates another entry once normalized to %q", domain, key)
+		}
 		addr, err := netip.ParseAddr(strings.TrimSpace(value))
 		if err != nil {
 			return nil, fmt.Errorf("domain map entry %q: %q is not a valid IP address", domain, value)
@@ -48,10 +59,29 @@ func LoadDomainMap(path string) (*DomainMap, error) {
 		if !addr.Is4() {
 			return nil, fmt.Errorf("domain map entry %q: %s is not IPv4; only A records are managed", domain, addr)
 		}
-		entries[domain] = addr.String()
+		entries[key] = addr.String()
 	}
 
 	return &DomainMap{entries: entries}, nil
+}
+
+// dnsLabel is one label of a domain name: letters, digits and hyphens, not
+// starting or ending with a hyphen, at most 63 characters.
+var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validDomainKey reports whether key is a domain name, optionally starting
+// with "*." for a wildcard.
+func validDomainKey(key string) bool {
+	name := strings.TrimPrefix(key, "*.")
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if !dnsLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 // LookupIP finds the IP for a hostname by matching against domain entries.
