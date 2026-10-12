@@ -81,6 +81,7 @@ Matching walks up the hostname one label at a time and returns the first hit. At
 |---|---|---|---|
 | `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
 | `--zap-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or a numeric logr verbosity such as `-3` for `V(3)` |
+| `--leader-elect` | — | `true` | Elect a leader through a Lease so only one replica manages DNS; turn off only for a single instance outside a cluster (`make run` does) |
 | `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
 | `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
 
@@ -129,6 +130,7 @@ Key values:
 | `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
 | `dnsProvider.provider` | DNS provider name |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
+| `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |
 | `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
 

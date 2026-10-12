@@ -36,5 +36,6 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 - **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
 - **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
 - **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.
+- **Only the leader reconciles.** Leader election is on by default (Lease `yk-dns-manager.dns.yk` in the pod's namespace); the chart refuses `replicaCount` > 1 without it. `make run` passes `--leader-elect=false`.
 - **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` counter.
 - **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files.
