@@ -108,7 +108,7 @@ func (b mockBatch) Commit(_ context.Context) error {
 
 func newTestDomainMap(t *testing.T) *config.DomainMap {
 	t.Helper()
-	return newTestDomainMapWith(t, "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n")
+	return newTestDomainMapWith(t, "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n")
 }
 
 func newTestDomainMapWith(t *testing.T, content string) *config.DomainMap {
@@ -622,7 +622,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 	}{
 		{
 			name:        "hostname removed from spec",
-			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
 			wantDeleted: []string{"api.my-domain2.it"},
@@ -634,7 +634,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 			// The spec still names api.my-domain2.it, but the map no longer
 			// resolves it, so the managed record is released. A legacy record
 			// is not adopted for a name outside the map.
-			domainMap:   "my-domain1.com: 10.0.8.100\n",
+			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n",
 			hostnames:   []string{"app.my-domain1.com", "api.my-domain2.it"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
 			wantDeleted: []string{"api.my-domain2.it"},
@@ -645,7 +645,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 			// is released, but only managed rows can go, and a legacy record is
 			// never adopted for a name the domain map does not cover.
 			name:        "annotation names a hostname outside the domain map",
-			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com","vpn.corp.example"]`,
 			wantDeleted: []string{"vpn.corp.example"},
@@ -658,7 +658,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 			// one extra write — and that write silently rewrote the annotation to
 			// hide the divergence while the record itself was never deleted.
 			name:        "nothing changed, no annotation write",
-			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `["app.my-domain1.com"]`,
 			wantDeleted: nil,
@@ -667,7 +667,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 		},
 		{
 			name:        "corrupt annotation is rewritten, not fatal",
-			domainMap:   "my-domain1.com: 10.0.8.100\nmy-domain2.it: 10.0.9.50\n",
+			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n",
 			hostnames:   []string{"app.my-domain1.com"},
 			annotation:  `{not json`,
 			wantDeleted: nil,

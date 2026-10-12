@@ -162,6 +162,12 @@ func run() error {
 	sort.Strings(domains)
 	for _, d := range domains {
 		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
+		// Exact keys used to cover every name below them too. Warn about the
+		// ones that now match only themselves, since an upgrade with such a key
+		// makes the controller release the records of its subdomains.
+		if !strings.HasPrefix(d, "*.") && entries["*."+d] == "" {
+			log.Info("domain map key matches only this exact name; use \"*."+d+"\" to also cover the names below it", "domain", d)
+		}
 	}
 
 	providerCfg, err := config.LoadProviderConfig()

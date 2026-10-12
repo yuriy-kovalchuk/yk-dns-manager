@@ -84,34 +84,30 @@ func validDomainKey(key string) bool {
 	return true
 }
 
-// LookupIP finds the IP for a hostname by matching against domain entries.
-// It walks up the domain labels checking for exact matches and wildcard entries.
-// Exact matches take priority over wildcards. For example, given:
+// LookupIP returns the IP for hostname.
 //
-//	"*.mydomain.com":    "10.0.0.1"
-//	"app2.mydomain.com": "10.0.0.2"
+// An exact key matches only that name. A wildcard key "*.example.com" covers
+// every name below example.com, at any depth, like a DNS wildcard, but not
+// example.com itself. The exact key wins, then the most specific wildcard:
 //
-// "app1.mydomain.com" returns "10.0.0.1" (wildcard match)
-// "app2.mydomain.com" returns "10.0.0.2" (exact match wins)
+//	"example.com":       10.0.0.1   example.com
+//	"*.example.com":     10.0.0.2   app.example.com, a.b.example.com
+//	"*.lab.example.com": 10.0.0.3   x.lab.example.com
 func (dm *DomainMap) LookupIP(hostname string) (string, bool) {
-	hostname = strings.TrimSuffix(hostname, ".")
-	// Walk up the domain labels until we find a match
-	for h := hostname; h != ""; {
-		// Check exact match first
-		if ip, ok := dm.entries[h]; ok {
-			return ip, true
-		}
-		idx := strings.Index(h, ".")
-		if idx < 0 {
-			break
-		}
-		// Check wildcard match at this level
-		if ip, ok := dm.entries["*."+h[idx+1:]]; ok {
-			return ip, true
-		}
-		h = h[idx+1:]
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	if ip, ok := dm.entries[hostname]; ok {
+		return ip, true
 	}
-	return "", false
+	for parent := hostname; ; {
+		dot := strings.Index(parent, ".")
+		if dot < 0 {
+			return "", false
+		}
+		parent = parent[dot+1:]
+		if ip, ok := dm.entries["*."+parent]; ok {
+			return ip, true
+		}
+	}
 }
 
 // Entries returns a copy of the configured domain-to-IP mapping.

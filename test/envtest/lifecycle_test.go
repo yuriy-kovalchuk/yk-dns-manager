@@ -14,7 +14,7 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-const exampleMap = "example.com: 10.0.0.1\n"
+const exampleMap = "\"*.example.com\": 10.0.0.1\n"
 
 // TestCreatePublishesRecord covers the chain the unit tests cannot: the first
 // reconcile only adds the finalizer, and the record appears only because the
