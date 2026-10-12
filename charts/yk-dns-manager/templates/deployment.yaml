@@ -1,3 +1,6 @@
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.leaderElection.enabled) }}
+{{- fail "replicaCount > 1 needs leaderElection.enabled: replicas without a leader race on the DNS appliance" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,10 +13,13 @@ spec:
   strategy:
     type: {{ .Values.strategy.type }}
     {{- if eq .Values.strategy.type "RollingUpdate" }}
+    {{- /* Rendered in full, with Kubernetes' defaults filled in, so Helm owns
+    these fields and removes them again on a switch back to Recreate, with
+    client-side and server-side apply alike. */}}
+    {{- $rollingUpdate := default dict .Values.strategy.rollingUpdate }}
     rollingUpdate:
-      {{- toYaml .Values.strategy.rollingUpdate | nindent 6 }}
-    {{- else }}
-    rollingUpdate: null
+      maxSurge: {{ if hasKey $rollingUpdate "maxSurge" }}{{ $rollingUpdate.maxSurge }}{{ else }}25%{{ end }}
+      maxUnavailable: {{ if hasKey $rollingUpdate "maxUnavailable" }}{{ $rollingUpdate.maxUnavailable }}{{ else }}25%{{ end }}
     {{- end }}
   selector:
     matchLabels:
@@ -51,6 +57,7 @@ spec:
           args:
             - --zap-log-level={{ .Values.logLevel }}
             - --require-accepted-routes={{ .Values.requireAcceptedRoutes }}
+            - --leader-elect={{ .Values.leaderElection.enabled }}
           env:
             - name: DOMAIN_MAP_PATH
               value: /etc/yk-dns-manager/domain-map/domain-map.yaml
