@@ -101,6 +101,7 @@ func run() error {
 		domainMapPath      string
 		domainMap          *config.DomainMap
 		cleanupGracePeriod time.Duration
+		requireAccepted    bool
 	)
 
 	ctx := context.Background()
@@ -108,6 +109,7 @@ func run() error {
 
 	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
 	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
+	flag.BoolVar(&requireAccepted, "require-accepted-routes", false, "only publish DNS for HTTPRoutes that at least one parent Gateway has accepted")
 	flag.DurationVar(&cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
 	flag.Parse()
 
@@ -193,6 +195,7 @@ func run() error {
 		DNS:       dnsProvider,
 		Upsert:    providerCfg.Upsert,
 
+		RequireAccepted:    requireAccepted,
 		CleanupGracePeriod: cleanupGracePeriod,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {

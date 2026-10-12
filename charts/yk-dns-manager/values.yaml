@@ -19,6 +19,12 @@ replicaCount: 1
 # verbosity such as -3 for V(3).
 logLevel: info
 
+# -- Only publish DNS for HTTPRoutes that at least one parent Gateway has
+# accepted (status.parents[].conditions Accepted=True). Off, any HTTPRoute
+# with a hostname the domain map covers gets DNS, including one no Gateway
+# admitted, so anyone who can create an HTTPRoute can claim a name.
+requireAcceptedRoutes: false
+
 strategy:
   type: Recreate
 

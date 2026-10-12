@@ -1,11 +1,13 @@
 package envtest
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
@@ -169,4 +171,26 @@ func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
 	if len(rows(h.fake.Snapshot(), "app.example.com")) != 1 {
 		t.Fatal("deleting the route removed a legacy record it never owned")
 	}
+}
+
+// TestAcceptanceControlsRecord: with --require-accepted-routes, a route gets
+// its record once a Gateway accepts it, and loses it when acceptance goes.
+func TestAcceptanceControlsRecord(t *testing.T) {
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, requireAccepted: true})
+
+	h.createRoute("app", []string{"app.example.com"})
+	h.eventually("app.example.com published once accepted", func() bool {
+		return hasRow(h.fake.Published(), "app.example.com", "10.0.0.1")
+	})
+
+	route := h.getRoute("app")
+	cond := &route.Status.Parents[0].Conditions[0]
+	cond.Status = metav1.ConditionFalse
+	cond.Reason = string(gatewayv1.RouteReasonNotAllowedByListeners)
+	if err := h.client.Status().Update(context.Background(), route); err != nil {
+		t.Fatalf("marking the route not accepted: %v", err)
+	}
+	h.eventually("app.example.com released once no longer accepted", func() bool {
+		return len(rows(h.fake.Published(), "app.example.com")) == 0
+	})
 }

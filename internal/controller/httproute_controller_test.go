@@ -868,3 +868,52 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 		})
 	}
 }
+
+// TestHTTPRouteReconciler_RequireAccepted is audit S3. Off (the default), a
+// route gets DNS whatever its status; on, only once a parent accepted it.
+func TestHTTPRouteReconciler_RequireAccepted(t *testing.T) {
+	acceptedStatus := []gatewayv1.RouteParentStatus{{
+		ParentRef:      gatewayv1.ParentReference{Name: "gateway"},
+		ControllerName: "example.com/gateway-controller",
+		Conditions: []metav1.Condition{{
+			Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue, Reason: "Accepted",
+		}},
+	}}
+	cases := []struct {
+		name            string
+		requireAccepted bool
+		accepted        bool
+		wantEnsured     bool
+	}{
+		{"off, not accepted", false, false, true},
+		{"on, not accepted", true, false, false},
+		{"on, accepted", true, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			route := managedRoute("route", "", "app.my-domain1.com")
+			if tc.accepted {
+				route.Status.Parents = acceptedStatus
+			}
+			scheme := runtime.NewScheme()
+			if err := gatewayv1.Install(scheme); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+				WithObjects(route).WithStatusSubresource(route).Build()
+			mock := &mockDNSProvider{}
+			r := &HTTPRouteReconciler{
+				Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
+				DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true, RequireAccepted: tc.requireAccepted,
+			}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+			if _, err := r.Reconcile(context.Background(), req); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if ensured := len(mock.upsertedRecords) > 0; ensured != tc.wantEnsured {
+				t.Errorf("ensured a record = %v, want %v", ensured, tc.wantEnsured)
+			}
+		})
+	}
+}
