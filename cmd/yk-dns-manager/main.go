@@ -191,6 +191,7 @@ func run() error {
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Log:       ctrl.Log.WithName("httproute-controller"),
+		Recorder:  mgr.GetEventRecorder("yk-dns-manager"),
 		DomainMap: domainMap,
 		DNS:       dnsProvider,
 		Upsert:    providerCfg.Upsert,
