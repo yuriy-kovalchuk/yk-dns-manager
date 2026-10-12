@@ -4,7 +4,7 @@
 
 - Go 1.27.2 (pinned in `go.mod`; with `GOTOOLCHAIN=auto` the go command fetches it on demand)
 - Docker (for buildx and kind)
-- `kubectl` and `helm` v3.x
+- `kubectl`, and `helm` v3.18 or newer (CI uses 3.18; v4 works too, see the strategy note in the CHANGELOG)
 - For kind-based testing: [`kind`](https://kind.sigs.k8s.io/) **v0.33.0 or newer**.
   `hack/kind-config.yaml` pins the node image to
   `kindest/node:v1.37.0@sha256:a1ed56cf…`, so the dev cluster is always Kubernetes
@@ -25,31 +25,19 @@ testing is the cluster.
 
 | You changed | Use | Cost |
 |---|---|---|
-| reconcile logic, config parsing, provider calls, dedup, finalizers | `make test` | ~2s, no cluster, no network |
+| reconcile logic, config parsing, provider calls, dedup, finalizers | `make test-unit`, `make test-integration` | ~2s each, no cluster, no network |
+| the controller's behaviour against a real API server: event filter, finalizers, ownership | `make test-envtest` | ~1 min, no cluster needed |
 | wiring you can only see end to end — manager setup, RBAC, chart, probes, real informer behaviour | Path A below | ~40s bring-up, ~10s per iteration |
 | the binary's own startup, flags, config loading, logging | Path B below | ~2s per restart |
 
 The unit tests cover the reconciler against a mock provider and a fake Kubernetes
 client; the integration tests drive the real provider over HTTP against the same
-in-memory appliance both paths below use. That is most of the surface area.
+in-memory appliance both paths below use; envtest runs the real manager against a
+real API server. That is most of the surface area.
 
 ## When something is not doing what you expect
 
-Example provider config:
-
-```yaml
-# examples/dns-provider.yaml
-provider: opnsense
-upsert: true
-settings:
-  base_url: "https://opnsense.example.com/api"
-  # Point this at the appliance's CA bundle; running locally it can be a file on
-  # your own machine. Do not reach for skip_tls_verify to work around a
-  # self-signed certificate — the API credentials go out on every request.
-  ca_file: "./opnsense-ca.pem"
-  api_key: ""       # or hardcode for local dev
-  api_secret: ""
-```
+`make kind-status` prints the local dev state in one place:
 
 ```
 kubecontext:  kind-yk-dns-manager-dev
@@ -158,7 +146,8 @@ request.
 ## Running tests
 
 ```bash
-make test              # unit + integration
+make test              # unit + integration + envtest
+make test-envtest      # the real manager against an envtest API server (~1 min)
 make test-unit         # unit only — no network, no external processes
 make test-integration  # provider over real HTTP against internal/testenv
 make test-cover        # HTML report at coverage.html + function summary

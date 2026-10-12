@@ -20,9 +20,9 @@ Breaking changes: append `!` — `feat!: ...` — and explain in the body.
 Body is free-form. Bullet points work well for multi-part commits:
 
 ```
-feat: add config drift detection
+feat: optionally limit DNS to routes a Gateway accepted
 
-- periodic comparison of running vs desired machine config via Talos API
-- opt-out per node via spec.driftDetection=false (default: true)
-- offline nodes skipped silently, no status change
+- --require-accepted-routes (chart value requireAcceptedRoutes), off by default
+- an unaccepted route takes no finalizer, and records it owned are released
+- the event filter also passes updates that flip acceptance
 ```

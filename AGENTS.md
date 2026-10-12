@@ -22,11 +22,11 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 | `make test-integration` | Integration tests with fake HTTP server |
 | `make test-envtest` | Real manager against an envtest API server and the fake appliance (downloads binaries to `bin/k8s`) |
 | `make test-cover` | Coverage report (HTML at `coverage.html`) |
-| `make run` | Build and run locally (sources `.env`) |
+| `make run` | Run the binary locally against your current kubecontext (sources `.env`, `--leader-elect=false`) |
 | `make kind-up` | Start local kind cluster |
-| `make kind-deploy` | Build image, load into kind, helm install |
+| `make kind-deploy` | kind cluster + Gateway API CRDs + image + in-cluster fake appliance + helm install |
 | `make kind-down` | Remove kind cluster |
-| `make lint` | golangci-lint (`continue-on-error: true` in CI) |
+| `make lint` | golangci-lint (blocking in CI) |
 | `make docker-build` | Multi-platform build (no push) |
 | `make docker-push` | Multi-platform build + push to GHCR |
 

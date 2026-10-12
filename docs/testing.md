@@ -1,6 +1,6 @@
 # Testing
 
-All tests run via `go test ./...` (or `make test`). CI runs `make vet build test lint` and `make vuln` on every push and pull request, and both are blocking.
+All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUBEBUILDER_ASSETS` is set. CI runs `make vet build test lint` and `make vuln` on every push and pull request, and again on every release tag before anything is published; both are blocking.
 
 ## Overview
 
@@ -178,9 +178,9 @@ make kind-deploy   # cluster + image + fake appliance + controller
 make kind-demo     # apply hack/local/httproute.yaml
 ```
 
-The controller logs `upserted DNS record hostname=app.example.com ip=10.0.0.1`
-followed by one `reconfigure completed`, and `GET /records` on the fake shows the
-row. Automating this as `make test-e2e` is open work.
+The controller logs `app.example.com -> 10.0.0.1` with reason `DNSRecordCreated`
+(also an Event on the route, see `kubectl describe httproute local-demo`) followed
+by one `reconfigure completed`, and `GET /records` on the fake shows the row. Automating this as `make test-e2e` is open work.
 
 ## Running tests
 
