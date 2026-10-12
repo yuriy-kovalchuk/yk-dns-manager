@@ -32,10 +32,10 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 
 ## Key Patterns
 - **Provider interface is the only DNS boundary.** Controllers never import provider packages directly. Adding a new backend: implement `Provider`, register in `newProviders()`, set config `provider` field.
-- **Domain map walk-up matching:** exact → wildcard at each parent level → nil. One controller serves multiple domains/ILBs via one domain map file.
+- **Domain map matching:** an exact key matches only itself; otherwise the most specific `*.parent` wildcard covering the hostname wins, at any depth. One controller serves multiple domains/ILBs via one domain map file.
 - **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
 - **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
 - **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.
 - **Only the leader reconciles.** Leader election is on by default (Lease `yk-dns-manager.dns.yk` in the pod's namespace); the chart refuses `replicaCount` > 1 without it. `make run` passes `--leader-elect=false`.
 - **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` counter.
-- **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files.
+- **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files. Only `${NAME}` is expanded, and an unset variable fails startup. Config is strict: unknown fields and unknown provider settings keys (listed per factory in `newProviders()`) fail startup.
