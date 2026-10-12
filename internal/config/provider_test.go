@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -130,12 +131,32 @@ settings:
 	}
 }
 
+// TestLoadProviderConfig_EnvVarUnset: a reference to an unset variable is an
+// error. It used to expand silently to "", which hid a missing Secret key.
 func TestLoadProviderConfig_EnvVarUnset(t *testing.T) {
 	content := `provider: opnsense
 settings:
   base_url: "https://opnsense.local/api"
   api_key: "${UNSET_VAR_THAT_DOES_NOT_EXIST}"
-  api_secret: "literal-value"
+`
+	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadProviderConfigFromPath(path)
+	if err == nil || !strings.Contains(err.Error(), "UNSET_VAR_THAT_DOES_NOT_EXIST") || !strings.Contains(err.Error(), "settings.api_key") {
+		t.Fatalf("error = %v, want it to name the setting and the unset variable", err)
+	}
+}
+
+// TestLoadProviderConfig_LiteralDollar: only ${NAME} is expanded, so a "$"
+// in a literal value survives. os.ExpandEnv turned "pa$word" into "pa".
+func TestLoadProviderConfig_LiteralDollar(t *testing.T) {
+	t.Setenv("word", "SHOULD-NOT-APPEAR")
+	content := `provider: opnsense
+settings:
+  api_secret: "pa$word and $5"
 `
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -146,14 +167,8 @@ settings:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// Unset env var expands to empty string.
-	if cfg.Settings["api_key"] != "" {
-		t.Errorf("expected api_key '' for unset env var, got %q", cfg.Settings["api_key"])
-	}
-	// Literal values without ${} stay as-is.
-	if cfg.Settings["api_secret"] != "literal-value" {
-		t.Errorf("expected api_secret 'literal-value', got %q", cfg.Settings["api_secret"])
+	if got := cfg.Settings["api_secret"]; got != "pa$word and $5" {
+		t.Errorf("api_secret = %q, want the literal value", got)
 	}
 }
 
