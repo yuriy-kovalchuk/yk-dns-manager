@@ -6,7 +6,7 @@ All tests run via `go test ./...` (or `make test`). CI runs `make vet build test
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 59 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
+| Unit | `cmd/`, `internal/` | 60 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
 | Integration | `test/integration/` | 11 + conformance | The provider conformance suite and OPNsense-specific checks, against an in-process fake appliance over HTTP |
 | Envtest | `test/envtest/` | 17 | The real manager, predicates and provider against a real API server and the fake appliance |
 | E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
@@ -60,7 +60,8 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestNew_SkipTLSVerifyWarns` | Enabling it logs a warning naming `ca_file` as the fix; a default config must not warn |
 | `TestNew_TLSVerification` | Stands up HTTPS on a throwaway CA: system roots reject it, `ca_file` accepts it, `skip_tls_verify` accepts it |
 | `TestNew_TLSConfigErrors` | Missing `ca_file`, non-PEM file, and `ca_file` together with `skip_tls_verify` |
-| `TestNew_Scheme` | `http` is refused without `allow_insecure_http: "true"`, warns with it, and other schemes are refused |
+| `TestNew_Scheme` | `http` is refused unless `allow_insecure_http` is true (any boolean spelling), warns when allowed, and a non-boolean value or another scheme is refused |
+| `TestNew_SkipTLSVerifyIsABoolean` | `skip_tls_verify` accepts `true`, `True`, `1`, `false` and empty, and rejects a non-boolean value (D11) |
 | `TestResponseBodyLimit` | A body over the cap is reported as a limit error, not as truncated JSON |
 | `TestErrorBodyTruncated` | Error bodies are capped rather than dumped whole into the log |
 | `TestCommitChecksReconfigureStatus` | A reconfigure answering a status other than `ok` fails the commit, and the publish stays owed |
