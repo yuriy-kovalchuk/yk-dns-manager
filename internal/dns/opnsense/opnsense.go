@@ -358,11 +358,27 @@ func (r hostRow) ours(adoptLegacy bool) bool {
 }
 
 // apiResult is the answer to a write: "result" for add, set and del, plus
-// "uuid" for add, and "status" for reconfigure.
+// "uuid" for add, "status" for reconfigure, and "validations" when the
+// appliance rejected the row.
 type apiResult struct {
 	Result string `json:"result"`
 	UUID   string `json:"uuid"`
 	Status string `json:"status"`
+	// Validations maps the rejected field to the appliance's complaint, e.g.
+	// "host.domain": "A domain is required.". Without it a rejection says only
+	// "failed", which is useless for finding out why a record was refused.
+	Validations map[string]string `json:"validations"`
+}
+
+// joinValidations renders the appliance's per-field complaints, sorted so the
+// message stays the same across retries.
+func joinValidations(validations map[string]string) string {
+	fields := make([]string, 0, len(validations))
+	for field, complaint := range validations {
+		fields = append(fields, field+": "+complaint)
+	}
+	slices.Sort(fields)
+	return strings.Join(fields, "; ")
 }
 
 // write POSTs a change to the staged config and counts it as owing a
@@ -378,6 +394,9 @@ func (p *Provider) write(ctx context.Context, path string, row any, accepted ...
 		return res, err
 	}
 	if !slices.Contains(accepted, res.Result) {
+		if len(res.Validations) > 0 {
+			return res, fmt.Errorf("opnsense: %s rejected the record (%s)", path, joinValidations(res.Validations))
+		}
 		return res, fmt.Errorf("opnsense: %s unexpected result: %s", path, res.Result)
 	}
 	p.mu.Lock()

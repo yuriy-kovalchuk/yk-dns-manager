@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - A reconfigure answering a status other than `ok` was treated as success.
 - Any user able to edit an HTTPRoute could delete arbitrary DNS host overrides by writing their names into the ownership annotation.
 - An HTTPRoute with a wildcard hostname (`*.example.com`) matched the domain map's wildcard key and created a wildcard override, so that one route answered for every name below the domain. Wildcard route hostnames are now ignored, with a warning Event on the route.
+- A write the appliance rejected failed as `unexpected result: failed`. The appliance answers HTTP 200 with a per-field reason in `validations`, and that reason is now part of the error and of the `DNSSyncFailed` Event — for example `host.domain: A domain is required.` for a single-label hostname.
 - In upsert mode a route could repoint a hand-made record for its hostname, and deleting the route deleted it.
 - Deleting one of two routes that share a hostname deleted the record the other still needed.
 - Enabling the NetworkPolicy blocked the API server on clusters that serve it on 6443.
