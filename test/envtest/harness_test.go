@@ -195,6 +195,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		Client:    mgr.GetClient(),
 		APIReader: mgr.GetAPIReader(),
 		Log:       log.WithName("httproute-controller"),
+		Recorder:  mgr.GetEventRecorder("yk-dns-manager"),
 		DomainMap: domainMap,
 		DNS:       provider,
 		Upsert:    opts.upsert,

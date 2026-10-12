@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -993,5 +995,50 @@ func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
 				t.Errorf("wantsUpdate = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHTTPRouteReconciler_EventsAndMetrics is audit D6: outcomes show up as
+// Events on the route and in the Prometheus counters.
+func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
+	createdBefore := testutil.ToFloat64(recordResults.WithLabelValues("created"))
+	conflictBefore := testutil.ToFloat64(recordResults.WithLabelValues("conflict"))
+
+	route := managedRoute("route", "", "app.my-domain1.com", "web.my-domain1.com")
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+		WithObjects(route).Build()
+	recorder := events.NewFakeRecorder(10)
+	r := &HTTPRouteReconciler{
+		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)), Recorder: recorder,
+		DomainMap: newTestDomainMap(t), DNS: &mockDNSProvider{conflictHosts: map[string]bool{"web.my-domain1.com": true}},
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	close(recorder.Events)
+	var got []string
+	for e := range recorder.Events {
+		got = append(got, e)
+	}
+	want := []string{
+		"Normal DNSRecordCreated app.my-domain1.com -> 10.0.8.100",
+		"Warning DNSConflict web.my-domain1.com already has a DNS record this controller does not manage; it is left alone",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("events = %q, want %q", got, want)
+	}
+
+	if d := testutil.ToFloat64(recordResults.WithLabelValues("created")) - createdBefore; d != 1 {
+		t.Errorf("created counter rose by %v, want 1", d)
+	}
+	if d := testutil.ToFloat64(recordResults.WithLabelValues("conflict")) - conflictBefore; d != 1 {
+		t.Errorf("conflict counter rose by %v, want 1", d)
 	}
 }

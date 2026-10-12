@@ -8,3 +8,7 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes"]
     verbs: ["get", "list", "watch", "update", "patch"]
+  # Events on HTTPRoutes report created, conflicting and failing DNS records.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]

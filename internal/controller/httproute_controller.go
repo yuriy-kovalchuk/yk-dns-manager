@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/config"
@@ -40,6 +42,8 @@ type HTTPRouteReconciler struct {
 	client.Client
 	APIReader client.Reader
 	Log       logr.Logger
+	// Recorder emits Kubernetes Events on the HTTPRoute. Nil disables them.
+	Recorder  events.EventRecorder
 	DomainMap *config.DomainMap
 	DNS       dns.Provider
 	Upsert    bool // when true, update existing records; when false, only create missing ones
@@ -108,6 +112,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	batch := r.DNS.Batch()
 	defer func() {
 		if cerr := batch.Commit(ctx); cerr != nil {
+			dnsErrors.WithLabelValues("publish").Inc()
 			r.Log.Error(cerr, "failed to publish staged DNS changes")
 			// Surfacing the failure is what makes controller-runtime requeue with
 			// backoff; logging it alone would leave the DNS change unpublished
@@ -115,6 +120,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err == nil {
 				err = cerr
 			}
+		}
+		if err != nil {
+			r.event(&route, corev1.EventTypeWarning, "DNSSyncFailed", "%v", err)
 		}
 	}()
 
@@ -141,7 +149,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Release records we own that the spec or the domain map no longer wants.
 	for _, oldHost := range owned {
 		if !slices.Contains(specHostnames, oldHost) {
-			if err := r.release(ctx, batch, req.NamespacedName, oldHost, owned); err != nil {
+			if err := r.release(ctx, batch, &route, oldHost, owned); err != nil {
 				return ctrl.Result{}, fmt.Errorf("deleting removed DNS record for %s: %w", oldHost, err)
 			}
 		}
@@ -169,17 +177,25 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			AdoptLegacy: slices.Contains(owned, hostname),
 		})
 		if err != nil {
+			dnsErrors.WithLabelValues("ensure").Inc()
 			return ctrl.Result{}, fmt.Errorf("ensuring DNS record for %s: %w", hostname, err)
 		}
+		recordResults.WithLabelValues(res.String()).Inc()
 		switch res {
-		case dns.Created, dns.Updated:
-			r.Log.Info(res.String()+" DNS record", "hostname", hostname, "ip", ip)
+		case dns.Created:
+			r.Log.Info("created DNS record", "hostname", hostname, "ip", ip)
+			r.event(&route, corev1.EventTypeNormal, "DNSRecordCreated", "%s -> %s", hostname, ip)
+		case dns.Updated:
+			r.Log.Info("updated DNS record", "hostname", hostname, "ip", ip)
+			r.event(&route, corev1.EventTypeNormal, "DNSRecordUpdated", "%s -> %s", hostname, ip)
 		case dns.Kept:
 			r.Log.Info("DNS record already exists with a different value and upsert mode is disabled — IPs may drift if domain map changes; consider enabling upsert mode to keep records in sync", "hostname", hostname, "ip", ip)
+			r.event(&route, corev1.EventTypeWarning, "DNSRecordDrift", "%s holds a different value than %s; upsert mode is off, so it is left alone", hostname, ip)
 		case dns.Unchanged:
 			r.Log.V(1).Info("DNS record already up to date", "hostname", hostname, "ip", ip)
 		case dns.Conflict:
 			r.Log.Info("DNS record exists but is not managed by this controller; leaving it alone", "hostname", hostname, "ip", ip)
+			r.event(&route, corev1.EventTypeWarning, "DNSConflict", "%s already has a DNS record this controller does not manage; it is left alone", hostname)
 			continue
 		}
 		managed = append(managed, hostname)
@@ -236,11 +252,12 @@ func (r *HTTPRouteReconciler) finalize(ctx context.Context, route *gatewayv1.HTT
 	batch := r.DNS.Batch()
 	var cleanupErr error
 	for _, hostname := range union(owned, specHostnames) {
-		if err := r.release(ctx, batch, key, hostname, owned); err != nil {
+		if err := r.release(ctx, batch, route, hostname, owned); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", hostname, err))
 		}
 	}
 	if err := batch.Commit(ctx); err != nil {
+		dnsErrors.WithLabelValues("publish").Inc()
 		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("publishing: %w", err))
 	}
 
@@ -248,9 +265,11 @@ func (r *HTTPRouteReconciler) finalize(ctx context.Context, route *gatewayv1.HTT
 		deadline := route.DeletionTimestamp.Add(r.CleanupGracePeriod)
 		if remaining := time.Until(deadline); remaining > 0 {
 			r.Log.Error(cleanupErr, "DNS cleanup failed; retrying before releasing the route", "giveUpAt", deadline)
+			r.event(route, corev1.EventTypeWarning, "DNSCleanupFailed", "retrying until %s: %v", deadline.Format(time.RFC3339), cleanupErr)
 			return ctrl.Result{RequeueAfter: min(remaining, cleanupRetryInterval)}, nil
 		}
 		r.Log.Error(cleanupErr, "DNS cleanup still failing after the grace period; releasing the route anyway, so DNS records may be left behind")
+		r.event(route, corev1.EventTypeWarning, "DNSCleanupAbandoned", "releasing the route after the grace period; DNS records may be left behind: %v", cleanupErr)
 	}
 
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -283,13 +302,13 @@ func accepted(route *gatewayv1.HTTPRoute) bool {
 // annotation says: the provider only deletes rows carrying its ownership
 // marker. A record written before ownership was marked is removed only for a
 // name the route recorded owning and the domain map covers.
-func (r *HTTPRouteReconciler) release(ctx context.Context, batch dns.Batch, self types.NamespacedName, hostname string, owned []string) error {
+func (r *HTTPRouteReconciler) release(ctx context.Context, batch dns.Batch, route *gatewayv1.HTTPRoute, hostname string, owned []string) error {
 	var routes gatewayv1.HTTPRouteList
 	if err := r.List(ctx, &routes, client.MatchingFields{hostnameIndex: hostname}); err != nil {
 		return fmt.Errorf("listing routes that claim %s: %w", hostname, err)
 	}
 	for _, other := range routes.Items {
-		if (other.Namespace == self.Namespace && other.Name == self.Name) || !other.DeletionTimestamp.IsZero() {
+		if (other.Namespace == route.Namespace && other.Name == route.Name) || !other.DeletionTimestamp.IsZero() {
 			continue
 		}
 		r.Log.Info("not deleting DNS record still claimed by another route", "hostname", hostname,
@@ -299,10 +318,20 @@ func (r *HTTPRouteReconciler) release(ctx context.Context, batch dns.Batch, self
 
 	_, mapped := r.DomainMap.LookupIP(hostname)
 	if err := batch.Remove(ctx, hostname, "A", mapped && slices.Contains(owned, hostname)); err != nil {
+		dnsErrors.WithLabelValues("release").Inc()
 		return err
 	}
+	recordResults.WithLabelValues("released").Inc()
 	r.Log.Info("released DNS record", "hostname", hostname)
+	r.event(route, corev1.EventTypeNormal, "DNSRecordReleased", "%s", hostname)
 	return nil
+}
+
+// event records a Kubernetes Event on the route, when a recorder is set.
+func (r *HTTPRouteReconciler) event(route *gatewayv1.HTTPRoute, eventtype, reason, note string, args ...any) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(route, nil, eventtype, reason, "ReconcileDNS", note, args...)
+	}
 }
 
 // indexHostnames is the hostnameIndex extractor.
