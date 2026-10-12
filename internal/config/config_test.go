@@ -138,6 +138,8 @@ func TestLoadDomainMapNormalizesValues(t *testing.T) {
 	}
 }
 
+// TestLookupIP is audit D2: an exact key matches only that name. It used to
+// cover every name below it as well.
 func TestLookupIP(t *testing.T) {
 	dm := &DomainMap{entries: map[string]string{
 		"my-domain1.com": "10.0.8.100",
@@ -149,13 +151,13 @@ func TestLookupIP(t *testing.T) {
 		wantIP   string
 		wantOK   bool
 	}{
-		{"app.my-domain1.com", "10.0.8.100", true},
-		{"deep.nested.my-domain1.com", "10.0.8.100", true},
 		{"my-domain1.com", "10.0.8.100", true},
-		{"service.my-domain2.it", "10.0.9.50", true},
-		{"app.my-domain1.com.", "10.0.8.100", true}, // trailing dot (FQDN)
+		{"my-domain1.com.", "10.0.8.100", true}, // trailing dot (FQDN)
+		{"My-Domain1.com", "10.0.8.100", true},  // case-insensitive
+		{"my-domain2.it", "10.0.9.50", true},
+		{"app.my-domain1.com", "", false}, // an exact key does not cover subdomains
+		{"deep.nested.my-domain1.com", "", false},
 		{"unknown.com", "", false},
-		{"notmydomain.com", "", false},
 	}
 
 	for _, tt := range tests {

@@ -57,13 +57,15 @@ podLabels: {}
 
 priorityClassName: ""
 
-# -- Domain-to-IP mapping. The controller uses this to resolve which IP
-# a DNS record should point to when an HTTPRoute hostname matches.
+# -- Domain-to-IP mapping: which IP the DNS record of a matching HTTPRoute
+# hostname points to. A "*.example.com" key covers every name below
+# example.com, at any depth; an exact key such as "example.com" covers only
+# that one name. An exact key wins, then the most specific wildcard.
 # Example:
 #   "*.example.com": "10.0.0.1"
 #   "special.example.com": "10.0.0.2"
 domainMap:
-  "example.com": "10.0.0.1"
+  "*.example.com": "10.0.0.1"
 
 # -- DNS provider configuration. The controller will not manage any DNS
 # records until a provider is configured.

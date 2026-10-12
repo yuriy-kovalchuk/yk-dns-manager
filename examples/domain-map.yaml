@@ -1,5 +1,7 @@
-# Maps base domains to load balancer IPs.
-# When an HTTPRoute hostname matches a subdomain (e.g. app.my-domain1.com),
-# the controller resolves the IP from the matching base domain (my-domain1.com).
-example.com: 10.0.0.1
-example.org: 10.0.0.2
+# Maps hostnames to load balancer IPs.
+#
+# "*.example.com" covers every name below example.com, at any depth
+# (app.example.com, a.b.example.com), but not example.com itself. An exact key
+# covers only that one name. An exact key wins, then the most specific wildcard.
+"*.example.com": 10.0.0.1
+"*.example.org": 10.0.0.2
