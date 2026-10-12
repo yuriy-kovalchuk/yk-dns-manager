@@ -113,7 +113,16 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// even after an error. A failed publish is returned so it is retried.
 	batch := r.DNS.Batch()
 	defer func() {
-		if commitErr := batch.Commit(ctx); commitErr != nil {
+		commitErr := batch.Commit(ctx)
+		var deferred *dns.PublishDeferred
+		if errors.As(commitErr, &deferred) {
+			// The provider held the publish back to coalesce a burst of changes
+			// into one. They stay owed, so coming back when the wait is over
+			// publishes them.
+			result.RequeueAfter = max(result.RequeueAfter, deferred.After)
+			return
+		}
+		if commitErr != nil {
 			dnsErrors.WithLabelValues("publish").Inc()
 			err = errors.Join(err, fmt.Errorf("publishing DNS changes: %w", commitErr))
 		}
@@ -201,8 +210,19 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 		}
 	}
 	if err := batch.Commit(ctx); err != nil {
-		dnsErrors.WithLabelValues("publish").Inc()
-		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("publishing: %w", err))
+		var deferred *dns.PublishDeferred
+		if errors.As(err, &deferred) {
+			// The provider is only holding the publish back to coalesce changes.
+			// The deletion is not published yet, so the finalizer stays and the
+			// route comes back when the publish is due.
+			if timeLeft := time.Until(route.DeletionTimestamp.Add(r.CleanupGracePeriod)); timeLeft > 0 {
+				return ctrl.Result{RequeueAfter: min(deferred.After, timeLeft)}, nil
+			}
+			cleanupErr = errors.Join(cleanupErr, errors.New("the deletion was never published before the grace period ran out"))
+		} else {
+			dnsErrors.WithLabelValues("publish").Inc()
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("publishing: %w", err))
+		}
 	}
 
 	if cleanupErr != nil {

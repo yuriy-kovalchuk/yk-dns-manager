@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,6 +42,7 @@ type mockDNSProvider struct {
 	adoptedRemovals []string // hostnames removed with adoptLegacy set
 	flushes         int
 	flushErr        error
+	deferPublish    time.Duration // >0: Commit holds the publish back this long
 	removeErr       error
 	known           map[string]string // hostname → value of records this mock created
 }
@@ -102,6 +104,9 @@ func (b mockBatch) Remove(_ context.Context, hostname, _ string, adoptLegacy boo
 func (b mockBatch) Commit(_ context.Context) error {
 	b.m.mu.Lock()
 	defer b.m.mu.Unlock()
+	if b.m.deferPublish > 0 {
+		return &dns.PublishDeferred{After: b.m.deferPublish}
+	}
 	b.m.flushes++
 	return b.m.flushErr
 }
@@ -907,6 +912,90 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 				t.Errorf("RequeueAfter = %s, want a retry within %s", res.RequeueAfter, cleanupRetryInterval)
 			}
 		})
+	}
+}
+
+// TestHTTPRouteReconciler_PublishHeldBackIsRequeued is audit M4: a provider
+// holding a publish back to coalesce changes is not a failure. The route comes
+// back when the publish is due, and still records what it manages.
+func TestHTTPRouteReconciler_PublishHeldBackIsRequeued(t *testing.T) {
+	route := managedRoute("route", "", "app.my-domain1.com")
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+		WithObjects(route).Build()
+	mock := &mockDNSProvider{deferPublish: 30 * time.Second}
+	r := &HTTPRouteReconciler{
+		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
+		DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("a held-back publish is not a failure, got %v", err)
+	}
+	if res.RequeueAfter != 30*time.Second {
+		t.Errorf("RequeueAfter = %s, want the route back when the publish is due", res.RequeueAfter)
+	}
+
+	var got gatewayv1.HTTPRoute
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "route", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[managedHostnamesAnnotation] != `["app.my-domain1.com"]` {
+		t.Errorf("annotation = %q, the route must still record what it manages", got.Annotations[managedHostnamesAnnotation])
+	}
+}
+
+// TestHTTPRouteReconciler_DeletionWaitsForAHeldBackPublish: a deletion is not
+// published until the provider lets it out, so the finalizer stays until the
+// deletion actually goes out.
+func TestHTTPRouteReconciler_DeletionWaitsForAHeldBackPublish(t *testing.T) {
+	deleted := metav1.NewTime(time.Now())
+	route := managedRoute("route", `["app.my-domain1.com"]`, "app.my-domain1.com")
+	route.DeletionTimestamp = &deleted
+
+	scheme := runtime.NewScheme()
+	if err := gatewayv1.Install(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
+		WithObjects(route).Build()
+	mock := &mockDNSProvider{deferPublish: 30 * time.Second}
+	r := &HTTPRouteReconciler{
+		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
+		DomainMap: newTestDomainMap(t), DNS: mock, CleanupGracePeriod: 5 * time.Minute,
+	}
+	key := types.NamespacedName{Name: "route", Namespace: "default"}
+	req := ctrl.Request{NamespacedName: key}
+
+	res, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > 30*time.Second {
+		t.Errorf("RequeueAfter = %s, want the route back when the publish is due", res.RequeueAfter)
+	}
+	var got gatewayv1.HTTPRoute
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got.Finalizers, finalizerName) {
+		t.Fatal("the route was released while its deletion is still unpublished")
+	}
+
+	// Once the hold is over, the deletion goes out and the route is released.
+	mock.deferPublish = 0
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile after the hold: %v", err)
+	}
+	if err := c.Get(context.Background(), key, &got); !apierrors.IsNotFound(err) {
+		t.Errorf("route still exists (err=%v), want it released once the deletion is published", err)
 	}
 }
 

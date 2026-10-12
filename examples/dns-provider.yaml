@@ -9,3 +9,7 @@ settings:
   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
   api_key: "${OPNSENSE_API_KEY}"
   api_secret: "${OPNSENSE_API_SECRET}"
+  # Reconfiguring Unbound restarts the resolver, so a burst of route changes
+  # costs one reconfigure instead of one per change. Empty or "0" publishes on
+  # every change.
+  publish_interval: "10s"

@@ -51,7 +51,7 @@ func newProviders() []providerFactory {
 	return []providerFactory{
 		{
 			name:     "opnsense",
-			settings: []string{"base_url", "api_key", "api_secret", "ca_file", "skip_tls_verify", "allow_insecure_http", "default_ttl"},
+			settings: []string{"base_url", "api_key", "api_secret", "ca_file", "skip_tls_verify", "allow_insecure_http", "default_ttl", "publish_interval"},
 			fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
 				return opnsense.New(log, settings)
 			},
