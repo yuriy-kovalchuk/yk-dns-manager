@@ -118,6 +118,8 @@ func gatewayCRDDir() (string, error) {
 type harnessOptions struct {
 	domainMap string
 	upsert    bool
+	// requireAccepted turns on --require-accepted-routes.
+	requireAccepted bool
 	// cleanupGrace defaults to 30s, long enough for any test that waits for
 	// a failing cleanup to recover.
 	cleanupGrace time.Duration
@@ -197,6 +199,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		DNS:       provider,
 		Upsert:    opts.upsert,
 
+		RequireAccepted:    opts.requireAccepted,
 		CleanupGracePeriod: cmp.Or(opts.cleanupGrace, 30*time.Second),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {

@@ -50,6 +50,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --zap-log-level={{ .Values.logLevel }}
+            - --require-accepted-routes={{ .Values.requireAcceptedRoutes }}
           env:
             - name: DOMAIN_MAP_PATH
               value: /etc/yk-dns-manager/domain-map/domain-map.yaml

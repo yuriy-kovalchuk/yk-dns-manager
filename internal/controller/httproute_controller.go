@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,9 @@ type HTTPRouteReconciler struct {
 	DomainMap *config.DomainMap
 	DNS       dns.Provider
 	Upsert    bool // when true, update existing records; when false, only create missing ones
+	// RequireAccepted limits DNS to routes that at least one parent Gateway
+	// has accepted. Off, any route with a matching hostname gets DNS.
+	RequireAccepted bool
 	// CleanupGracePeriod is how long after a route's deletion was requested a
 	// failing DNS cleanup is retried before the finalizer is removed anyway.
 	CleanupGracePeriod time.Duration
@@ -74,6 +78,14 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		} else {
 			r.Log.V(1).Info("hostname not in domain map, skipping", "hostname", h)
 		}
+	}
+
+	if r.RequireAccepted && !accepted(&route) && len(specHostnames) > 0 {
+		// An unaccepted route wants no DNS. Records it owns from while it was
+		// accepted are released below like any other hostname that left the
+		// spec.
+		r.Log.V(1).Info("route is not accepted by any parent; not publishing DNS for it", "name", req.NamespacedName)
+		specHostnames = nil
 	}
 
 	// Deletion is handled before any early return: a route carrying our
@@ -255,6 +267,16 @@ func (r *HTTPRouteReconciler) finalize(ctx context.Context, route *gatewayv1.HTT
 	return ctrl.Result{}, nil
 }
 
+// accepted reports whether at least one parent has accepted the route.
+func accepted(route *gatewayv1.HTTPRoute) bool {
+	for _, parent := range route.Status.Parents {
+		if meta.IsStatusConditionTrue(parent.Conditions, string(gatewayv1.RouteConditionAccepted)) {
+			return true
+		}
+	}
+	return false
+}
+
 // release removes the managed DNS record for hostname, unless another live
 // route still claims the name.
 //
@@ -324,6 +346,14 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				// Also reconcile if finalizers have changed (e.g. our finalizer was added).
 				if len(e.ObjectOld.GetFinalizers()) != len(e.ObjectNew.GetFinalizers()) {
 					return true
+				}
+				// Acceptance lives in status, which does not bump the generation.
+				if r.RequireAccepted {
+					oldRoute, okOld := e.ObjectOld.(*gatewayv1.HTTPRoute)
+					newRoute, okNew := e.ObjectNew.(*gatewayv1.HTTPRoute)
+					if okOld && okNew && accepted(oldRoute) != accepted(newRoute) {
+						return true
+					}
 				}
 				// Ignore status-only updates.
 				return false

@@ -2,7 +2,6 @@ package envtest
 
 import (
 	"net/http"
-	"os"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -12,20 +11,9 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-// The tests in this file pin findings from the 2026-10-12 audit that are
-// not fixed yet. Each one fails on the current code and is skipped through
-// pending; the change that fixes a finding deletes its pending call.
-
-// pending skips a test that pins behaviour from the audit
-// (2026-10-12) that is not fixed yet. Each one fails on the
-// current code. The fix removes the call; ENVTEST_RUN_PENDING=1 runs them
-// anyway, to watch them fail or to check a fix in progress.
-func pending(t *testing.T, finding string) {
-	t.Helper()
-	if os.Getenv("ENVTEST_RUN_PENDING") != "1" {
-		t.Skipf("pending: %s (set ENVTEST_RUN_PENDING=1 to run)", finding)
-	}
-}
+// The tests in this file are regression tests for findings from the
+// 2026-10-12 audit (IDs such as S1 and B2). Each one failed on the code the
+// audit reviewed.
 
 // unaccepted leaves the route without an Accepted parent, as if no Gateway
 // admitted it.
@@ -214,12 +202,11 @@ func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 	}
 }
 
-// TestUnacceptedRouteGetsNoRecord: a route no Gateway admitted still gets DNS,
-// which lets any namespace claim names under the domain map.
+// TestUnacceptedRouteGetsNoRecord is audit S3: with --require-accepted-routes
+// a route no Gateway admitted gets no DNS, so a namespace the gateway owner
+// locked out cannot claim names under the domain map.
 func TestUnacceptedRouteGetsNoRecord(t *testing.T) {
-	pending(t, "audit S3, roadmap phase 4")
-
-	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
+	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, requireAccepted: true})
 	h.createRoute("app", []string{"app.example.com"}, unaccepted())
 
 	h.consistently("no finalizer and no appliance writes", func() bool {
