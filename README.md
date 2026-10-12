@@ -15,18 +15,27 @@ kubectl create secret generic dns-provider-credentials \
   --from-literal=OPNSENSE_API_SECRET=your-secret
 ```
 
-Install locally from the `charts/` directory:
+Point the chart at your appliance and your load balancer in a values file:
+
+```yaml
+# my-values.yaml
+domainMap:
+  "*.example.com": "10.0.0.100"                    # your load balancer IP
+dnsProvider:
+  settings:
+    base_url: "https://opnsense.example.com/api"   # your appliance
+  existingSecret: dns-provider-credentials
+```
+
+The chart's defaults already reference the credentials as `${OPNSENSE_API_KEY}` and `${OPNSENSE_API_SECRET}`, which `existingSecret` supplies. Install from the `charts/` directory:
 
 ```bash
 helm install yk-dns-manager charts/yk-dns-manager \
   --namespace yk-dns-manager --create-namespace \
-  --set dnsProvider.provider=opnsense \
-  --set 'dnsProvider.settings.api_key=${OPNSENSE_API_KEY}' \
-  --set 'dnsProvider.settings.api_secret=${OPNSENSE_API_SECRET}' \
-  --set dnsProvider.existingSecret=dns-provider-credentials
+  -f my-values.yaml
 ```
 
-See [docs/deployment.md](docs/deployment.md) for OCI registry deployment.
+For a self-signed appliance certificate, pinning its CA, and installing from the OCI registry, see [docs/deployment.md](docs/deployment.md).
 
 ## Quickstart
 
@@ -58,7 +67,6 @@ The controller watches for the hostname `app.example.com`, looks up its IP from 
 Define which IPs hostnames should resolve to:
 
 ```yaml
-# examples/domain-map.yaml
 "*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
 "special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
 homelab.local: 10.0.0.2              # the bare domain needs its own entry
@@ -104,7 +112,7 @@ settings:
 ```
 
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
-- `upsert: true` updates existing records on every reconcile; when `false`, only creates missing records.
+- `upsert: true` also corrects a managed record that holds a different IP; when `false`, existing records are left alone and only missing ones are created. Either way nothing is written when a record is already correct.
 - Settings support `${ENV_VAR}` expansion for credential injection; a reference to an unset variable fails startup, and a `$` anywhere else is kept as is. Unknown fields and unknown `settings` keys also fail startup. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
 - `skip_tls_verify` and `allow_insecure_http` are booleans (`true`/`false`, also `True`, `1`, `0`); any other value fails startup.
 - `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for the local fake.
@@ -135,10 +143,13 @@ Key values:
 |---|---|
 | `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
 | `dnsProvider.provider` | DNS provider name |
+| `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [DNS Provider Config](#dns-provider-config) |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
+| `dnsProvider.caConfigMap` | ConfigMap with the appliance CA under the key `ca.pem`, mounted at `/etc/yk-dns-manager/ca` |
 | `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |
 | `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
+| `networkPolicy.enabled` | Restrict the pod's traffic; egress ports and CIDRs under `networkPolicy.apiServer` and `networkPolicy.provider` |
 
 ## Observability
 
@@ -148,9 +159,10 @@ Key values:
 ## Testing
 
 ```bash
-make test              # all tests
+make test              # all tests (unit + integration + envtest)
 make test-unit         # unit tests only
-make test-integration  # integration tests
+make test-integration  # provider against the fake appliance, incl. the conformance suite
+make test-envtest      # the real controller against an envtest API server
 ```
 
 See [docs/testing.md](docs/testing.md) for details.

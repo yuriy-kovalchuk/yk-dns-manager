@@ -20,13 +20,18 @@
 ### Package Layout
 
 ```
-cmd/yk-dns-manager/main.go          # Entrypoint: flag parse, provider selection, manager bootstrap
-internal/controller/                # HTTPRoute reconciler (the only reconciler)
-internal/dns/                       # Provider interface + helpers
+cmd/yk-dns-manager/main.go          # Entrypoint: flags, provider selection, manager bootstrap
+internal/controller/                # HTTPRoute reconciler (the only reconciler) and its metrics
+internal/dns/provider.go            # Provider and Batch interfaces
   opnsense/opnsense.go              # OPNsense Unbound implementation
+  dnstest/                          # Conformance suite every provider runs
 internal/config/                    # DomainMap + ProviderConfig loaders
+internal/testenv/                   # In-memory OPNsense fake (tests and `make fake-opnsense`)
 internal/version/version.go         # Version, Commit, BuildDate (injected via ldflags)
+test/integration/                   # Provider against the fake over HTTP, incl. conformance
+test/envtest/                       # Real manager against an envtest API server
 charts/yk-dns-manager/              # Helm chart for deployment
+hack/                               # kind config, local profiles, the fake's entrypoint
 ```
 
 The controller is a **single-reconciler** design: one `HTTPRouteReconciler` handles all HTTPRoute resources. Domain separation between handler/service/repository layers is unnecessary — the reconciler itself is thin enough (parsing, delegation to DNS provider) that a monolithic structure with clean boundaries suffices.
@@ -90,7 +95,7 @@ At startup in `main()`, the controller looks up the factory named by the provide
 - Only one provider is active at a time.
 - Adding a new provider is as simple as returning a factory from `newProviders()`.
 
-After initialization the controller runs `HealthCheck()` once. A failure is logged but does not stop startup: every reconcile reports the same failure and retries with backoff, so a provider that comes back recovers without a restart.
+After initialization the controller runs `HealthCheck()` once, with a 10s deadline. A failure is logged but does not stop startup: every reconcile reports the same failure and retries with backoff, so a provider that comes back recovers without a restart.
 
 ## Boundary Rules
 
@@ -164,18 +169,17 @@ func TestConformance(t *testing.T) {
 }
 ```
 
-**2. Register it in `main()`:**
+**2. Register it in `newProviders()` in `cmd/yk-dns-manager/main.go`**, listing every settings key it understands; any other key fails startup:
 ```go
-func newProviders() []providerFactory {
-    return []providerFactory{
-        {"opnsense", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-            return opnsense.New(log, settings)
-        }},
-        {"myprovider", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-            return myprovider.New(log, settings)
-        }},
-    }
-}
+{
+    name:     "myprovider",
+    settings: []string{"base_url", "api_token"},
+    fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
+        return myprovider.New(log, settings)
+    },
+},
 ```
+
+If it needs secrets in its settings, add their key names to the literal-credential check in `charts/yk-dns-manager/templates/configmap-dns-provider.yaml`, so the chart refuses them written in plain text.
 
 **3. Set `provider: myprovider` in the DNS provider config.**

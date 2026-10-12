@@ -72,7 +72,7 @@ domainMap:
 dnsProvider:
   # -- Provider name (e.g. "opnsense"). Must match a registered provider.
   provider: "opnsense"
-  # -- If true, update existing records on every reconcile.
+  # -- If true, also correct a managed record that holds a different IP.
   # If false, only create records that don't already exist.
   upsert: false
   # -- Provider-specific connection settings. Each provider defines its own keys.
