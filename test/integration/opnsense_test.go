@@ -158,16 +158,34 @@ func TestEnsureUnchangedWritesNothing(t *testing.T) {
 }
 
 func TestEnsureSurfacesValidationFailure(t *testing.T) {
-	fake, url := newFake(t)
-	p := newProvider(t, url)
-
-	// The appliance answers HTTP 200 with result "failed", so a provider that
-	// only checked the status code would report success.
-	if _, err := p.Batch().Ensure(context.Background(), record("app.example.com", "not-an-ip"), dns.EnsureOptions{}); err == nil {
-		t.Fatal("expected Ensure to fail for a row the appliance rejects")
+	cases := []struct {
+		name     string
+		fqdn, ip string
+		want     string
+	}{
+		{"bad address", "app.example.com", "not-an-ip", "host.server: A valid IP address must be specified."},
+		// A single-label hostname has no domain to split off and the appliance
+		// requires one; the error used to say only "failed".
+		{"no domain", "app", "10.0.0.1", "host.domain: A domain is required."},
 	}
-	if n := len(fake.Snapshot()); n != 0 {
-		t.Errorf("rejected row was stored: %d rows", n)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, url := newFake(t)
+			p := newProvider(t, url)
+
+			// The appliance answers HTTP 200 with result "failed", so a provider
+			// that only checked the status code would report success.
+			_, err := p.Batch().Ensure(context.Background(), record(tc.fqdn, tc.ip), dns.EnsureOptions{})
+			if err == nil {
+				t.Fatal("expected Ensure to fail for a row the appliance rejects")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to carry the appliance's complaint (%s)", err, tc.want)
+			}
+			if n := len(fake.Snapshot()); n != 0 {
+				t.Errorf("rejected row was stored: %d rows", n)
+			}
+		})
 	}
 }
 
