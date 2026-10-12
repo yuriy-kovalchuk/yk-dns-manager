@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -39,6 +40,7 @@ type mockDNSProvider struct {
 	flushes         int
 	flushErr        error
 	removeErr       error
+	known           map[string]string // hostname → value of records this mock created
 }
 
 func (m *mockDNSProvider) HealthCheck(_ context.Context) error {
@@ -61,13 +63,22 @@ func (b mockBatch) Ensure(_ context.Context, record dns.Record, opts dns.EnsureO
 	if b.m.conflictHosts[record.Hostname] {
 		return dns.Conflict, nil
 	}
+	if b.m.known == nil {
+		b.m.known = map[string]string{}
+	}
+	value, ok := b.m.known[record.Hostname]
+	if ok && value == record.Value {
+		return dns.Unchanged, nil
+	}
 	if opts.Overwrite {
+		b.m.known[record.Hostname] = record.Value
 		b.m.upsertedRecords = append(b.m.upsertedRecords, record)
 		return dns.Updated, nil
 	}
-	if b.m.existingHosts[record.Hostname] {
+	if ok || b.m.existingHosts[record.Hostname] {
 		return dns.Kept, nil
 	}
+	b.m.known[record.Hostname] = record.Value
 	b.m.createdRecords = append(b.m.createdRecords, record)
 	return dns.Created, nil
 }
@@ -79,6 +90,7 @@ func (b mockBatch) Remove(_ context.Context, hostname, _ string, adoptLegacy boo
 		return b.m.removeErr
 	}
 	b.m.deletedHosts = append(b.m.deletedHosts, hostname)
+	delete(b.m.known, hostname)
 	if adoptLegacy {
 		b.m.adoptedRemovals = append(b.m.adoptedRemovals, hostname)
 	}
@@ -913,6 +925,72 @@ func TestHTTPRouteReconciler_RequireAccepted(t *testing.T) {
 			}
 			if ensured := len(mock.upsertedRecords) > 0; ensured != tc.wantEnsured {
 				t.Errorf("ensured a record = %v, want %v", ensured, tc.wantEnsured)
+			}
+		})
+	}
+}
+
+// TestHTTPRouteReconciler_OneReconcilePublishes is audit D7: the reconcile
+// that adds the finalizer also creates the records, instead of relying on the
+// finalizer update coming back as a second event.
+func TestHTTPRouteReconciler_OneReconcilePublishes(t *testing.T) {
+	route := managedRoute("route", "", "app.my-domain1.com")
+	route.Finalizers = nil
+
+	mock := &mockDNSProvider{}
+	r := reconcileOnce(t, mock, "route", route)
+
+	if len(mock.upsertedRecords) != 1 {
+		t.Fatalf("ensured %d records in the first reconcile, want 1", len(mock.upsertedRecords))
+	}
+	var got gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "route", Namespace: "default"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(got.Finalizers, finalizerName) {
+		t.Error("finalizer not added")
+	}
+	if got.Annotations[managedHostnamesAnnotation] != `["app.my-domain1.com"]` {
+		t.Errorf("annotation = %q", got.Annotations[managedHostnamesAnnotation])
+	}
+}
+
+// TestHTTPRouteReconciler_WantsUpdate is audit D8: which updates trigger a
+// reconcile.
+func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
+	base := managedRoute("route", "", "app.my-domain1.com")
+	base.Generation = 1
+	with := func(mutate func(*gatewayv1.HTTPRoute)) *gatewayv1.HTTPRoute {
+		r := base.DeepCopy()
+		mutate(r)
+		return r
+	}
+	acceptedParent := []gatewayv1.RouteParentStatus{{Conditions: []metav1.Condition{{
+		Type: string(gatewayv1.RouteConditionAccepted), Status: metav1.ConditionTrue,
+	}}}}
+
+	cases := []struct {
+		name            string
+		updated         *gatewayv1.HTTPRoute
+		requireAccepted bool
+		want            bool
+	}{
+		{"spec change", with(func(r *gatewayv1.HTTPRoute) { r.Generation = 2 }), false, true},
+		{"our finalizer removed", with(func(r *gatewayv1.HTTPRoute) { r.Finalizers = nil }), false, true},
+		{"another finalizer swapped in", with(func(r *gatewayv1.HTTPRoute) {
+			r.Finalizers = []string{finalizerName, "other.io/finalizer"}
+		}), false, false},
+		{"annotation only", with(func(r *gatewayv1.HTTPRoute) {
+			r.Annotations = map[string]string{managedHostnamesAnnotation: `["x"]`}
+		}), false, false},
+		{"acceptance flips, not required", with(func(r *gatewayv1.HTTPRoute) { r.Status.Parents = acceptedParent }), false, false},
+		{"acceptance flips, required", with(func(r *gatewayv1.HTTPRoute) { r.Status.Parents = acceptedParent }), true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &HTTPRouteReconciler{RequireAccepted: tc.requireAccepted}
+			if got := r.wantsUpdate(event.UpdateEvent{ObjectOld: base, ObjectNew: tc.updated}); got != tc.want {
+				t.Errorf("wantsUpdate = %v, want %v", got, tc.want)
 			}
 		})
 	}

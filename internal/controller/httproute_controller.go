@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -55,8 +56,10 @@ const cleanupRetryInterval = 10 * time.Second
 
 // Reconcile implements controller-runtime's Reconciler interface.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	// Reads come from the informer cache. Writes that could race another
+	// writer re-read through APIReader inside their conflict retry.
 	var route gatewayv1.HTTPRoute
-	if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
+	if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -130,7 +133,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
 		}
-		return ctrl.Result{}, nil
+		// The finalizer is persisted before any record exists, so a deletion
+		// can never miss one. Carry on in the same reconcile rather than
+		// waiting for the finalizer update to come back as an event.
 	}
 
 	// Release records we own that the spec or the domain map no longer wants.
@@ -183,19 +188,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Record the hostnames this route actually manages. A name that hit a
 	// conflict is left out, so the annotation can never be used to adopt a
 	// legacy record that belongs to another route.
+	// A merge patch carries only this one annotation, so it cannot conflict
+	// with or clobber anyone else's change to the route.
 	if !slices.Equal(owned, managed) {
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			if err := r.APIReader.Get(ctx, req.NamespacedName, &route); err != nil {
-				return err
-			}
-			if route.Annotations == nil {
-				route.Annotations = make(map[string]string)
-			}
-			data, _ := json.Marshal(managed)
-			route.Annotations[managedHostnamesAnnotation] = string(data)
-			return r.Update(ctx, &route)
-		})
-		if err != nil {
+		data, _ := json.Marshal(managed)
+		patch := client.RawPatch(types.MergePatchType,
+			fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`, managedHostnamesAnnotation, data))
+		if err := r.Patch(ctx, &route, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update managed-hostnames annotation: %w", err)
 		}
 	}
@@ -336,28 +335,30 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("indexing routes by hostname: %w", err)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1.HTTPRoute{}).
-		WithEventFilter(predicate.Funcs{
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Reconcile if the Spec (Generation) has changed.
-				if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
-					return true
-				}
-				// Also reconcile if finalizers have changed (e.g. our finalizer was added).
-				if len(e.ObjectOld.GetFinalizers()) != len(e.ObjectNew.GetFinalizers()) {
-					return true
-				}
-				// Acceptance lives in status, which does not bump the generation.
-				if r.RequireAccepted {
-					oldRoute, okOld := e.ObjectOld.(*gatewayv1.HTTPRoute)
-					newRoute, okNew := e.ObjectNew.(*gatewayv1.HTTPRoute)
-					if okOld && okNew && accepted(oldRoute) != accepted(newRoute) {
-						return true
-					}
-				}
-				// Ignore status-only updates.
-				return false
-			},
-		}).
+		For(&gatewayv1.HTTPRoute{}, builder.WithPredicates(predicate.Funcs{UpdateFunc: r.wantsUpdate})).
 		Complete(r)
+}
+
+// wantsUpdate filters HTTPRoute updates down to the ones that can change
+// what the controller publishes. Status-only and metadata-only updates,
+// including the controller's own annotation patch, are dropped.
+func (r *HTTPRouteReconciler) wantsUpdate(e event.UpdateEvent) bool {
+	oldRoute, okOld := e.ObjectOld.(*gatewayv1.HTTPRoute)
+	newRoute, okNew := e.ObjectNew.(*gatewayv1.HTTPRoute)
+	if !okOld || !okNew {
+		return false
+	}
+	switch {
+	case oldRoute.Generation != newRoute.Generation:
+		// The spec changed, or deletion was requested.
+		return true
+	case controllerutil.ContainsFinalizer(oldRoute, finalizerName) != controllerutil.ContainsFinalizer(newRoute, finalizerName):
+		// Our finalizer came or went, for instance removed by hand.
+		return true
+	case r.RequireAccepted && accepted(oldRoute) != accepted(newRoute):
+		// Acceptance lives in status, which does not bump the generation.
+		return true
+	default:
+		return false
+	}
 }
