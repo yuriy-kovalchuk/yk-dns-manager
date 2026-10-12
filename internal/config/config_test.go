@@ -82,6 +82,27 @@ func TestLoadDomainMapValidation(t *testing.T) {
 			content:  "\"\": \"10.0.0.1\"\n",
 			contains: "empty domain key",
 		},
+		{
+			name:     "key with a space",
+			content:  "\"my domain.com\": 10.0.0.1\n",
+			contains: "not a valid domain name",
+		},
+		{
+			name:     "wildcard in the middle",
+			content:  "\"app.*.example.com\": 10.0.0.1\n",
+			contains: "not a valid domain name",
+		},
+		{
+			name:     "label starting with a hyphen",
+			content:  "\"-app.example.com\": 10.0.0.1\n",
+			contains: "not a valid domain name",
+		},
+		{
+			// Both normalize to example.com, so one would silently win.
+			name:     "duplicate once normalized",
+			content:  "\"Example.com\": 10.0.0.1\n\"example.com.\": 10.0.0.2\n",
+			contains: "duplicates another entry",
+		},
 	}
 
 	for _, tc := range cases {
@@ -212,5 +233,26 @@ func TestLookupIPWildcardWithBaseDomain(t *testing.T) {
 				t.Errorf("LookupIP(%q): got ip=%q, want %q", tt.hostname, ip, tt.wantIP)
 			}
 		})
+	}
+}
+
+// TestLoadDomainMapNormalizesKeys is audit B12: keys are compared with route
+// hostnames, which are lowercase without a trailing dot, so a key written
+// differently used to never match.
+func TestLoadDomainMapNormalizesKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domain-map.yaml")
+	content := "\" App.Example.COM. \": 10.0.0.1\n\"*.Lab.Example.com\": 10.0.0.2\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dm, err := LoadDomainMap(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ip, ok := dm.LookupIP("app.example.com"); !ok || ip != "10.0.0.1" {
+		t.Errorf("app.example.com = %q, %v; want 10.0.0.1", ip, ok)
+	}
+	if ip, ok := dm.LookupIP("x.lab.example.com"); !ok || ip != "10.0.0.2" {
+		t.Errorf("x.lab.example.com = %q, %v; want 10.0.0.2", ip, ok)
 	}
 }
