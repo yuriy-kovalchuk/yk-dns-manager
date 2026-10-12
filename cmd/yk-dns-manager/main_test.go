@@ -119,7 +119,7 @@ type stubProvider struct {
 func TestSelectProviderPicksByName(t *testing.T) {
 	var called []string
 	factory := func(name string) providerFactory {
-		return providerFactory{name, func(logr.Logger, map[string]string) (dns.Provider, error) {
+		return providerFactory{name: name, fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
 			called = append(called, name)
 			return stubProvider{}, nil
 		}}
@@ -141,7 +141,7 @@ func TestSelectProviderPicksByName(t *testing.T) {
 // accepted the settings.
 func TestSelectProviderRejectsUnknownName(t *testing.T) {
 	factories := []providerFactory{
-		{"opnsense", func(logr.Logger, map[string]string) (dns.Provider, error) {
+		{name: "opnsense", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
 			return stubProvider{}, nil
 		}},
 	}
@@ -162,7 +162,7 @@ func TestSelectProviderRejectsUnknownName(t *testing.T) {
 // info level while startup failed with a generic "no DNS provider" message.
 func TestSelectProviderReturnsInitError(t *testing.T) {
 	factories := []providerFactory{
-		{"opnsense", func(logr.Logger, map[string]string) (dns.Provider, error) {
+		{name: "opnsense", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
 			return nil, errors.New("missing required setting 'api_key'")
 		}},
 	}
@@ -179,7 +179,7 @@ func TestSelectProviderReturnsInitError(t *testing.T) {
 // instead of reporting the configuration error.
 func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
 	factories := []providerFactory{
-		{"typednil", func(logr.Logger, map[string]string) (dns.Provider, error) {
+		{name: "typednil", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
 			var p *stubProvider
 			return p, errors.New("missing base_url")
 		}},
@@ -191,5 +191,26 @@ func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
 	}
 	if p != nil {
 		t.Error("a typed-nil provider was returned; callers guard with == nil")
+	}
+}
+
+// TestSelectProviderRejectsUnknownSettings is audit D11: a misspelled settings
+// key used to be ignored, so the setting silently had no effect.
+func TestSelectProviderRejectsUnknownSettings(t *testing.T) {
+	factories := []providerFactory{{
+		name:     "opnsense",
+		settings: []string{"base_url", "skip_tls_verify"},
+		fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
+			return stubProvider{}, nil
+		},
+	}}
+
+	_, err := selectProvider(logr.Discard(), factories, "opnsense", map[string]string{"base_url": "x", "sip_tls_verify": "true"})
+	if err == nil || !strings.Contains(err.Error(), "sip_tls_verify") {
+		t.Fatalf("error = %v, want it to name the unknown key", err)
+	}
+
+	if _, err := selectProvider(logr.Discard(), factories, "opnsense", map[string]string{"base_url": "x"}); err != nil {
+		t.Fatalf("known settings rejected: %v", err)
 	}
 }

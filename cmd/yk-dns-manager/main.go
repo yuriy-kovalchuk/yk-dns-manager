@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,7 +36,11 @@ import (
 // providerFactory is a single provider candidate for initialization.
 type providerFactory struct {
 	name string
-	fn   func(logr.Logger, map[string]string) (dns.Provider, error)
+	// settings lists every settings key the provider understands. Any other
+	// key fails startup, so a typo such as "sip_tls_verify" is caught instead
+	// of being silently ignored. Nil skips the check.
+	settings []string
+	fn       func(logr.Logger, map[string]string) (dns.Provider, error)
 }
 
 // newProviders returns the available DNS providers. The provider config's
@@ -43,14 +48,14 @@ type providerFactory struct {
 // added.
 func newProviders() []providerFactory {
 	return []providerFactory{
-		{"opnsense", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-			return opnsense.New(log, settings)
-		}},
+		{
+			name:     "opnsense",
+			settings: []string{"base_url", "api_key", "api_secret", "ca_file", "skip_tls_verify", "allow_insecure_http", "default_ttl"},
+			fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
+				return opnsense.New(log, settings)
+			},
+		},
 	}
-	// Example for adding a new provider:
-	//   {"pihole", func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-	//       return pihole.New(log, settings)
-	//   }},
 }
 
 // selectProvider initializes the provider the config names. It does not fall
@@ -68,6 +73,19 @@ func selectProvider(log logr.Logger, factories []providerFactory, name string, s
 		if pf.name != name {
 			known = append(known, pf.name)
 			continue
+		}
+		if pf.settings != nil {
+			var unknown []string
+			for key := range settings {
+				if !slices.Contains(pf.settings, key) {
+					unknown = append(unknown, key)
+				}
+			}
+			if len(unknown) > 0 {
+				sort.Strings(unknown)
+				return nil, fmt.Errorf("DNS provider %q: unknown settings %s; known settings: %s",
+					name, strings.Join(unknown, ", "), strings.Join(pf.settings, ", "))
+			}
 		}
 		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
 		if err != nil {

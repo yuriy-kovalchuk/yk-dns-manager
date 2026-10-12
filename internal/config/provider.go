@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -35,8 +38,12 @@ func LoadProviderConfigFromPath(path string) (*ProviderConfig, error) {
 		return nil, fmt.Errorf("reading provider config file: %w", err)
 	}
 
+	// Unknown fields are an error, so a typo such as "upsrt: true" fails
+	// startup instead of leaving the default in place.
 	var cfg ProviderConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parsing provider config file: %w", err)
 	}
 
