@@ -61,37 +61,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// owned: what the route managed so far. A corrupt annotation counts as
-	// empty, because guessing could delete the wrong records.
-	var owned []string
-	if value := route.Annotations[managedHostnamesAnnotation]; value != "" {
-		if err := json.Unmarshal([]byte(value), &owned); err != nil {
-			r.Log.Error(err, "failed to parse managed-hostnames annotation, treating route as owning nothing", "annotation", value)
-			owned = nil
-		}
-	}
-
-	// wanted: the spec hostnames the domain map covers, or none for a route no
-	// Gateway accepted when that is required.
-	var wanted []string
-	if r.RequireAccepted && !isAccepted(route) {
-		r.Log.V(1).Info("route is not accepted by any parent; not publishing DNS for it", "route", req.NamespacedName)
-	} else {
-		for _, h := range route.Spec.Hostnames {
-			if _, ok := r.DomainMap.LookupIP(string(h)); !ok {
-				continue
-			}
-			// A wildcard route hostname matches the domain map's wildcard key and
-			// would become a wildcard record on the backend, answering for every
-			// name below the domain, including names other routes serve. Only
-			// exact names are managed.
-			if strings.HasPrefix(string(h), "*.") {
-				r.report(route, corev1.EventTypeWarning, "DNSWildcardHostnameIgnored", string(h)+" is a wildcard hostname; only exact names get DNS records")
-				continue
-			}
-			wanted = append(wanted, string(h))
-		}
-	}
+	owned := r.ownedHostnames(route)
+	wanted := r.wantedHostnames(route)
 
 	if !route.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, route, owned, wanted)
@@ -170,19 +141,69 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		managed = append(managed, h)
 	}
 
-	// Save what the route manages now. The patch touches only this annotation.
+	// Save what the route manages now.
 	if !slices.Equal(owned, managed) {
-		list, _ := json.Marshal(managed)
-		original := route.DeepCopy()
-		if route.Annotations == nil {
-			route.Annotations = map[string]string{}
-		}
-		route.Annotations[managedHostnamesAnnotation] = string(list)
-		if err := r.Patch(ctx, route, client.MergeFrom(original)); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update managed-hostnames annotation: %w", err)
+		if err := r.saveManagedHostnames(ctx, route, managed); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+// ownedHostnames are the hostnames the route has recorded managing so far. A
+// corrupt annotation counts as empty, because guessing could delete the wrong
+// records.
+func (r *HTTPRouteReconciler) ownedHostnames(route *gatewayv1.HTTPRoute) []string {
+	value := route.Annotations[managedHostnamesAnnotation]
+	if value == "" {
+		return nil
+	}
+	var owned []string
+	if err := json.Unmarshal([]byte(value), &owned); err != nil {
+		r.Log.Error(err, "failed to parse managed-hostnames annotation, treating route as owning nothing", "annotation", value)
+		return nil
+	}
+	return owned
+}
+
+// wantedHostnames are the spec hostnames the domain map covers, or none for a
+// route no Gateway accepted when acceptance is required.
+func (r *HTTPRouteReconciler) wantedHostnames(route *gatewayv1.HTTPRoute) []string {
+	if r.RequireAccepted && !isAccepted(route) {
+		r.Log.V(1).Info("route is not accepted by any parent; not publishing DNS for it", "route", client.ObjectKeyFromObject(route))
+		return nil
+	}
+	var wanted []string
+	for _, h := range route.Spec.Hostnames {
+		if _, ok := r.DomainMap.LookupIP(string(h)); !ok {
+			continue
+		}
+		// A wildcard route hostname matches the domain map's wildcard key and
+		// would become a wildcard record on the backend, answering for every
+		// name below the domain, including names other routes serve. Only exact
+		// names are managed.
+		if strings.HasPrefix(string(h), "*.") {
+			r.report(route, corev1.EventTypeWarning, "DNSWildcardHostnameIgnored", string(h)+" is a wildcard hostname; only exact names get DNS records")
+			continue
+		}
+		wanted = append(wanted, string(h))
+	}
+	return wanted
+}
+
+// saveManagedHostnames records what the route manages now. The patch touches
+// only this annotation.
+func (r *HTTPRouteReconciler) saveManagedHostnames(ctx context.Context, route *gatewayv1.HTTPRoute, managed []string) error {
+	list, _ := json.Marshal(managed)
+	original := route.DeepCopy()
+	if route.Annotations == nil {
+		route.Annotations = map[string]string{}
+	}
+	route.Annotations[managedHostnamesAnnotation] = string(list)
+	if err := r.Patch(ctx, route, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("failed to update managed-hostnames annotation: %w", err)
+	}
+	return nil
 }
 
 // reconcileDelete removes a deleted route's records, publishes that, and then
