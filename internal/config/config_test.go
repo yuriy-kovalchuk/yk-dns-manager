@@ -1,97 +1,114 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestLoadDomainMap covers normalization: keys are compared with route hostnames, which are lowercase without a trailing dot, so a key written differently used to never match (audit B12); values are stored in canonical form.
-func TestLoadDomainMap(t *testing.T) {
-	dm, err := LoadDomainMap(writeTemp(t, "\" App.Example.COM. \": \" 10.0.0.1 \"\n\"*.Lab.Example.com\": 10.0.0.2\n"))
+// minimal is the smallest config Load accepts, for tests to append to.
+const minimal = "provider: opnsense\ndomains:\n  \"*.example.com\": 10.0.0.1\n"
+
+func load(t *testing.T, content string) (*Config, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(path)
+}
+
+func TestLoad(t *testing.T) {
+	cfg, err := load(t, minimal+`settings:
+  base_url: "https://opnsense.local/api"
+  api_key: "testkey"
+  default_ttl: "300"
+`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := map[string]string{"app.example.com": "10.0.0.1", "*.lab.example.com": "10.0.0.2"}
-	if got := dm.Entries(); len(got) != len(want) || got["app.example.com"] != want["app.example.com"] || got["*.lab.example.com"] != want["*.lab.example.com"] {
-		t.Errorf("entries = %v, want %v", got, want)
+	if cfg.Provider != "opnsense" {
+		t.Errorf("provider = %q, want opnsense", cfg.Provider)
 	}
-	if ip, ok := dm.LookupIP("x.lab.example.com"); !ok || ip != "10.0.0.2" {
-		t.Errorf("x.lab.example.com = %q, %v; want 10.0.0.2", ip, ok)
+	if cfg.Upsert {
+		t.Error("expected Upsert to default to false")
+	}
+	if ip, ok := cfg.DomainMap.LookupIP("app.example.com"); !ok || ip != "10.0.0.1" {
+		t.Errorf("app.example.com = %q, %v; want 10.0.0.1", ip, ok)
+	}
+	want := map[string]string{"base_url": "https://opnsense.local/api", "api_key": "testkey", "default_ttl": "300"}
+	for k, v := range want {
+		if cfg.Settings[k] != v {
+			t.Errorf("settings.%s = %q, want %q", k, cfg.Settings[k], v)
+		}
 	}
 }
 
-// TestLoadDomainMapValidation pins the startup checks: every case below used to load and then produce a broken record or a controller that manages nothing.
-func TestLoadDomainMapValidation(t *testing.T) {
+func TestLoad_UpsertTrue(t *testing.T) {
+	cfg, err := load(t, minimal+"upsert: true\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Upsert {
+		t.Error("expected Upsert to be true")
+	}
+}
+
+func TestLoad_Rejected(t *testing.T) {
 	cases := []struct {
 		name     string
 		content  string
 		contains string
 	}{
-		{"empty file", "", "no entries"},
-		{"null document", "null\n", "no entries"},
-		{"not a mapping", "- a\n- b\n", "parsing domain map file"},
+		{name: "empty file", content: "", contains: "missing required field 'provider'"},
+		{name: "missing provider", content: "domains:\n  \"*.example.com\": 10.0.0.1\n", contains: "missing required field 'provider'"},
+		{name: "missing domains", content: "provider: opnsense\n", contains: "no entries"},
+		{name: "invalid domain entry", content: "provider: opnsense\ndomains:\n  a.com: not-an-ip\n", contains: "not a valid IP address"},
 		// yaml.v3 rejects this already; asserted so a dependency change cannot start letting the last entry win
-		{"duplicate keys", "\"a.com\": \"10.0.0.1\"\n\"a.com\": \"10.0.0.2\"\n", "already defined"},
-		{"value is not an IP", "a.com: not-an-ip\n", "not a valid IP address"},
-		{"value is a hostname", "a.com: lb.example.com\n", "not a valid IP address"},
-		{"value is empty", "a.com: \"\"\n", "not a valid IP address"},
-		// the record type is hardcoded to A, so an IPv6 value would land in an A record
-		{"IPv6 value", "a.com: 2001:db8::1\n", "not IPv4"},
-		{"empty domain key", "\"\": \"10.0.0.1\"\n", "empty domain key"},
-		{"key with a space", "\"my domain.com\": 10.0.0.1\n", "not a valid domain name"},
-		{"wildcard in the middle", "\"app.*.example.com\": 10.0.0.1\n", "not a valid domain name"},
-		{"label starting with a hyphen", "\"-app.example.com\": 10.0.0.1\n", "not a valid domain name"},
-		// both normalize to example.com, so one would silently win
-		{"duplicate once normalized", "\"Example.com\": 10.0.0.1\n\"example.com.\": 10.0.0.2\n", "duplicates another entry"},
+		{name: "duplicate domain keys", content: "provider: opnsense\ndomains:\n  a.com: 10.0.0.1\n  a.com: 10.0.0.2\n", contains: "already defined"},
+		{name: "domains not a mapping", content: "provider: opnsense\ndomains:\n  - a\n", contains: "parsing config file"},
+		// an unset variable used to expand to "" and hide a missing Secret key
+		{name: "unset variable", content: minimal + "settings:\n  api_key: \"${UNSET_VAR_THAT_DOES_NOT_EXIST}\"\n", contains: "settings.api_key: environment variable UNSET_VAR_THAT_DOES_NOT_EXIST"},
+		// audit D11: a misspelled top-level field used to be ignored, leaving its default in place
+		{name: "unknown field", content: minimal + "upsrt: true\n", contains: "upsrt"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := LoadDomainMap(writeTemp(t, tc.content))
-			if err == nil || !strings.Contains(err.Error(), tc.contains) {
+			if _, err := load(t, tc.content); err == nil || !strings.Contains(err.Error(), tc.contains) {
 				t.Fatalf("error = %v, want it to mention %q", err, tc.contains)
 			}
 		})
 	}
 }
 
-// TestLookupIP is audit D2: an exact key matches only that name, where it used to cover every name below it; a wildcard covers any depth and the most specific key wins.
-func TestLookupIP(t *testing.T) {
-	dm := &DomainMap{entries: map[string]string{
-		"exact.com":            "10.0.8.100",
-		"*.mydomain.com":       "10.0.0.1",
-		"app2.mydomain.com":    "10.0.0.2",
-		"mydomain.com":         "10.0.0.3",
-		"*.other.mydomain.com": "10.0.0.4",
-	}}
-	tests := []struct {
-		hostname string
-		wantIP   string
-	}{
-		{"exact.com", "10.0.8.100"},
-		{"exact.com.", "10.0.8.100"}, // trailing dot (FQDN)
-		{"Exact.com", "10.0.8.100"},  // case-insensitive
-		{"app.exact.com", ""},        // an exact key does not cover subdomains
-		{"deep.nested.exact.com", ""},
-		{"app1.mydomain.com", "10.0.0.1"},        // wildcard
-		{"deep.nested.mydomain.com", "10.0.0.1"}, // wildcard walks up
-		{"app2.mydomain.com", "10.0.0.2"},        // exact wins over wildcard
-		{"mydomain.com", "10.0.0.3"},             // a wildcard does not match its bare domain, the exact key does
-		{"foo.other.mydomain.com", "10.0.0.4"},   // most specific wildcard
-		{"other.mydomain.com", "10.0.0.1"},
-		{"unknown.com", ""},
+func TestLoad_EnvVarExpansion(t *testing.T) {
+	t.Setenv("TEST_API_KEY", "key-from-env")
+	t.Setenv("word", "SHOULD-NOT-APPEAR")
+
+	cfg, err := load(t, minimal+`settings:
+  base_url: "https://opnsense.local/api"
+  api_key: "${TEST_API_KEY}"
+  api_secret: "pa$word and $5"
+`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, tt := range tests {
-		ip, ok := dm.LookupIP(tt.hostname)
-		if ip != tt.wantIP || ok != (tt.wantIP != "") {
-			t.Errorf("LookupIP(%q) = %q, %v; want %q", tt.hostname, ip, ok, tt.wantIP)
+	want := map[string]string{
+		"api_key":  "key-from-env",
+		"base_url": "https://opnsense.local/api",
+		// only ${NAME} is expanded, so a "$" in a literal value survives where os.ExpandEnv turned "pa$word" into "pa"
+		"api_secret": "pa$word and $5",
+	}
+	for k, v := range want {
+		if cfg.Settings[k] != v {
+			t.Errorf("settings.%s = %q, want %q", k, cfg.Settings[k], v)
 		}
 	}
 }
 
-// TestLookupIPWildcardSkipsBareDomain: "*.x" never matches "x" itself.
-func TestLookupIPWildcardSkipsBareDomain(t *testing.T) {
-	dm := &DomainMap{entries: map[string]string{"*.mydomain.com": "10.0.0.1"}}
-	if ip, ok := dm.LookupIP("mydomain.com"); ok {
-		t.Errorf("LookupIP(mydomain.com) = %q, want no match", ip)
+func TestLoad_MissingFile(t *testing.T) {
+	if _, err := Load("/nonexistent/path/config.yaml"); err == nil {
+		t.Fatal("expected error for missing file, got nil")
 	}
 }

@@ -3,8 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -140,15 +138,11 @@ func (b mockBatch) Commit(_ context.Context) error {
 }
 
 // testDomainMap is the domain map most tests run against.
-const testDomainMap = "\"*.my-domain1.com\": 10.0.8.100\n\"*.my-domain2.it\": 10.0.9.50\n"
+var testDomainMap = map[string]string{"*.my-domain1.com": "10.0.8.100", "*.my-domain2.it": "10.0.9.50"}
 
-func newTestDomainMap(t *testing.T, content string) *config.DomainMap {
+func newTestDomainMap(t *testing.T, entries map[string]string) *config.DomainMap {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "domain-map.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dm, err := config.LoadDomainMap(path)
+	dm, err := config.NewDomainMap(entries)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +362,7 @@ func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
 func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 	cases := []struct {
 		name        string
-		domainMap   string // testDomainMap when empty
+		domainMap   map[string]string // testDomainMap when nil
 		hostnames   []string
 		annotation  string
 		wantDeleted []string
@@ -387,7 +381,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 		{
 			// the spec still names api.my-domain2.it but the map no longer resolves it, so the record is released; a legacy record is not adopted outside the map
 			name:        "hostname removed from domain map",
-			domainMap:   "\"*.my-domain1.com\": 10.0.8.100\n",
+			domainMap:   map[string]string{"*.my-domain1.com": "10.0.8.100"},
 			hostnames:   []string{"app.my-domain1.com", "api.my-domain2.it"},
 			annotation:  `["app.my-domain1.com","api.my-domain2.it"]`,
 			wantDeleted: []string{"api.my-domain2.it"},
@@ -424,7 +418,7 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 			mock := &mockDNSProvider{}
 			r := newTestReconciler(t, mock, c)
 			r.Upsert = true
-			if tc.domainMap != "" {
+			if tc.domainMap != nil {
 				r.DomainMap = newTestDomainMap(t, tc.domainMap)
 			}
 

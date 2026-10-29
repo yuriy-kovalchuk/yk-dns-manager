@@ -64,12 +64,13 @@ The controller watches for the hostname `app.example.com`, looks up its IP from 
 
 ### Domain Map
 
-Define which IPs hostnames should resolve to:
+The `domains` section of the config file defines which IPs hostnames should resolve to:
 
 ```yaml
-"*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
-"special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
-homelab.local: 10.0.0.2              # the bare domain needs its own entry
+domains:
+  "*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
+  "special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
+  homelab.local: 10.0.0.2              # the bare domain needs its own entry
 ```
 
 - An exact key such as `homelab.local` matches only that one name.
@@ -86,26 +87,29 @@ Earlier versions let an exact key cover every name below it too. The controller 
 
 | Variable | Required | Description |
 |---|---|---|
-| `DOMAIN_MAP_PATH` | yes, unless `--domain-map-path` is given | Path to the domain map YAML file |
-| `DNS_PROVIDER_PATH` | yes — env only, there is no flag for it | Path to the DNS provider config YAML file |
+| `CONFIG_PATH` | yes, unless `--config` is given | Path to the config YAML file |
 
 ### Command-Line Flags
 
 | Flag | Env Var Override | Default | Description |
 |---|---|---|---|
-| `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
+| `--config` | `CONFIG_PATH` | — (required) | Path to the config file: DNS provider, settings and domain map |
 | `--zap-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or a numeric logr verbosity such as `-3` for `V(3)` |
 | `--leader-elect` | — | `true` | Elect a leader through a Lease so only one replica manages DNS; turn off only for a single instance outside a cluster (`make run` does) |
 | `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
 | `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
 | `--resync-period` | — | `1h` | How often every HTTPRoute is reconciled again even when nothing changed in the cluster; this republishes a record someone changed or deleted on the DNS backend. `0` turns it off |
 
-### DNS Provider Config
+### Config File
+
+One YAML file holds everything the controller needs:
 
 ```yaml
-# examples/dns-provider.yaml
+# examples/config.yaml
 provider: opnsense
 upsert: false
+domains:
+  "*.example.com": 10.0.0.1
 settings:
   base_url: "https://opnsense.example.com/api"
   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
@@ -117,6 +121,7 @@ settings:
   publish_interval: "10s"
 ```
 
+- `domains` maps hostnames to load balancer IPs: `"*.example.com"` covers every name below example.com at any depth, an exact key covers only that one name, and an exact key wins over the most specific wildcard.
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
 - `upsert: true` also corrects a managed record that holds a different IP; when `false`, existing records are left alone and only missing ones are created. Either way nothing is written when a record is already correct.
 - Settings support `${ENV_VAR}` expansion for credential injection; a reference to an unset variable fails startup, and a `$` anywhere else is kept as is. Unknown fields and unknown `settings` keys also fail startup. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
@@ -148,9 +153,9 @@ Key values:
 
 | Value | Description |
 |---|---|
-| `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
+| `domainMap` | Domain-to-IP mapping (rendered as `domains` in the config ConfigMap) |
 | `dnsProvider.provider` | DNS provider name |
-| `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [DNS Provider Config](#dns-provider-config) |
+| `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [Config File](#config-file) |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
 | `dnsProvider.caConfigMap` | ConfigMap with the appliance CA under the key `ca.pem`, mounted at `/etc/yk-dns-manager/ca` |
 | `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |

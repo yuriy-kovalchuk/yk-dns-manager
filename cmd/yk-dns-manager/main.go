@@ -104,7 +104,7 @@ func main() {
 func run() error {
 	var (
 		logLevel           string
-		domainMapPath      string
+		configPath         string
 		cleanupGracePeriod time.Duration
 		requireAccepted    bool
 		leaderElect        bool
@@ -115,7 +115,7 @@ func run() error {
 	log := ctrl.Log.WithName("setup")
 
 	flag.StringVar(&logLevel, "zap-log-level", os.Getenv("LOG_LEVEL"), "log level: debug, info, warn, error, or a numeric logr verbosity such as -3")
-	flag.StringVar(&domainMapPath, "domain-map-path", os.Getenv("DOMAIN_MAP_PATH"), "path to domain map YAML file")
+	flag.StringVar(&configPath, "config", os.Getenv("CONFIG_PATH"), "path to the config YAML file: DNS provider and domain map")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "elect a leader so only one replica manages DNS at a time; turn off only when running a single instance outside a cluster")
 	flag.BoolVar(&requireAccepted, "require-accepted-routes", false, "only publish DNS for HTTPRoutes that at least one parent Gateway has accepted")
 	flag.DurationVar(&cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
@@ -131,27 +131,21 @@ func run() error {
 
 	log.Info("starting yk-dns-manager", "version", version.Version, "logLevel", level.String())
 
-	if domainMapPath == "" {
-		return fmt.Errorf("--domain-map-path flag or DOMAIN_MAP_PATH environment variable is required")
+	if configPath == "" {
+		return fmt.Errorf("--config flag or CONFIG_PATH environment variable is required")
 	}
-	domainMap, err := config.LoadDomainMap(domainMapPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("unable to load domain map: %w", err)
+		return fmt.Errorf("unable to load config: %w", err)
 	}
+	log.Info("loaded config", "path", configPath, "provider", cfg.Provider, "upsert", cfg.Upsert)
+	logDomainMap(log, cfg.DomainMap)
 
-	logDomainMap(log, domainMapPath, domainMap)
-
-	providerCfg, err := config.LoadProviderConfig()
-	if err != nil {
-		return fmt.Errorf("unable to load provider config: %w", err)
-	}
-	log.Info("loaded provider config", "provider", providerCfg.Provider, "upsert", providerCfg.Upsert)
-
-	dnsProvider, err := selectProvider(ctrl.Log, newProviders(), providerCfg.Provider, providerCfg.Settings)
+	dnsProvider, err := selectProvider(ctrl.Log, newProviders(), cfg.Provider, cfg.Settings)
 	if err != nil {
 		return err
 	}
-	log.Info("initialized DNS provider", "name", providerCfg.Provider)
+	log.Info("initialized DNS provider", "name", cfg.Provider)
 
 	log.Info("checking DNS provider connectivity")
 	// Its own short deadline: the HTTP client's 30s timeout is per request, and startup must not hang on an appliance that is down.
@@ -160,7 +154,7 @@ func run() error {
 	cancel()
 	if err != nil {
 		// Non-fatal on purpose: an unreachable appliance would CrashLoop the pod here, while every reconcile reports the same failure and recovers without a restart.
-		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", providerCfg.Provider)
+		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", cfg.Provider)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -190,9 +184,9 @@ func run() error {
 		APIReader: mgr.GetAPIReader(),
 		Log:       ctrl.Log.WithName("httproute-controller"),
 		Recorder:  mgr.GetEventRecorder("yk-dns-manager"),
-		DomainMap: domainMap,
+		DomainMap: cfg.DomainMap,
 		DNS:       dnsProvider,
-		Upsert:    providerCfg.Upsert,
+		Upsert:    cfg.Upsert,
 
 		RequireAccepted:    requireAccepted,
 		CleanupGracePeriod: cleanupGracePeriod,
@@ -214,9 +208,9 @@ func run() error {
 }
 
 // logDomainMap says what the controller will actually manage: a map that silently matches nothing is the usual way it appears to do nothing, so the count is info and the pairs debug.
-func logDomainMap(log logr.Logger, path string, domainMap *config.DomainMap) {
+func logDomainMap(log logr.Logger, domainMap *config.DomainMap) {
 	entries := domainMap.Entries()
-	log.Info("loaded domain map", "path", path, "entries", len(entries))
+	log.Info("loaded domain map", "entries", len(entries))
 	for _, d := range slices.Sorted(maps.Keys(entries)) {
 		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
 		// exact keys used to cover every name below them too, so an upgrade with such a key releases the subdomains' records

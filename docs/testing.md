@@ -22,32 +22,22 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestParseLogLevel` | Named levels, numeric logr verbosity (`-3` means `V(3)`), and rejects garbage |
 | `TestDebugLevelEnablesVerbosity` | `debug` actually turns `V(1)` output on |
 | `TestDebugLevelKeepsProductionEncoder` | Debug does not switch zap to development mode |
-| `TestSelectProviderPicksByName` | Only the provider the config names is initialized |
-| `TestSelectProviderRejectsUnknownName` | A misspelled name fails and lists the available providers |
-| `TestSelectProviderReturnsInitError` | The named provider's own error is the startup error |
-| `TestSelectProviderRejectsUnknownSettings` | A settings key the provider does not list fails startup (D11) |
-| `TestSelectProviderDoesNotKeepTypedNilProvider` | A factory returning `(nil, err)` must not leave a typed-nil provider behind — this is what used to panic on startup |
+| `TestProvidersAcceptTheirOwnSettings` | Every settings key a real factory declares still builds that provider |
+| `TestSelectProvider` | Only the named provider is initialized; an unknown name lists the available ones; the provider's own error is the startup error; a factory returning `(nil, err)` never leaves a typed-nil provider behind; an unknown settings key fails startup (D11) |
 
 ### Config — `internal/config/`
 
 | Test | Description |
 |---|---|
-| `TestLoadDomainMap` | Parses a YAML domain map |
-| `TestLoadDomainMapValidation` | Rejects non-IPv4 values, empty maps, empty or invalid domain keys, and keys duplicated before or after normalization |
-| `TestLoadDomainMapNormalizesValues` | Values are canonicalised through `netip` |
-| `TestLoadDomainMapNormalizesKeys` | Keys are lowercased and lose a trailing dot (B12) |
-| `TestLookupIP` | An exact key matches only itself, case-insensitively and with a trailing dot (D2) |
-| `TestLookupIPWildcard` | Wildcard entries match subdomains |
-| `TestLookupIPWildcardWithBaseDomain` | Walk-up matching falls back from wildcard to base domain |
-| `TestLoadProviderConfig` | Parses a valid provider config |
-| `TestLoadProviderConfig_UpsertTrue` | `upsert: true` is a top-level bool |
-| `TestLoadProviderConfig_UpsertDefault` | `upsert` defaults to `false` |
-| `TestLoadProviderConfig_MissingProvider` | Errors when `provider` is absent |
-| `TestLoadProviderConfig_EnvVarExpansion` | `${ENV_VAR}` in settings resolves from the environment |
-| `TestLoadProviderConfig_EnvVarUnset` | A reference to an unset variable fails, naming the setting and the variable (S6) |
-| `TestLoadProviderConfig_LiteralDollar` | Only `${NAME}` is expanded; a literal `$` is kept (S6) |
-| `TestLoadProviderConfig_UnknownField` | An unknown top-level field fails (D11) |
-| `TestLoadProviderConfig_MissingFile` | Errors for a non-existent file |
+| `TestLoad` | Parses provider, domains and settings from one file; `upsert` defaults to `false` |
+| `TestLoad_UpsertTrue` | `upsert: true` is a top-level bool |
+| `TestLoad_Rejected` | An empty file, a missing `provider` or `domains`, an invalid or duplicate domain entry, an unset `${VAR}` (S6) and an unknown top-level field (D11) fail startup |
+| `TestLoad_EnvVarExpansion` | `${ENV_VAR}` in settings resolves from the environment; a literal `$` is kept (S6) |
+| `TestLoad_MissingFile` | Errors for a non-existent file |
+| `TestNewDomainMap` | Keys are lowercased and lose a trailing dot (B12); values are canonicalised through `netip` |
+| `TestNewDomainMapValidation` | Rejects non-IPv4 values, empty maps, empty or invalid domain keys, and keys duplicated after normalization |
+| `TestLookupIP` | An exact key matches only itself, case-insensitively and with a trailing dot (D2); a wildcard covers any depth; the most specific key wins |
+| `TestLookupIPWildcardSkipsBareDomain` | `*.x` never matches `x` itself |
 
 ### OPNsense provider — `internal/dns/opnsense/`
 
@@ -55,13 +45,13 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 |---|---|
 | `TestNew_ValidSettings` | Builds a client from valid settings |
 | `TestNew_DefaultTTLIgnored` | `default_ttl` is accepted for compatibility but warns that it has no effect |
-| `TestNew_MissingBaseURL` / `_MissingAPIKey` / `_MissingAPISecret` | Required settings are enforced |
-| `TestNew_SkipTLSVerify` | `skip_tls_verify` produces a client with verification off and the TLS floor set |
+| `TestNew_MissingRequiredSetting` | `base_url`, `api_key` and `api_secret` are required |
+| `TestNew_PublishIntervalMustBeADuration` | A nonsense or negative `publish_interval` fails startup |
 | `TestNew_SkipTLSVerifyWarns` | Enabling it logs a warning naming `ca_file` as the fix; a default config must not warn |
 | `TestNew_TLSVerification` | Stands up HTTPS on a throwaway CA: system roots reject it, `ca_file` accepts it, `skip_tls_verify` accepts it |
 | `TestNew_TLSConfigErrors` | Missing `ca_file`, non-PEM file, and `ca_file` together with `skip_tls_verify` |
 | `TestNew_Scheme` | `http` is refused unless `allow_insecure_http` is true (any boolean spelling), warns when allowed, and a non-boolean value or another scheme is refused |
-| `TestNew_SkipTLSVerifyIsABoolean` | `skip_tls_verify` accepts `true`, `True`, `1`, `false` and empty, and rejects a non-boolean value (D11) |
+| `TestNew_SkipTLSVerifyIsABoolean` | `skip_tls_verify` accepts `true`, `True`, `1`, `false` and empty, and rejects a non-boolean value (D11); on, verification is off with the TLS floor set; off, the system roots are used |
 | `TestResponseBodyLimit` | A body over the cap is reported as a limit error, not as truncated JSON |
 | `TestErrorBodyTruncated` | Error bodies are capped rather than dumped whole into the log |
 | `TestCommitChecksReconfigureStatus` | A reconfigure answering a status other than `ok` fails the commit, and the publish stays owed |
@@ -85,12 +75,8 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 
 | Test | Description |
 |---|---|
-| `TestHTTPRouteReconciler_Reconcile` | Adds the finalizer, then creates a record for a matching hostname |
-| `TestHTTPRouteReconciler_ReconcileUnknownDomain` | Hostnames with no domain map entry are skipped |
-| `TestHTTPRouteReconciler_UpsertEnabled` | Ensures records with overwrite on when upsert is on |
-| `TestHTTPRouteReconciler_CreateSkipsExisting` | Leaves existing records alone when upsert is off |
-| `TestHTTPRouteReconciler_Deletion` | Finalizer cleanup deletes the records |
-| `TestHTTPRouteReconciler_DeletionWithoutMatchingHostname` | A route whose hostnames no longer match the domain map is still deletable — the orphaned-finalizer bug |
+| `TestHTTPRouteReconciler_Ensure` | A covered hostname gets one record, created or upserted, and never a second write; an existing record is left alone without upsert; a hostname outside the domain map is skipped |
+| `TestHTTPRouteReconciler_Deletion` | Finalizer cleanup releases the spec and annotation hostnames, and a route whose hostnames no longer match the domain map is still deletable — the orphaned-finalizer bug |
 | `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec or the domain map are released; names outside the map are released without adopting legacy records; corrupt annotations do not wedge the route |
 | `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
 | `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
@@ -202,5 +188,5 @@ make vuln              # govulncheck, same as CI
 
 go test -race ./...    # race detector
 go test ./internal/config/ -v
-go test -run TestLoadDomainMapValidation ./internal/config/ -v
+go test -run TestNewDomainMapValidation ./internal/config/ -v
 ```

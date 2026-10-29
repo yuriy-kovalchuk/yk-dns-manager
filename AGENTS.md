@@ -4,12 +4,12 @@
 A Kubernetes controller built with `controller-runtime` that watches Gateway API HTTPRoute resources and automatically manages DNS A records on pluggable backends. When an HTTPRoute with a domain-map-matched hostname is created/updated, the controller creates or updates the corresponding DNS record via the configured provider API. On deletion, a finalizer (`dns.yk/cleanup`) triggers cleanup of stale DNS records.
 
 ## Architecture
-Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) config packages (`config.DomainMap`, `config.ProviderConfig`) are pure structs with no business logic. The controller reads routes from the informer cache, re-reads through `APIReader` only inside the finalizer conflict-retry loops, and writes its annotation as a merge patch.
+Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) the config package (`config.Config`, `config.DomainMap`) holds pure structs with no business logic. The controller reads routes from the informer cache, re-reads through `APIReader` only inside the finalizer conflict-retry loops, and writes its annotation as a merge patch.
 
 ## Design Decisions
 - **Provider factory list over `init()` registry:** `newProviders()` in `main.go` iterates configured providers at startup. More explicit than blank-import registration, easier to test and debug. Restore the aggregation pattern only if the provider count grows substantially.
 - **Feature folders, not layer-first:** One reconciler + one domain means layered separation adds indirection without benefit. The `Provider` interface is already a clean boundary.
-- **No hot-reload for config files:** Config is read once at startup. Helm chart uses checksum annotations on ConfigMaps to trigger rolling restarts when content changes. A file watcher could be added later if needed.
+- **One config file, no hot-reload:** provider, settings and domain map live in one YAML file (`--config` / `CONFIG_PATH`), read once at startup. The Helm chart renders it as one ConfigMap with a checksum annotation to trigger rolling restarts when content changes. A file watcher could be added later if needed.
 - **Non-upsert mode with drift warning:** When `upsert: false`, the controller skips existing records but logs a clear warning that IPs may drift if the domain map changes. This is intentional — some users want exactly-once semantics for cost reasons.
 
 ## Development Commands
@@ -32,7 +32,7 @@ Single-reconciler design: one `HTTPRouteReconciler` handles all HTTPRoutes. Feat
 
 ## Key Patterns
 - **Provider interface is the only DNS boundary.** Controllers never import provider packages directly. Adding a new backend: implement `Provider`, register in `newProviders()`, set config `provider` field.
-- **Domain map matching:** an exact key matches only itself; otherwise the most specific `*.parent` wildcard covering the hostname wins, at any depth. One controller serves multiple domains/ILBs via one domain map file.
+- **Domain map matching:** an exact key matches only itself; otherwise the most specific `*.parent` wildcard covering the hostname wins, at any depth. One controller serves multiple domains/ILBs via the `domains` section of the config file.
 - **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The mark names the routes that wrote the record (`dns.Record.Owner`), and `Remove` carries the owner, so a route can only release records it wrote. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
 - **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
 - **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.

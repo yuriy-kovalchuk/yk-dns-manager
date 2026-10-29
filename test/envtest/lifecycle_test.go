@@ -15,7 +15,7 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-const exampleMap = "\"*.example.com\": 10.0.0.1\n"
+var exampleMap = map[string]string{"*.example.com": "10.0.0.1"}
 
 // TestCreatePublishesRecord covers the chain the unit tests cannot: the first reconcile only adds the finalizer, and the record appears because that update passes the event filter and triggers a second reconcile.
 func TestCreatePublishesRecord(t *testing.T) {

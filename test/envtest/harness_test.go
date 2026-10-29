@@ -106,7 +106,7 @@ func gatewayCRDDir() (string, error) {
 
 // harnessOptions configures one controller instance.
 type harnessOptions struct {
-	domainMap string
+	domainMap map[string]string
 	upsert    bool
 	// requireAccepted turns on --require-accepted-routes.
 	requireAccepted bool
@@ -163,13 +163,9 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		t.Fatalf("creating provider: %v", err)
 	}
 
-	mapPath := filepath.Join(t.TempDir(), "domain-map.yaml")
-	if err := os.WriteFile(mapPath, []byte(opts.domainMap), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	domainMap, err := config.LoadDomainMap(mapPath)
+	domainMap, err := config.NewDomainMap(opts.domainMap)
 	if err != nil {
-		t.Fatalf("loading domain map: %v", err)
+		t.Fatalf("building domain map: %v", err)
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{

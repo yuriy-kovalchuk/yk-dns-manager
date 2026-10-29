@@ -10,9 +10,8 @@
 │  HTTPRoute deleted ──┼──────>│                  │──────>│                  │
 │                      │       │                  │       │                  │
 └──────────────────────┘       └──────────────────┘       └──────────────────┘
-                               ┌──────────┴──────────┐
-                               │                     │
-                          domain-map.yaml    dns-provider.yaml
+                                        │
+                                   config.yaml
 ```
 
 **yk-dns-manager** is a Kubernetes controller built with `controller-runtime`. It watches all HTTPRoute resources in the cluster and manages DNS records on a configured backend. The architecture follows a feature-based layout with a pluggable provider pattern: no DNS-specific logic exists inside the reconciler, and adding a new backend requires only implementing the `Provider` interface.
@@ -25,7 +24,7 @@ internal/controller/                # HTTPRoute reconciler (the only reconciler)
 internal/dns/provider.go            # Provider and Batch interfaces
   opnsense/opnsense.go              # OPNsense Unbound implementation
   dnstest/                          # Conformance suite every provider runs
-internal/config/                    # DomainMap + ProviderConfig loaders
+internal/config/                    # Config file loader (provider, settings, DomainMap)
 internal/testenv/                   # In-memory OPNsense fake (tests and `make fake-opnsense`)
 internal/version/version.go         # Version (injected via ldflags)
 test/integration/                   # Provider against the fake over HTTP, incl. conformance
@@ -92,7 +91,7 @@ A wildcard covers names at any depth below it, like a DNS wildcard, but not its 
 
 ### DNS Provider Selection
 
-At startup in `main()`, the controller looks up the factory named by the provider config's `provider` field in `newProviders()` and initializes it with the configured settings. There is no fallback: an unknown name, or settings the provider rejects, fails startup with that provider's own error. This means:
+At startup in `main()`, the controller looks up the factory named by the config file's `provider` field in `newProviders()` and initializes it with the configured settings. There is no fallback: an unknown name, or settings the provider rejects, fails startup with that provider's own error. This means:
 - Only one provider is active at a time.
 - Adding a new provider is as simple as returning a factory from `newProviders()`.
 
@@ -104,7 +103,7 @@ After initialization the controller runs `HealthCheck()` once, with a 10s deadli
 |---|---|
 | HTTPRoute → Reconciler | Gateway API resource only — no DNS types leak upstream |
 | Reconciler → Provider | `dns.Record{Hostname, Type, Value}` — a simple DTO, not tied to any backend |
-| Config files → main() | Parsed structs (`DomainMap`, `ProviderConfig`) — raw YAML is deserialized inside the config package |
+| Config file → main() | Parsed `config.Config` with its validated `DomainMap` — raw YAML is deserialized inside the config package |
 | DNS Provider → K8s API | **None.** The provider never touches Kubernetes. It's a pure HTTP client. |
 
 ## Design Decisions
@@ -127,7 +126,7 @@ The original design used `init()` + a registry (standard pluggable Go pattern), 
 
 ### Why checksum annotations on ConfigMaps?
 
-The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap content hashes. This triggers a rolling restart whenever domain-map or provider-config changes — essential because the controller reads config only at startup (no hot-reload).
+The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap content hashes. This triggers a rolling restart whenever the config changes — essential because the controller reads config only at startup (no hot-reload).
 
 ## Adding a New Provider
 
@@ -181,6 +180,6 @@ func TestConformance(t *testing.T) {
 },
 ```
 
-If it needs secrets in its settings, add their key names to the literal-credential check in `charts/yk-dns-manager/templates/configmap-dns-provider.yaml`, so the chart refuses them written in plain text.
+If it needs secrets in its settings, add their key names to the literal-credential check in `charts/yk-dns-manager/templates/configmap.yaml`, so the chart refuses them written in plain text.
 
-**3. Set `provider: myprovider` in the DNS provider config.**
+**3. Set `provider: myprovider` in the config file.**

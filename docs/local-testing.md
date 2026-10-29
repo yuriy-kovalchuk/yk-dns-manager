@@ -46,7 +46,7 @@ gateway CRDs: installed
 controller:   1/1 ready
 fake in-cluster: 1/1 ready
 fake on host:    not listening — make fake-opnsense
-env:          hack/local/domain-map.yaml hack/local/dns-provider.yaml
+config:       hack/local/config.yaml
 ```
 
 Every line names the command that fixes it. Run this before debugging; most local
@@ -114,7 +114,7 @@ make kind-crds         # the controller watches HTTPRoutes; without the CRDs it 
 make run               # prints the kubecontext it is about to reconcile against
 ```
 
-`hack/local/dns-provider.yaml` points at `http://127.0.0.1:8053/api`, which works
+`hack/local/config.yaml` points at `http://127.0.0.1:8053/api`, which works
 for a binary on your machine. It does not work for a pod — see the Service DNS
 name in `hack/local-values.yaml`.
 
@@ -133,7 +133,7 @@ is pointing somewhere it should not be.
 Copy the local profile and change only the backend:
 
 ```bash
-cp hack/local/dns-provider.yaml .developer/dns-provider.yaml
+cp hack/local/config.yaml .developer/config.yaml
 # set settings.base_url to https://<appliance>/api and delete allow_insecure_http
 ```
 
@@ -152,7 +152,7 @@ make test-unit         # unit only — no network, no external processes
 make test-integration  # provider over real HTTP against internal/testenv
 make test-cover        # HTML report at coverage.html + function summary
 go test ./internal/config/ -v
-go test -run TestLoadDomainMap ./internal/config/ -v
+go test -run TestNewDomainMap ./internal/config/ -v
 ```
 
 The integration tests verify wire-format correctness: JSON shapes, URL

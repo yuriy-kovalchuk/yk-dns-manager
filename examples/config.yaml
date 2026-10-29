@@ -1,5 +1,15 @@
 provider: opnsense
 upsert: false
+
+# Maps hostnames to load balancer IPs.
+#
+# "*.example.com" covers every name below example.com, at any depth
+# (app.example.com, a.b.example.com), but not example.com itself. An exact key
+# covers only that one name. An exact key wins, then the most specific wildcard.
+domains:
+  "*.example.com": 10.0.0.1
+  "*.example.org": 10.0.0.2
+
 settings:
   base_url: "https://opnsense.example.com/api"
   # Pin the appliance CA instead of turning verification off. The API key and

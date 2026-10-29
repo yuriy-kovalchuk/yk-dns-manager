@@ -243,7 +243,7 @@ kind-status:
 	@echo "controller:   $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy $(APP_NAME) -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not deployed — make kind-deploy')"
 	@echo "fake in-cluster: $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy fake-opnsense -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not running — make kind-fake-install')"
 	@echo "fake on host:    $$(curl -sf --max-time 2 localhost:8053/records >/dev/null 2>&1 && echo 'listening on :8053' || echo 'not listening — make fake-opnsense')"
-	@test -f .env && echo "env:          $$(grep -E '^(DOMAIN_MAP_PATH|DNS_PROVIDER_PATH)=' .env | sed 's/^[A-Z_]*=//' | tr '\n' ' ')" || echo "env:          no .env — cp .env.example .env"
+	@test -f .env && echo "config:       $$(grep -E '^CONFIG_PATH=' .env | sed 's/^CONFIG_PATH=//')" || echo "config:       no .env — cp .env.example .env"
 
 ## kind-reset: rebuild the dev cluster from scratch (use it after the kind pin changes)
 kind-reset: kind-down kind-deploy
