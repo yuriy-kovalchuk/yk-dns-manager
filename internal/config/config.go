@@ -16,12 +16,7 @@ type DomainMap struct {
 	entries map[string]string
 }
 
-// LoadDomainMap reads a YAML file mapping domains to IPs.
-//
-// Every entry is validated here rather than at reconcile time. The record type
-// is hardcoded to A, so a value that is not an IPv4 address would produce a
-// broken DNS record, and an empty map would leave a controller running that
-// manages nothing.
+// LoadDomainMap reads a YAML file mapping domains to IPs, validating every entry at startup rather than at reconcile time.
 func LoadDomainMap(path string) (*DomainMap, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- path comes from an operator-set CLI flag, not request input
 	if err != nil {
@@ -42,9 +37,7 @@ func LoadDomainMap(path string) (*DomainMap, error) {
 		if strings.TrimSpace(domain) == "" {
 			return nil, fmt.Errorf("domain map file %s: entry with an empty domain key", path)
 		}
-		// Keys are compared with route hostnames, which Gateway API keeps
-		// lowercase and without a trailing dot, so a key written any other way
-		// would silently never match.
+		// keys are compared with route hostnames, which Gateway API keeps lowercase and without a trailing dot, so any other form would never match
 		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 		if !validDomainKey(key) {
 			return nil, fmt.Errorf("domain map entry %q: not a valid domain name or *.domain wildcard", domain)
@@ -65,12 +58,10 @@ func LoadDomainMap(path string) (*DomainMap, error) {
 	return &DomainMap{entries: entries}, nil
 }
 
-// dnsLabel is one label of a domain name: letters, digits and hyphens, not
-// starting or ending with a hyphen, at most 63 characters.
+// dnsLabel is one label of a domain name: letters, digits and hyphens, not starting or ending with a hyphen, at most 63 characters.
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// validDomainKey reports whether key is a domain name, optionally starting
-// with "*." for a wildcard.
+// validDomainKey reports whether key is a domain name, optionally starting with "*." for a wildcard.
 func validDomainKey(key string) bool {
 	name := strings.TrimPrefix(key, "*.")
 	if name == "" || len(name) > 253 {
@@ -84,15 +75,7 @@ func validDomainKey(key string) bool {
 	return true
 }
 
-// LookupIP returns the IP for hostname.
-//
-// An exact key matches only that name. A wildcard key "*.example.com" covers
-// every name below example.com, at any depth, like a DNS wildcard, but not
-// example.com itself. The exact key wins, then the most specific wildcard:
-//
-//	"example.com":       10.0.0.1   example.com
-//	"*.example.com":     10.0.0.2   app.example.com, a.b.example.com
-//	"*.lab.example.com": 10.0.0.3   x.lab.example.com
+// LookupIP returns the IP for hostname: an exact key matches only itself, a wildcard key covers every name below at any depth, and the most specific match wins.
 func (dm *DomainMap) LookupIP(hostname string) (string, bool) {
 	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
 	if ip, ok := dm.entries[hostname]; ok {

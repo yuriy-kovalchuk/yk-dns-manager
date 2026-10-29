@@ -131,8 +131,7 @@ settings:
 	}
 }
 
-// TestLoadProviderConfig_EnvVarUnset: a reference to an unset variable is an
-// error. It used to expand silently to "", which hid a missing Secret key.
+// TestLoadProviderConfig_EnvVarUnset: an unset variable is an error, where it used to expand to "" and hide a missing Secret key.
 func TestLoadProviderConfig_EnvVarUnset(t *testing.T) {
 	content := `provider: opnsense
 settings:
@@ -150,8 +149,7 @@ settings:
 	}
 }
 
-// TestLoadProviderConfig_LiteralDollar: only ${NAME} is expanded, so a "$"
-// in a literal value survives. os.ExpandEnv turned "pa$word" into "pa".
+// TestLoadProviderConfig_LiteralDollar: only ${NAME} is expanded, so a "$" in a literal value survives where os.ExpandEnv turned "pa$word" into "pa".
 func TestLoadProviderConfig_LiteralDollar(t *testing.T) {
 	t.Setenv("word", "SHOULD-NOT-APPEAR")
 	content := `provider: opnsense
@@ -179,8 +177,7 @@ func TestLoadProviderConfig_MissingFile(t *testing.T) {
 	}
 }
 
-// TestLoadProviderConfig_UnknownField is audit D11: a misspelled top-level
-// field used to be ignored, leaving its default in place.
+// TestLoadProviderConfig_UnknownField is audit D11: a misspelled top-level field used to be ignored, leaving its default in place.
 func TestLoadProviderConfig_UnknownField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dns-provider.yaml")
 	if err := os.WriteFile(path, []byte("provider: opnsense\nupsrt: true\n"), 0o600); err != nil {

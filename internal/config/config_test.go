@@ -24,9 +24,7 @@ func TestLoadDomainMap(t *testing.T) {
 	}
 }
 
-// TestLoadDomainMapValidation pins the startup checks. Every case below used to
-// load successfully and then either produce a broken DNS record or leave a
-// controller running that manages nothing.
+// TestLoadDomainMapValidation pins the startup checks: every case below used to load and then produce a broken record or a controller that manages nothing.
 func TestLoadDomainMapValidation(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -49,8 +47,7 @@ func TestLoadDomainMapValidation(t *testing.T) {
 			contains: "parsing domain map file",
 		},
 		{
-			// yaml.v3 rejects this already; asserted so a dependency change
-			// cannot quietly start letting the last entry win.
+			// yaml.v3 rejects this already; asserted so a dependency change cannot start letting the last entry win
 			name:     "duplicate keys",
 			content:  "\"a.com\": \"10.0.0.1\"\n\"a.com\": \"10.0.0.2\"\n",
 			contains: "already defined",
@@ -71,8 +68,7 @@ func TestLoadDomainMapValidation(t *testing.T) {
 			contains: "not a valid IP address",
 		},
 		{
-			// The record type is hardcoded to A, so an IPv6 value would be
-			// written into an A record.
+			// the record type is hardcoded to A, so an IPv6 value would land in an A record
 			name:     "IPv6 value",
 			content:  "a.com: 2001:db8::1\n",
 			contains: "not IPv4",
@@ -138,8 +134,7 @@ func TestLoadDomainMapNormalizesValues(t *testing.T) {
 	}
 }
 
-// TestLookupIP is audit D2: an exact key matches only that name. It used to
-// cover every name below it as well.
+// TestLookupIP is audit D2: an exact key matches only that name, where it used to cover every name below it.
 func TestLookupIP(t *testing.T) {
 	dm := &DomainMap{entries: map[string]string{
 		"my-domain1.com": "10.0.8.100",
@@ -238,9 +233,7 @@ func TestLookupIPWildcardWithBaseDomain(t *testing.T) {
 	}
 }
 
-// TestLoadDomainMapNormalizesKeys is audit B12: keys are compared with route
-// hostnames, which are lowercase without a trailing dot, so a key written
-// differently used to never match.
+// TestLoadDomainMapNormalizesKeys is audit B12: keys are compared with route hostnames, which are lowercase without a trailing dot, so a key written differently used to never match.
 func TestLoadDomainMapNormalizesKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "domain-map.yaml")
 	content := "\" App.Example.COM. \": 10.0.0.1\n\"*.Lab.Example.com\": 10.0.0.2\n"

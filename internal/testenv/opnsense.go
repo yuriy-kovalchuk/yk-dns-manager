@@ -1,6 +1,4 @@
-// Package testenv provides in-memory stand-ins for the backends this controller
-// talks to. The same fake backs the integration tests and the local development
-// server, so what tests exercise is what a developer sees when running locally.
+// Package testenv provides in-memory stand-ins for the backends this controller talks to, shared by the integration tests and the local development server.
 package testenv
 
 import (
@@ -13,8 +11,7 @@ import (
 	"sync"
 )
 
-// HostOverride mirrors an OPNsense Unbound host override row. Every field is a
-// string because that is what the appliance API sends and accepts.
+// HostOverride mirrors an OPNsense Unbound host override row; every field is a string because that is what the API sends and accepts.
 type HostOverride struct {
 	Enabled     string `json:"enabled"`
 	Hostname    string `json:"hostname"`
@@ -26,8 +23,7 @@ type HostOverride struct {
 	MX          string `json:"mx"`
 }
 
-// FQDN is the hostname the override resolves, matching how the controller reads
-// it back from the appliance.
+// FQDN is the hostname the override resolves, matching how the controller reads it back from the appliance.
 func (h HostOverride) FQDN() string {
 	return strings.TrimSuffix(h.Hostname+"."+h.Domain, ".")
 }
@@ -49,25 +45,7 @@ const (
 	reconfigurePath = "/api/unbound/service/reconfigure"
 )
 
-// OPNsense is an in-memory implementation of the subset of the OPNsense Unbound
-// REST API this controller uses: searchHostOverride, addHostOverride,
-// setHostOverride, delHostOverride and reconfigure.
-//
-// It follows the appliance where the provider's behaviour depends on it:
-//
-//   - Edits land in the staged config and only become what Unbound answers
-//     with on reconfigure. Snapshot is the staged config, Published is what
-//     was last applied.
-//   - A uuid that does not exist is answered with HTTP 200 and a result body
-//     ("failed" for set, "not found" for del), not with a 404.
-//   - add and set validate the row and answer {"result":"failed","validations":…}
-//     for one the appliance would reject.
-//   - Write endpoints only accept POST.
-//   - With RequireCredentials, a request without the right basic auth is
-//     answered with 401.
-//
-// By default it accepts any credentials, or none, so the local development
-// server works without configuration.
+// OPNsense is an in-memory stand-in for the Unbound API subset this controller uses, faithful to the appliance where the provider depends on it: edits publish only on reconfigure, unknown uuids answer 200 with a result body, rows are validated, writes are POST-only, and basic auth is rejected when RequireCredentials is set.
 type OPNsense struct {
 	mu        sync.Mutex
 	store     map[string]HostOverride
@@ -89,17 +67,14 @@ func NewOPNsense() *OPNsense {
 	}
 }
 
-// RequireCredentials makes the fake reject any request that does not carry
-// exactly this key and secret as basic auth.
+// RequireCredentials makes the fake reject any request without exactly this key and secret as basic auth.
 func (f *OPNsense) RequireCredentials(key, secret string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.apiKey, f.apiSecret = key, secret
 }
 
-// SetFailure makes every request to endpoint (one of the Endpoint constants)
-// answer with the given HTTP status until it is cleared with a status of 0.
-// The request is still recorded by Calls but has no effect on the store.
+// SetFailure makes every request to endpoint answer with the given status until cleared with 0; the call is still recorded but does not touch the store.
 func (f *OPNsense) SetFailure(endpoint string, status int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -110,10 +85,7 @@ func (f *OPNsense) SetFailure(endpoint string, status int) {
 	f.failures[endpoint] = status
 }
 
-// DuringReconfigure registers fn to run inside every reconfigure, after the
-// staged config has been taken for publishing and before the response is
-// sent. A write fn makes is therefore not published by that reconfigure,
-// which is how tests make a write race with a publish in flight.
+// DuringReconfigure runs fn inside every reconfigure after staging and before the response, so a write made by fn is not published by that reconfigure.
 func (f *OPNsense) DuringReconfigure(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -170,16 +142,14 @@ func (f *OPNsense) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	handler(w, r)
 }
 
-// Snapshot returns a copy of the staged overrides keyed by uuid: everything
-// written so far, whether or not a reconfigure has published it.
+// Snapshot returns a copy of the staged overrides keyed by uuid, published or not.
 func (f *OPNsense) Snapshot() map[string]HostOverride {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return copyStore(f.store)
 }
 
-// Published returns a copy of the overrides as of the last successful
-// reconfigure, which is what Unbound would actually answer with.
+// Published returns a copy of the overrides as of the last successful reconfigure, which is what Unbound would actually answer with.
 func (f *OPNsense) Published() map[string]HostOverride {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -200,9 +170,7 @@ func (f *OPNsense) ResetCalls() {
 	f.calls = nil
 }
 
-// Seed adds an override without going through the API and returns its uuid.
-// A seeded row is treated as already published, like configuration that was on
-// the appliance before the controller started.
+// Seed adds an override outside the API and returns its uuid, treated as already published like config that predates the controller.
 func (f *OPNsense) Seed(h HostOverride) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -298,9 +266,7 @@ func (f *OPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// validate applies the subset of the appliance's model constraints the
-// controller can run into. The keys match the "host.<field>" form OPNsense
-// uses in its validations map.
+// validate applies the subset of the appliance's model constraints the controller can hit, keyed in OPNsense's "host.<field>" form.
 func validate(h HostOverride) map[string]string {
 	v := map[string]string{}
 	if h.Enabled != "0" && h.Enabled != "1" {

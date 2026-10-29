@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// These tests pin the fake's contract with the real appliance. The provider's
-// tests trust the fake, so a drift here would let a provider bug through.
+// These tests pin the fake's contract with the real appliance: the provider's tests trust the fake, so drift here lets a provider bug through.
 
 func call(t *testing.T, srv *httptest.Server, method, path, body string, auth bool) (int, map[string]any) {
 	t.Helper()

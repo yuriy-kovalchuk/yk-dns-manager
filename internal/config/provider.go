@@ -12,16 +12,14 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// ProviderConfig holds the DNS provider type, app-level options, and
-// provider-specific connection settings.
+// ProviderConfig holds the DNS provider type, app-level options, and provider-specific connection settings.
 type ProviderConfig struct {
 	Provider string            `yaml:"provider"`
 	Upsert   bool              `yaml:"upsert"`
 	Settings map[string]string `yaml:"settings"`
 }
 
-// LoadProviderConfig reads the DNS provider configuration from the path
-// specified by the DNS_PROVIDER_PATH environment variable.
+// LoadProviderConfig reads the DNS provider configuration from the path in the DNS_PROVIDER_PATH environment variable.
 func LoadProviderConfig() (*ProviderConfig, error) {
 	path := os.Getenv("DNS_PROVIDER_PATH")
 	if path == "" {
@@ -30,16 +28,14 @@ func LoadProviderConfig() (*ProviderConfig, error) {
 	return LoadProviderConfigFromPath(path)
 }
 
-// LoadProviderConfigFromPath reads the DNS provider configuration from the
-// given file path.
+// LoadProviderConfigFromPath reads the DNS provider configuration from the given file path.
 func LoadProviderConfigFromPath(path string) (*ProviderConfig, error) {
 	data, err := os.ReadFile(path) // #nosec G304,G703 -- path comes from an operator-set CLI flag, not request input
 	if err != nil {
 		return nil, fmt.Errorf("reading provider config file: %w", err)
 	}
 
-	// Unknown fields are an error, so a typo such as "upsrt: true" fails
-	// startup instead of leaving the default in place.
+	// unknown fields are an error, so a typo such as "upsrt: true" fails startup instead of leaving the default in place
 	var cfg ProviderConfig
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
@@ -65,10 +61,7 @@ func LoadProviderConfigFromPath(path string) (*ProviderConfig, error) {
 // envRef matches a ${NAME} reference.
 var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// expandEnv replaces each ${NAME} with the value of environment variable
-// NAME. Nothing else is touched, so a literal "$" in a value survives, which
-// os.ExpandEnv would not allow ("pa$word" became "pa"). A reference to an
-// unset variable is an error rather than a silent empty string.
+// expandEnv replaces each ${NAME} with an environment value and nothing else, so a literal "$" survives where os.ExpandEnv would eat it; an unset variable is an error.
 func expandEnv(value string) (string, error) {
 	var missing []string
 	expanded := envRef.ReplaceAllStringFunc(value, func(ref string) string {
