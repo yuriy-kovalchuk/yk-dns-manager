@@ -9,14 +9,18 @@ import (
 	"github.com/go-logr/logr"
 )
 
-func TestNew_ValidSettings(t *testing.T) {
-	settings := map[string]string{
+// validSettings is the smallest configuration New accepts. It is built per
+// call so a test can change or drop a key.
+func validSettings() map[string]string {
+	return map[string]string{
 		"base_url":   "https://opnsense.local/api",
 		"api_key":    "key123",
 		"api_secret": "secret456",
 	}
+}
 
-	p, err := New(logr.Discard(), settings)
+func TestNew_ValidSettings(t *testing.T) {
+	p, err := New(logr.Discard(), validSettings())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -32,12 +36,8 @@ func TestNew_ValidSettings(t *testing.T) {
 func TestNew_DefaultTTLIgnored(t *testing.T) {
 	for _, v := range []string{"600", "notanumber"} {
 		msgs := &[]string{}
-		settings := map[string]string{
-			"base_url":    "https://opnsense.local/api",
-			"api_key":     "key123",
-			"api_secret":  "secret456",
-			"default_ttl": v,
-		}
+		settings := validSettings()
+		settings["default_ttl"] = v
 		if _, err := New(logr.New(captureSink{msgs: msgs}), settings); err != nil {
 			t.Fatalf("default_ttl %q: unexpected error: %v", v, err)
 		}
@@ -47,49 +47,22 @@ func TestNew_DefaultTTLIgnored(t *testing.T) {
 	}
 }
 
-func TestNew_MissingBaseURL(t *testing.T) {
-	settings := map[string]string{
-		"api_key":    "key123",
-		"api_secret": "secret456",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing base_url, got nil")
-	}
-}
-
-func TestNew_MissingAPIKey(t *testing.T) {
-	settings := map[string]string{
-		"base_url":   "https://opnsense.local/api",
-		"api_secret": "secret456",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing api_key, got nil")
-	}
-}
-
-func TestNew_MissingAPISecret(t *testing.T) {
-	settings := map[string]string{
-		"base_url": "https://opnsense.local/api",
-		"api_key":  "key123",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing api_secret, got nil")
+// TestNew_MissingRequiredSetting: every credential the API call needs is
+// required, so a config that omits one fails startup instead of sending
+// anonymous requests to the appliance.
+func TestNew_MissingRequiredSetting(t *testing.T) {
+	for _, missing := range []string{"base_url", "api_key", "api_secret"} {
+		settings := validSettings()
+		delete(settings, missing)
+		if _, err := New(logr.Discard(), settings); err == nil {
+			t.Errorf("expected an error when %s is missing", missing)
+		}
 	}
 }
 
 func TestNew_SkipTLSVerify(t *testing.T) {
-	settings := map[string]string{
-		"base_url":        "https://opnsense.local/api",
-		"api_key":         "key123",
-		"api_secret":      "secret456",
-		"skip_tls_verify": "true",
-	}
+	settings := validSettings()
+	settings["skip_tls_verify"] = "true"
 
 	p, err := New(logr.Discard(), settings)
 	if err != nil {
