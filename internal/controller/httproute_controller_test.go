@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -160,12 +161,49 @@ func newTestDomainMapWith(t *testing.T, content string) *config.DomainMap {
 	return dm
 }
 
-func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
+// newTestScheme returns the scheme every fixture here needs.
+func newTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := gatewayv1.Install(scheme); err != nil {
 		t.Fatalf("failed to install gateway-api scheme: %v", err)
 	}
+	return scheme
+}
 
+// newFakeRouteClient builds the fake client these fixtures share: the
+// Gateway API scheme plus the hostname index the reconciler lists through.
+func newFakeRouteClient(t *testing.T, routes ...*gatewayv1.HTTPRoute) client.WithWatch {
+	t.Helper()
+	builder := fake.NewClientBuilder().
+		WithScheme(newTestScheme(t)).
+		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames)
+	for _, r := range routes {
+		builder = builder.WithObjects(r)
+	}
+	return builder.Build()
+}
+
+// newTestReconciler wires the collaborators every test shares. The knobs a
+// test is actually about (Upsert, RequireAccepted, CleanupGracePeriod,
+// Recorder) are set at the call site, where they read as the test's subject.
+func newTestReconciler(t *testing.T, domainMap *config.DomainMap, mock *mockDNSProvider, c client.WithWatch) *HTTPRouteReconciler {
+	t.Helper()
+	return &HTTPRouteReconciler{
+		Client:    c,
+		APIReader: c,
+		Log:       zap.New(zap.UseDevMode(true)),
+		DomainMap: domainMap,
+		DNS:       mock,
+	}
+}
+
+// routeRequest is the reconcile request for default/<name>.
+func routeRequest(name string) ctrl.Request {
+	return ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}
+}
+
+func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-route",
@@ -176,27 +214,11 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "test-route",
-			Namespace: "default",
-		},
-	}
+	req := routeRequest("test-route")
 
 	// First reconcile adds the finalizer
 	result, err := reconciler.Reconcile(context.Background(), req)
@@ -232,11 +254,6 @@ func TestHTTPRouteReconciler_Reconcile(t *testing.T) {
 }
 
 func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "unknown-route",
@@ -247,27 +264,11 @@ func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "unknown-route",
-			Namespace: "default",
-		},
-	}
+	req := routeRequest("unknown-route")
 
 	// First reconcile adds the finalizer
 	result, err := reconciler.Reconcile(context.Background(), req)
@@ -290,11 +291,6 @@ func TestHTTPRouteReconciler_ReconcileUnknownDomain(t *testing.T) {
 }
 
 func TestHTTPRouteReconciler_UpsertEnabled(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "upsert-route",
@@ -305,28 +301,12 @@ func TestHTTPRouteReconciler_UpsertEnabled(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-		Upsert:    true,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
+	reconciler.Upsert = true
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "upsert-route",
-			Namespace: "default",
-		},
-	}
+	req := routeRequest("upsert-route")
 
 	// First reconcile adds the finalizer
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -347,11 +327,6 @@ func TestHTTPRouteReconciler_UpsertEnabled(t *testing.T) {
 }
 
 func TestHTTPRouteReconciler_CreateSkipsExisting(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "skip-route",
@@ -362,30 +337,13 @@ func TestHTTPRouteReconciler_CreateSkipsExisting(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{
 		existingHosts: map[string]bool{"app.my-domain1.com": true},
 	}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-		Upsert:    false,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "skip-route",
-			Namespace: "default",
-		},
-	}
+	req := routeRequest("skip-route")
 
 	// First reconcile adds the finalizer
 	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
@@ -403,11 +361,6 @@ func TestHTTPRouteReconciler_CreateSkipsExisting(t *testing.T) {
 }
 
 func TestHTTPRouteReconciler_Deletion(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	now := metav1.Now()
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -421,27 +374,11 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      "delete-route",
-			Namespace: "default",
-		},
-	}
+	req := routeRequest("delete-route")
 
 	result, err := reconciler.Reconcile(context.Background(), req)
 	if err != nil {
@@ -467,11 +404,6 @@ func TestHTTPRouteReconciler_Deletion(t *testing.T) {
 // above the deletion branch, so a route carrying our finalizer whose hostnames
 // no longer match the map could never leave Terminating.
 func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	cases := []struct {
 		name        string
 		hostnames   []string
@@ -545,22 +477,11 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 				route.Annotations = map[string]string{managedHostnamesAnnotation: tc.annotation}
 			}
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-				WithObjects(route).
-				Build()
-
+			fakeClient := newFakeRouteClient(t, route)
 			mock := &mockDNSProvider{}
-			reconciler := &HTTPRouteReconciler{
-				Client:    fakeClient,
-				APIReader: fakeClient,
-				Log:       zap.New(zap.UseDevMode(true)),
-				DomainMap: newTestDomainMap(t),
-				DNS:       mock,
-			}
+			reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "orphan-route", Namespace: "default"}}
+			req := routeRequest("orphan-route")
 			if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -594,11 +515,6 @@ func TestHTTPRouteReconciler_DeletionWithoutMatchingHostname(t *testing.T) {
 // rather than swallowed. Logging it alone would leave the override staged in
 // OPNsense's config, never published, with nothing to retry it.
 func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "flush-route",
@@ -610,24 +526,11 @@ func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).
-		Build()
-
+	fakeClient := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{flushErr: errors.New("reconfigure failed")}
-	reconciler := &HTTPRouteReconciler{
-		Client:    fakeClient,
-		APIReader: fakeClient,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-	}
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, fakeClient)
 
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "flush-route", Namespace: "default"},
-	}
+	req := routeRequest("flush-route")
 	_, err := reconciler.Reconcile(context.Background(), req)
 	if err == nil {
 		t.Fatal("expected the flush failure to be returned so the reconcile requeues")
@@ -641,11 +544,6 @@ func TestHTTPRouteReconciler_FlushFailureRequeues(t *testing.T) {
 // path: records the controller owns must be removed when the hostname stops being
 // managed, whether it left the spec or the domain map.
 func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-
 	cases := []struct {
 		name        string
 		domainMap   string
@@ -728,23 +626,12 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 				route.Spec.Hostnames = append(route.Spec.Hostnames, gatewayv1.Hostname(h))
 			}
 
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-				WithObjects(route).
-				Build()
-
+			fakeClient := newFakeRouteClient(t, route)
 			mock := &mockDNSProvider{}
-			reconciler := &HTTPRouteReconciler{
-				Client:    fakeClient,
-				APIReader: fakeClient,
-				Log:       zap.New(zap.UseDevMode(true)),
-				DomainMap: newTestDomainMapWith(t, tc.domainMap),
-				DNS:       mock,
-				Upsert:    true,
-			}
+			reconciler := newTestReconciler(t, newTestDomainMapWith(t, tc.domainMap), mock, fakeClient)
+			reconciler.Upsert = true
 
-			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "live-route", Namespace: "default"}}
+			req := routeRequest("live-route")
 			before := route.ResourceVersion
 			if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -781,27 +668,9 @@ func TestHTTPRouteReconciler_CleanupOfUnownedHostnames(t *testing.T) {
 // holding routes, and returns the reconciler, whose client can be inspected.
 func reconcileOnce(t *testing.T, mock *mockDNSProvider, name string, routes ...*gatewayv1.HTTPRoute) *HTTPRouteReconciler {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatalf("failed to install gateway-api scheme: %v", err)
-	}
-	builder := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames)
-	for _, r := range routes {
-		builder = builder.WithObjects(r)
-	}
-	c := builder.Build()
-	reconciler := &HTTPRouteReconciler{
-		Client:    c,
-		APIReader: c,
-		Log:       zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t),
-		DNS:       mock,
-		Upsert:    true,
-	}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}
-	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+	reconciler := newTestReconciler(t, newTestDomainMap(t), mock, newFakeRouteClient(t, routes...))
+	reconciler.Upsert = true
+	if _, err := reconciler.Reconcile(context.Background(), routeRequest(name)); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	return reconciler
@@ -916,17 +785,9 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 			route := managedRoute("route", `["app.my-domain1.com"]`, "app.my-domain1.com")
 			route.DeletionTimestamp = &deleted
 
-			scheme := runtime.NewScheme()
-			if err := gatewayv1.Install(scheme); err != nil {
-				t.Fatal(err)
-			}
-			c := fake.NewClientBuilder().WithScheme(scheme).
-				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-				WithObjects(route).Build()
-			r := &HTTPRouteReconciler{
-				Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
-				DomainMap: newTestDomainMap(t), DNS: tc.mock, CleanupGracePeriod: 5 * time.Minute,
-			}
+			c := newFakeRouteClient(t, route)
+			r := newTestReconciler(t, newTestDomainMap(t), tc.mock, c)
+			r.CleanupGracePeriod = 5 * time.Minute
 
 			key := types.NamespacedName{Name: "route", Namespace: "default"}
 			res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
@@ -951,19 +812,11 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 // back when the publish is due, and still records what it manages.
 func TestHTTPRouteReconciler_PublishHeldBackIsRequeued(t *testing.T) {
 	route := managedRoute("route", "", "app.my-domain1.com")
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatal(err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).Build()
+	c := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{deferPublish: 30 * time.Second}
-	r := &HTTPRouteReconciler{
-		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true,
-	}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+	r := newTestReconciler(t, newTestDomainMap(t), mock, c)
+	r.Upsert = true
+	req := routeRequest("route")
 
 	res, err := r.Reconcile(context.Background(), req)
 	if err != nil {
@@ -990,18 +843,10 @@ func TestHTTPRouteReconciler_DeletionWaitsForAHeldBackPublish(t *testing.T) {
 	route := managedRoute("route", `["app.my-domain1.com"]`, "app.my-domain1.com")
 	route.DeletionTimestamp = &deleted
 
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatal(err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).Build()
+	c := newFakeRouteClient(t, route)
 	mock := &mockDNSProvider{deferPublish: 30 * time.Second}
-	r := &HTTPRouteReconciler{
-		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t), DNS: mock, CleanupGracePeriod: 5 * time.Minute,
-	}
+	r := newTestReconciler(t, newTestDomainMap(t), mock, c)
+	r.CleanupGracePeriod = 5 * time.Minute
 	key := types.NamespacedName{Name: "route", Namespace: "default"}
 	req := ctrl.Request{NamespacedName: key}
 
@@ -1056,19 +901,14 @@ func TestHTTPRouteReconciler_RequireAccepted(t *testing.T) {
 			if tc.accepted {
 				route.Status.Parents = acceptedStatus
 			}
-			scheme := runtime.NewScheme()
-			if err := gatewayv1.Install(scheme); err != nil {
-				t.Fatal(err)
-			}
-			c := fake.NewClientBuilder().WithScheme(scheme).
+			c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).
 				WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
 				WithObjects(route).WithStatusSubresource(route).Build()
 			mock := &mockDNSProvider{}
-			r := &HTTPRouteReconciler{
-				Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
-				DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true, RequireAccepted: tc.requireAccepted,
-			}
-			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+			r := newTestReconciler(t, newTestDomainMap(t), mock, c)
+			r.Upsert = true
+			r.RequireAccepted = tc.requireAccepted
+			req := routeRequest("route")
 			if _, err := r.Reconcile(context.Background(), req); err != nil {
 				t.Fatalf("reconcile: %v", err)
 			}
@@ -1115,18 +955,10 @@ func TestHTTPRouteReconciler_CannotReleaseAnotherRoutesRecord(t *testing.T) {
 		owners: map[string][]string{"app.my-domain1.com": {"httproute/default/blue"}},
 	}
 	route := managedRoute("green", `["app.my-domain1.com"]`, "web.my-domain1.com")
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatal(err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).Build()
-	r := &HTTPRouteReconciler{
-		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)),
-		DomainMap: newTestDomainMap(t), DNS: mock, Upsert: true,
-	}
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "green", Namespace: "default"}}); err != nil {
+	c := newFakeRouteClient(t, route)
+	r := newTestReconciler(t, newTestDomainMap(t), mock, c)
+	r.Upsert = true
+	if _, err := r.Reconcile(context.Background(), routeRequest("green")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1199,19 +1031,12 @@ func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
 	conflictBefore := testutil.ToFloat64(recordResults.WithLabelValues("conflict"))
 
 	route := managedRoute("route", "", "app.my-domain1.com", "web.my-domain1.com")
-	scheme := runtime.NewScheme()
-	if err := gatewayv1.Install(scheme); err != nil {
-		t.Fatal(err)
-	}
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&gatewayv1.HTTPRoute{}, hostnameIndex, indexHostnames).
-		WithObjects(route).Build()
+	c := newFakeRouteClient(t, route)
 	recorder := events.NewFakeRecorder(10)
-	r := &HTTPRouteReconciler{
-		Client: c, APIReader: c, Log: zap.New(zap.UseDevMode(true)), Recorder: recorder,
-		DomainMap: newTestDomainMap(t), DNS: &mockDNSProvider{conflictHosts: map[string]bool{"web.my-domain1.com": true}},
-	}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "route", Namespace: "default"}}
+	mock := &mockDNSProvider{conflictHosts: map[string]bool{"web.my-domain1.com": true}}
+	r := newTestReconciler(t, newTestDomainMap(t), mock, c)
+	r.Recorder = recorder
+	req := routeRequest("route")
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
