@@ -12,7 +12,7 @@ import (
 // These tests pin the fake's contract with the real appliance. The provider's
 // tests trust the fake, so a drift here would let a provider bug through.
 
-func call(t *testing.T, srv *httptest.Server, method, path, body string, auth bool) (int, map[string]interface{}) {
+func call(t *testing.T, srv *httptest.Server, method, path, body string, auth bool) (int, map[string]any) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), method, srv.URL+path, strings.NewReader(body))
 	if err != nil {
@@ -26,7 +26,7 @@ func call(t *testing.T, srv *httptest.Server, method, path, body string, auth bo
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var out map[string]interface{}
+	var out map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&out)
 	return resp.StatusCode, out
 }

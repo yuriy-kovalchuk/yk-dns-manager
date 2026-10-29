@@ -132,7 +132,7 @@ func (f *OPNsense) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok || key != wantKey || secret != wantSecret {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": 401, "message": "Authentication Failed"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": 401, "message": "Authentication Failed"})
 			return
 		}
 	}
@@ -225,7 +225,7 @@ func (f *OPNsense) handleSearch(w http.ResponseWriter, _ *http.Request) {
 	for id, h := range f.store {
 		rows = append(rows, row{UUID: id, HostOverride: h})
 	}
-	writeJSON(w, map[string]interface{}{"rows": rows, "rowCount": len(rows), "total": len(rows), "current": 1})
+	writeJSON(w, map[string]any{"rows": rows, "rowCount": len(rows), "total": len(rows), "current": 1})
 }
 
 func (f *OPNsense) handleAdd(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +237,7 @@ func (f *OPNsense) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if v := validate(payload.Host); len(v) > 0 {
-		writeJSON(w, map[string]interface{}{"result": "failed", "validations": v})
+		writeJSON(w, map[string]any{"result": "failed", "validations": v})
 		return
 	}
 
@@ -267,7 +267,7 @@ func (f *OPNsense) handleSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if v := validate(payload.Host); len(v) > 0 {
-		writeJSON(w, map[string]interface{}{"result": "failed", "validations": v})
+		writeJSON(w, map[string]any{"result": "failed", "validations": v})
 		return
 	}
 	f.store[id] = payload.Host
@@ -333,12 +333,12 @@ func copyStore(in map[string]HostOverride) map[string]HostOverride {
 	return out
 }
 
-func writeJSON(w http.ResponseWriter, v interface{}) {
+func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func readJSON(r *http.Request, v interface{}) error {
+func readJSON(r *http.Request, v any) error {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err

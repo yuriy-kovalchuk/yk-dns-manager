@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -83,7 +82,7 @@ func selectProvider(log logr.Logger, factories []providerFactory, name string, s
 				}
 			}
 			if len(unknown) > 0 {
-				sort.Strings(unknown)
+				slices.Sort(unknown)
 				return nil, fmt.Errorf("DNS provider %q: unknown settings %s; known settings: %s",
 					name, strings.Join(unknown, ", "), strings.Join(pf.settings, ", "))
 			}
@@ -162,7 +161,7 @@ func run() error {
 	for d := range entries {
 		domains = append(domains, d)
 	}
-	sort.Strings(domains)
+	slices.Sort(domains)
 	for _, d := range domains {
 		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
 		// Exact keys used to cover every name below them too. Warn about the
