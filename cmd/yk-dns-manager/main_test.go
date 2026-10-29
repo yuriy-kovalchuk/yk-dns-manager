@@ -25,8 +25,7 @@ func TestParseLogLevel(t *testing.T) {
 		{in: "error", want: zapcore.ErrorLevel},
 		{in: "DEBUG", want: zapcore.DebugLevel},
 		{in: "  info  ", want: zapcore.InfoLevel},
-		// Numeric levels map straight through, which is how an operator reaches
-		// logr V(3): zapcore.Level(-3).
+		// numeric levels map straight through, which is how an operator reaches logr V(3): zapcore.Level(-3)
 		{in: "-3", want: zapcore.Level(-3)},
 		{in: "-200", wantErr: true},
 		{in: "chatty", wantErr: true},
@@ -50,10 +49,7 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-// TestDebugLevelEnablesVerbosity pins the user-visible behaviour the flag
-// promises. The old code never set zap.Options.Level, so debug output arrived
-// only as a side effect of Development mode, which also switched the encoder to
-// console and turned DPanic into a real panic.
+// TestDebugLevelEnablesVerbosity pins what the flag promises: debug used to arrive only as a side effect of zap Development mode, which also changed the encoder and made DPanic fatal.
 func TestDebugLevelEnablesVerbosity(t *testing.T) {
 	level, err := parseLogLevel("debug")
 	if err != nil {
@@ -74,9 +70,7 @@ func TestDebugLevelEnablesVerbosity(t *testing.T) {
 	}
 }
 
-// TestDebugLevelKeepsProductionEncoder asserts the other half of the fix: asking
-// for debug must not switch on zap development mode, whose console encoder and
-// DPanic-panics behaviour are wrong for a pod in a cluster.
+// TestDebugLevelKeepsProductionEncoder is the other half of that fix: asking for debug must not switch on zap development mode inside a cluster.
 func TestDebugLevelKeepsProductionEncoder(t *testing.T) {
 	level, err := parseLogLevel("debug")
 	if err != nil {
@@ -109,16 +103,12 @@ func TestDebugLevelKeepsProductionEncoder(t *testing.T) {
 	}
 }
 
-// stubProvider satisfies dns.Provider without implementing anything. Only the
-// interface conversion matters here, and embedding the interface keeps that
-// from turning the test into a mock.
+// stubProvider satisfies dns.Provider without implementing anything; only the interface conversion matters here.
 type stubProvider struct {
 	dns.Provider
 }
 
-// sampleSettings is a valid value for every provider settings key the factory
-// list declares. A key with no entry here fails the test, so growing the list
-// is a deliberate act rather than something that slips through.
+// sampleSettings gives a valid value for every provider settings key the factory list declares, so a key without an entry fails the test.
 var sampleSettings = map[string]string{
 	"base_url":            "https://opnsense.local/api",
 	"api_key":             "key",
@@ -130,15 +120,7 @@ var sampleSettings = map[string]string{
 	"publish_interval":    "5s",
 }
 
-// TestProvidersAcceptTheirOwnSettings covers the real newProviders() list,
-// which the selectProvider tests never touch because they pass fake factories:
-// every key a factory declares as known must still build, so a key that was
-// renamed or given stricter validation fails here instead of at startup.
-//
-// What it cannot catch is the other direction. A provider never reports which
-// keys it read, so a declared key the provider has stopped knowing is accepted
-// by the config check and silently ignored by the provider. That is why the
-// list has to stay where the config check can see it.
+// TestProvidersAcceptTheirOwnSettings covers the real newProviders() list, which the fake-factory tests never touch: every key a factory declares must still build. A declared key the provider stopped reading is invisible to it, which is why the list stays where the config check can see it.
 func TestProvidersAcceptTheirOwnSettings(t *testing.T) {
 	for _, f := range newProviders() {
 		settings := map[string]string{}
@@ -177,8 +159,7 @@ func TestSelectProviderPicksByName(t *testing.T) {
 	}
 }
 
-// A misspelled provider name used to start whichever provider came first and
-// accepted the settings.
+// TestSelectProviderRejectsUnknownName covers a typo that used to start whichever provider came first and accepted the settings.
 func TestSelectProviderRejectsUnknownName(t *testing.T) {
 	factories := []providerFactory{
 		{name: "opnsense", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
@@ -198,8 +179,7 @@ func TestSelectProviderRejectsUnknownName(t *testing.T) {
 	}
 }
 
-// The named provider's own error is the startup error. It used to be logged at
-// info level while startup failed with a generic "no DNS provider" message.
+// TestSelectProviderReturnsInitError makes the named provider's own error the startup error, where it used to be logged at info behind a generic "no DNS provider".
 func TestSelectProviderReturnsInitError(t *testing.T) {
 	factories := []providerFactory{
 		{name: "opnsense", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
@@ -213,10 +193,7 @@ func TestSelectProviderReturnsInitError(t *testing.T) {
 	}
 }
 
-// A factory that returns a nil concrete pointer mirrors opnsense.New's shape.
-// Converted to dns.Provider that value is not == nil, so anything that stores it
-// before checking the error hands the caller a provider that panics on first use
-// instead of reporting the configuration error.
+// TestSelectProviderDoesNotKeepTypedNilProvider mirrors opnsense.New returning a nil concrete pointer: converted to dns.Provider that is not == nil, so storing it before the error check yields a provider that panics on first use.
 func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
 	factories := []providerFactory{
 		{name: "typednil", fn: func(logr.Logger, map[string]string) (dns.Provider, error) {
@@ -234,8 +211,7 @@ func TestSelectProviderDoesNotKeepTypedNilProvider(t *testing.T) {
 	}
 }
 
-// TestSelectProviderRejectsUnknownSettings is audit D11: a misspelled settings
-// key used to be ignored, so the setting silently had no effect.
+// TestSelectProviderRejectsUnknownSettings is audit D11: a misspelled settings key used to be ignored, so the setting silently had no effect.
 func TestSelectProviderRejectsUnknownSettings(t *testing.T) {
 	factories := []providerFactory{{
 		name:     "opnsense",

@@ -1,11 +1,4 @@
-// Package controller makes each HTTPRoute hostname the domain map covers
-// resolve to the domain map's IP, and removes the record when the hostname or
-// the route goes away.
-//
-// The provider only changes records it marked as its own. The route's
-// managed-hostnames annotation says what to clean up, never what may be
-// deleted, since any route editor can write it. A record shared by several
-// routes is deleted only when none claims it.
+// Package controller makes each HTTPRoute hostname the domain map covers resolve to that map's IP, and cleans the record up when the hostname or the route goes away.
 package controller
 
 import (
@@ -68,8 +61,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.reconcileDelete(ctx, route, owned, wanted)
 	}
 
-	// Add the finalizer before any record exists, so a deletion can never
-	// skip the cleanup. A route with nothing to manage gets none.
+	// Add the finalizer before any record exists, so a deletion can never skip cleanup; a route with nothing to manage gets none.
 	if !controllerutil.ContainsFinalizer(route, finalizerName) {
 		if len(wanted) == 0 {
 			return ctrl.Result{}, nil
@@ -80,16 +72,13 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// All changes go through one batch and are published once, at the end,
-	// even after an error. A failed publish is returned so it is retried.
+	// All changes go through one batch and are published once at the end, even after an error; a failed publish is returned so it is retried.
 	batch := r.DNS.Batch()
 	defer func() {
 		commitErr := batch.Commit(ctx)
 		var deferred *dns.PublishDeferred
 		if errors.As(commitErr, &deferred) {
-			// The provider held the publish back to coalesce a burst of changes
-			// into one. They stay owed, so coming back when the wait is over
-			// publishes them.
+			// The provider held the publish back to coalesce a burst: they stay owed, so coming back after the wait publishes them.
 			result.RequeueAfter = max(result.RequeueAfter, deferred.After)
 			return
 		}
@@ -111,10 +100,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// Create or update the wanted ones. A legacy record (from before the
-	// provider marked ownership) is only taken over for a hostname this route
-	// already managed. A hostname held by someone else's record stays out of
-	// the annotation, so the route can never claim it later.
+	// A legacy record is taken over only for a hostname this route already managed; a name held by someone else's record stays out of the annotation.
 	var managed []string
 	owner := routeOwner(route)
 	for _, h := range wanted {
@@ -150,9 +136,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, nil
 }
 
-// ownedHostnames are the hostnames the route has recorded managing so far. A
-// corrupt annotation counts as empty, because guessing could delete the wrong
-// records.
+// ownedHostnames are the hostnames the route recorded managing; a corrupt annotation counts as empty because guessing could delete the wrong records.
 func (r *HTTPRouteReconciler) ownedHostnames(route *gatewayv1.HTTPRoute) []string {
 	value := route.Annotations[managedHostnamesAnnotation]
 	if value == "" {
@@ -166,8 +150,7 @@ func (r *HTTPRouteReconciler) ownedHostnames(route *gatewayv1.HTTPRoute) []strin
 	return owned
 }
 
-// wantedHostnames are the spec hostnames the domain map covers, or none for a
-// route no Gateway accepted when acceptance is required.
+// wantedHostnames are the spec hostnames the domain map covers, or none for a route no Gateway accepted when acceptance is required.
 func (r *HTTPRouteReconciler) wantedHostnames(route *gatewayv1.HTTPRoute) []string {
 	if r.RequireAccepted && !isAccepted(route) {
 		r.Log.V(1).Info("route is not accepted by any parent; not publishing DNS for it", "route", client.ObjectKeyFromObject(route))
@@ -178,10 +161,7 @@ func (r *HTTPRouteReconciler) wantedHostnames(route *gatewayv1.HTTPRoute) []stri
 		if _, ok := r.DomainMap.LookupIP(string(h)); !ok {
 			continue
 		}
-		// A wildcard route hostname matches the domain map's wildcard key and
-		// would become a wildcard record on the backend, answering for every
-		// name below the domain, including names other routes serve. Only exact
-		// names are managed.
+		// A wildcard route hostname would become a wildcard record answering for names other routes serve, so only exact names are managed.
 		if strings.HasPrefix(string(h), "*.") {
 			r.report(route, corev1.EventTypeWarning, "DNSWildcardHostnameIgnored", string(h)+" is a wildcard hostname; only exact names get DNS records")
 			continue
@@ -191,8 +171,7 @@ func (r *HTTPRouteReconciler) wantedHostnames(route *gatewayv1.HTTPRoute) []stri
 	return wanted
 }
 
-// saveManagedHostnames records what the route manages now. The patch touches
-// only this annotation.
+// saveManagedHostnames records what the route manages now; the patch touches only this annotation.
 func (r *HTTPRouteReconciler) saveManagedHostnames(ctx context.Context, route *gatewayv1.HTTPRoute, managed []string) error {
 	list, _ := json.Marshal(managed)
 	original := route.DeepCopy()
@@ -206,10 +185,7 @@ func (r *HTTPRouteReconciler) saveManagedHostnames(ctx context.Context, route *g
 	return nil
 }
 
-// reconcileDelete removes a deleted route's records, publishes that, and then
-// removes the finalizer. A failing cleanup is retried until CleanupGracePeriod
-// after the deletion request; then the route is released anyway, because it
-// must always be deletable, and its records may be left behind.
+// reconcileDelete removes a deleted route's records, publishes that, then drops the finalizer; a failing cleanup retries until the grace period runs out and the route is released anyway, because it must always be deletable.
 func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewayv1.HTTPRoute, owned, wanted []string) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(route, finalizerName) {
 		return ctrl.Result{}, nil
@@ -234,9 +210,7 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 	if err := batch.Commit(ctx); err != nil {
 		var deferred *dns.PublishDeferred
 		if errors.As(err, &deferred) {
-			// The provider is only holding the publish back to coalesce changes.
-			// The deletion is not published yet, so the finalizer stays and the
-			// route comes back when the publish is due.
+			// The provider is only holding the publish back: the deletion is not published yet, so the finalizer stays and the route comes back when it is due.
 			if timeLeft := time.Until(route.DeletionTimestamp.Add(r.CleanupGracePeriod)); timeLeft > 0 {
 				return ctrl.Result{RequeueAfter: min(deferred.After, timeLeft)}, nil
 			}
@@ -258,10 +232,7 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 	return ctrl.Result{}, r.setFinalizer(ctx, route, false)
 }
 
-// removeRecord deletes the record for hostname unless another live route
-// still claims it. The provider deletes only records marked as its own, and
-// only those this route is an owner of; a legacy record only for a hostname
-// this route managed and the domain map covers.
+// removeRecord deletes the record for hostname unless another live route still claims it; the provider deletes only rows it marked, and only those this route owns.
 func (r *HTTPRouteReconciler) removeRecord(ctx context.Context, batch dns.Batch, route *gatewayv1.HTTPRoute, hostname string, owned []string) error {
 	var claimants gatewayv1.HTTPRouteList
 	if err := r.List(ctx, &claimants, client.MatchingFields{hostnameIndex: hostname}); err != nil {
@@ -285,9 +256,7 @@ func (r *HTTPRouteReconciler) removeRecord(ctx context.Context, batch dns.Batch,
 	return nil
 }
 
-// setFinalizer adds or removes our finalizer. It re-reads the route and
-// retries on conflict instead of patching, because a patch would replace the
-// whole finalizer list and could drop another controller's entry.
+// setFinalizer adds or removes our finalizer, re-reading and retrying on conflict because a patch would replace the whole finalizer list and could drop another controller's entry.
 func (r *HTTPRouteReconciler) setFinalizer(ctx context.Context, route *gatewayv1.HTTPRoute, add bool) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(route), route); err != nil {
@@ -324,9 +293,7 @@ func isAccepted(route *gatewayv1.HTTPRoute) bool {
 	return false
 }
 
-// routeOwner is the identity the provider stores with every record a route
-// writes. It is what lets the provider refuse to delete a record this route
-// never wrote, whatever the route's annotation claims.
+// routeOwner is the identity the provider stores with every record a route writes, which is what lets it refuse a record this route never wrote.
 func routeOwner(route *gatewayv1.HTTPRoute) string {
 	return "httproute/" + route.Namespace + "/" + route.Name
 }
@@ -352,11 +319,7 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// wantsUpdate decides which HTTPRoute updates trigger a reconcile. Status- and
-// metadata-only updates, including our own annotation patch, are ignored. An
-// informer resync — the same object arriving again, resource version and all —
-// passes on purpose: it is the only event that reaches a route whose record was
-// changed or deleted on the DNS backend while its spec stayed the same.
+// wantsUpdate ignores status- and metadata-only updates including our own annotation patch, and passes informer resyncs on purpose: they are the only event that notices a record changed on the backend while the spec stayed put.
 func (r *HTTPRouteReconciler) wantsUpdate(e event.UpdateEvent) bool {
 	oldRoute, okOld := e.ObjectOld.(*gatewayv1.HTTPRoute)
 	newRoute, okNew := e.ObjectNew.(*gatewayv1.HTTPRoute)

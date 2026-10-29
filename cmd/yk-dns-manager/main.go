@@ -36,16 +36,12 @@ import (
 // providerFactory is a single provider candidate for initialization.
 type providerFactory struct {
 	name string
-	// settings lists every settings key the provider understands. Any other
-	// key fails startup, so a typo such as "sip_tls_verify" is caught instead
-	// of being silently ignored. Nil skips the check.
+	// settings lists every key the provider understands, so a typo such as "sip_tls_verify" fails startup; nil skips the check.
 	settings []string
 	fn       func(logr.Logger, map[string]string) (dns.Provider, error)
 }
 
-// newProviders returns the available DNS providers. The provider config's
-// `provider` field picks one by name. Add entries here when a new provider is
-// added.
+// newProviders lists the available providers, picked by name from the config; add entries here for a new backend.
 func newProviders() []providerFactory {
 	return []providerFactory{
 		{
@@ -58,15 +54,7 @@ func newProviders() []providerFactory {
 	}
 }
 
-// selectProvider initializes the provider the config names. It does not fall
-// back to another one: a typo in the name, or settings the named provider
-// rejects, is a configuration error and is reported as one.
-//
-// The provider is returned only after the error is checked. A factory such as
-// opnsense.New returns a concrete *Provider; when it fails that pointer is nil,
-// and converting it to the dns.Provider interface produces an interface that is
-// not == nil. Returning it and calling a method later panics with a nil
-// dereference instead of reporting the configuration error.
+// selectProvider initializes exactly the named provider: a bad name or rejected settings is a config error, and the provider is returned only after the error check because a nil concrete pointer becomes a non-nil interface.
 func selectProvider(log logr.Logger, factories []providerFactory, name string, settings map[string]string) (dns.Provider, error) {
 	known := make([]string, 0, len(factories))
 	for _, pf := range factories {
@@ -167,17 +155,12 @@ func run() error {
 	log.Info("initialized DNS provider", "name", providerCfg.Provider)
 
 	log.Info("checking DNS provider connectivity")
-	// A short deadline of its own: the HTTP client's 30s timeout applies per
-	// request, and startup should not hang on an appliance that is down.
+	// Its own short deadline: the HTTP client's 30s timeout is per request, and startup must not hang on an appliance that is down.
 	hctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	err = dnsProvider.HealthCheck(hctx)
 	cancel()
 	if err != nil {
-		// Non-fatal on purpose. The appliance may be down or the credentials may
-		// be wrong, and exiting here CrashLoops the pod without ever surfacing the
-		// reason through the reconciler. Every reconcile reports the same failure
-		// and requeues with backoff, so a provider that comes back recovers on its
-		// own without a restart.
+		// Non-fatal on purpose: an unreachable appliance would CrashLoop the pod here, while every reconcile reports the same failure and recovers without a restart.
 		log.Error(err, "DNS provider is unreachable, continuing anyway", "name", providerCfg.Provider)
 	}
 
@@ -185,14 +168,9 @@ func run() error {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: ":9090"},
 		HealthProbeBindAddress: ":8081",
-		// The informer re-delivers every route on this interval. The event
-		// filter lets those resyncs through, so a record that changed or
-		// disappeared on the appliance is republished without a cluster edit.
+		// The informer re-delivers every route on this interval and the filter lets those resyncs through, so a record changed on the appliance is republished without a cluster edit.
 		Cache: cache.Options{SyncPeriod: &resyncPeriod},
-		// Two replicas reconciling at once race on the appliance and create
-		// duplicate overrides, so only the Lease holder reconciles. The Lease
-		// lives in the pod's namespace. Releasing it on shutdown lets the next
-		// pod take over without waiting for it to expire.
+		// Only the Lease holder reconciles: two replicas racing on the appliance create duplicate overrides. The Lease lives in the pod's namespace and is released on shutdown.
 		LeaderElection:                leaderElect,
 		LeaderElectionID:              "yk-dns-manager.dns.yk",
 		LeaderElectionReleaseOnCancel: true,
@@ -224,8 +202,7 @@ func run() error {
 		return fmt.Errorf("unable to set up HTTPRoute controller: %w", err)
 	}
 
-	// Signal handling per Go engineering standard:
-	// explicit signal.NotifyContext, not controller-runtime wrapper.
+	// Signal handling per the Go standard: explicit signal.NotifyContext, not the controller-runtime wrapper.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -237,9 +214,7 @@ func run() error {
 	return nil
 }
 
-// logDomainMap says what the controller will actually manage. A domain map
-// that silently matches nothing is the most common way this controller appears
-// to do nothing, so the count goes at info level and the pairs at debug.
+// logDomainMap says what the controller will actually manage: a map that silently matches nothing is the usual way it appears to do nothing, so the count is info and the pairs debug.
 func logDomainMap(log logr.Logger, path string, domainMap *config.DomainMap) {
 	entries := domainMap.Entries()
 	log.Info("loaded domain map", "path", path, "entries", len(entries))
@@ -250,34 +225,25 @@ func logDomainMap(log logr.Logger, path string, domainMap *config.DomainMap) {
 	slices.Sort(domains)
 	for _, d := range domains {
 		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
-		// Exact keys used to cover every name below them too. Warn about the
-		// ones that now match only themselves, since an upgrade with such a key
-		// makes the controller release the records of its subdomains.
+		// exact keys used to cover every name below them too, so an upgrade with such a key releases the subdomains' records
 		if !strings.HasPrefix(d, "*.") && entries["*."+d] == "" {
 			log.Info("domain map key matches only this exact name; use \"*."+d+"\" to also cover the names below it", "domain", d)
 		}
 	}
 }
 
-// newLogger builds the process logger. Development stays off: it swaps in a
-// console encoder, attaches stack traces and turns DPanic into a real panic, and
-// coupling it to "debug" put all three in production clusters. Debug output comes
-// from the level, not from development mode.
+// newLogger keeps zap development mode off: it swaps in a console encoder, attaches stack traces and turns DPanic into a panic, so debug comes from the level instead.
 func newLogger(level zapcore.Level) logr.Logger {
 	return zap.New(zap.UseFlagOptions(&zap.Options{Level: level}))
 }
 
-// parseLogLevel maps the --zap-log-level value to a zap level. logr verbosity is
-// the negative of the zap level, so V(1) needs zapcore.DebugLevel (-1); an
-// operator can ask for deeper verbosity with a numeric value such as "-3".
+// parseLogLevel maps --zap-log-level to a zap level; logr verbosity is the negative of it, so V(1) needs zapcore.DebugLevel (-1).
 func parseLogLevel(s string) (zapcore.Level, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return zapcore.InfoLevel, nil
 	}
-	// zapcore.ParseLevel only accepts non-negative numbers, which would leave
-	// logr verbosity above V(0) unreachable. Handle the numeric form here so an
-	// operator can request V(3) with "-3".
+	// zapcore.ParseLevel only accepts non-negative numbers, so the numeric form is handled here to keep logr verbosity above V(0) reachable
 	if n, err := strconv.Atoi(s); err == nil {
 		if n < math.MinInt8 || n > math.MaxInt8 {
 			return zapcore.InfoLevel, fmt.Errorf("invalid --zap-log-level %q: out of range", s)
