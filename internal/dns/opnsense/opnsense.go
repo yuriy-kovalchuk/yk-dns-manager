@@ -216,12 +216,14 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 		}
 	}
 
-	// The owner list is bookkeeping, not the record's value: every write keeps the owners already there, or a route could leave a record nobody can delete.
+	// The owner list is bookkeeping, not the record's value: Ensure only ever adds to it, or a re-Ensure would leave a record nobody can delete.
 	needJoin := false
-	if owners := ownersOf(keep.Description); record.Owner != "" && !slices.Contains(owners, record.Owner) {
-		want.Description = markWith(append(owners, record.Owner)...)
+	owners := ownersOf(keep.Description)
+	if record.Owner != "" && !slices.Contains(owners, record.Owner) {
+		owners = append(owners, record.Owner)
 		needJoin = true
 	}
+	want.Description = markWith(owners...)
 
 	// Create-only leaves a live override with another value alone but still grows its owner list; a disabled one is re-enabled instead.
 	if !opts.Overwrite && keep.Enabled == "1" && keep.Server != want.Server {

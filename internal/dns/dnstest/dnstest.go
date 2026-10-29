@@ -203,6 +203,16 @@ func Run(t *testing.T, newBackend Factory) {
 		expectLive(t, be, host)
 	})
 
+	t.Run("Ensure by an owner already on the record keeps the other owners", func(t *testing.T) {
+		p, be := newBackend(t)
+		ensure(t, p, ownedBy(ip, owner), createOnly, dns.Created)
+		ensure(t, p, ownedBy(ip, otherOwner), createOnly, dns.Updated)
+		// The caller is already listed, so nothing is written, and the other owner survives whatever the value looks like.
+		ensure(t, p, ownedBy(ip, owner), overwrite, dns.Unchanged)
+		remove(t, p, otherOwner, false)
+		expectLive(t, be, host)
+	})
+
 	t.Run("Remove deletes a record whose owners are unknown", func(t *testing.T) {
 		// A record written before owners were marked belongs to no route in particular, so any caller may release it.
 		p, be := newBackend(t)
