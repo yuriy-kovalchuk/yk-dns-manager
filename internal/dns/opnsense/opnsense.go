@@ -137,11 +137,29 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		publishInterval = d
 	}
 
-	// TLS: ca_file pins the CA of a self-signed appliance, the safe option.
-	// skip_tls_verify turns verification off and hands the credentials to
-	// anyone on the network path, so it warns on every start.
+	transport, err := newTransport(log, settings, flags["skip_tls_verify"])
+	if err != nil {
+		return nil, err
+	}
+
+	return &Provider{
+		baseURL:   strings.TrimRight(settings["base_url"], "/") + "/",
+		apiKey:    settings["api_key"],
+		apiSecret: settings["api_secret"],
+		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		log:       log,
+		staged:    1,
+
+		publishInterval: publishInterval,
+	}, nil
+}
+
+// newTransport is the HTTP transport for the appliance API. ca_file pins the
+// CA of a self-signed appliance, the safe option; skip_tls_verify turns
+// verification off and hands the credentials to anyone on the network path, so
+// it warns on every start.
+func newTransport(log logr.Logger, settings map[string]string, skipVerify bool) (*http.Transport, error) {
 	caFile := settings["ca_file"]
-	skipVerify := flags["skip_tls_verify"]
 	if caFile != "" && skipVerify {
 		return nil, fmt.Errorf("opnsense: ca_file and skip_tls_verify are mutually exclusive; pin the CA with ca_file instead of disabling verification")
 	}
@@ -165,17 +183,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		log.Info("opnsense: skip_tls_verify is ENABLED - TLS certificates are not verified, so the API credentials are sent to anyone who answers on the network path. Set ca_file to pin the appliance CA instead.")
 		transport.TLSClientConfig.InsecureSkipVerify = true // #nosec G402 -- deliberate operator opt-in, warned on every start
 	}
-
-	return &Provider{
-		baseURL:   strings.TrimRight(settings["base_url"], "/") + "/",
-		apiKey:    settings["api_key"],
-		apiSecret: settings["api_secret"],
-		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:       log,
-		staged:    1,
-
-		publishInterval: publishInterval,
-	}, nil
+	return transport, nil
 }
 
 // HealthCheck verifies the API is reachable and accepts the credentials.
@@ -261,11 +269,7 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 		if _, err := b.p.write(ctx, setPath+url.PathEscape(keep.UUID), joined, "saved"); err != nil {
 			return dns.Kept, err
 		}
-		for i := range b.rows {
-			if b.rows[i].UUID == keep.UUID {
-				b.rows[i] = joined
-			}
-		}
+		b.replaceRow(joined)
 		return dns.Kept, nil
 	}
 
@@ -291,11 +295,7 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 		return 0, err
 	}
 	want.UUID = keep.UUID
-	for i := range b.rows {
-		if b.rows[i].UUID == keep.UUID {
-			b.rows[i] = want
-		}
-	}
+	b.replaceRow(want)
 	return dns.Updated, nil
 }
 
@@ -397,6 +397,16 @@ func (b *batch) deleteRow(ctx context.Context, uuid string) error {
 	}
 	b.rows = slices.DeleteFunc(b.rows, func(r hostRow) bool { return r.UUID == uuid })
 	return nil
+}
+
+// replaceRow swaps the batch's stored copy of an override it just rewrote,
+// so later calls in the same batch see what it wrote.
+func (b *batch) replaceRow(row hostRow) {
+	for i := range b.rows {
+		if b.rows[i].UUID == row.UUID {
+			b.rows[i] = row
+		}
+	}
 }
 
 // hostRow is one host override: a row of the search response, and the body
