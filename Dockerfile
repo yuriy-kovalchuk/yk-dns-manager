@@ -18,8 +18,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 COPY . .
 
 ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_DATE=unknown
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
@@ -29,9 +27,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go build \
     -trimpath \
     -ldflags="-s -w \
-      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.Version=${VERSION} \
-      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.Commit=${COMMIT} \
-      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.BuildDate=${BUILD_DATE}" \
+      -X github.com/yuriy-kovalchuk/yk-dns-manager/internal/version.Version=${VERSION}" \
     -o /yk-dns-manager ./cmd/yk-dns-manager
 
 # ─── Runtime ─────────────────────────────────────────────────────────────────

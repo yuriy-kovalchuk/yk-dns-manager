@@ -5,8 +5,6 @@ IMAGE      ?= $(REGISTRY)/$(APP_NAME)
 PLATFORMS  ?= linux/amd64,linux/arm64
 
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 IMG        ?= $(IMAGE):$(VERSION)
 
 CHART_DIR  := charts/$(APP_NAME)
@@ -38,9 +36,7 @@ SETUP_ENVTEST         := go run sigs.k8s.io/controller-runtime/tools/setup-envte
 VERSION_PKG := github.com/yuriy-kovalchuk/yk-dns-manager/internal/version
 
 LDFLAGS := -s -w \
-	-X $(VERSION_PKG).Version=$(VERSION) \
-	-X $(VERSION_PKG).Commit=$(COMMIT) \
-	-X $(VERSION_PKG).BuildDate=$(BUILD_DATE)
+	-X $(VERSION_PKG).Version=$(VERSION)
 
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
@@ -127,8 +123,6 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMG)
 
 ## docker-push: multi-platform build and push to registry
@@ -139,8 +133,6 @@ docker-push:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMG) \
 		--push
 
@@ -165,8 +157,6 @@ helm-push: helm-package
 docker-build-local:
 	docker build \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMAGE):local .
 
 ## kind-up: create the dev cluster, or say so when reusing an existing one

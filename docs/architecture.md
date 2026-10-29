@@ -27,7 +27,7 @@ internal/dns/provider.go            # Provider and Batch interfaces
   dnstest/                          # Conformance suite every provider runs
 internal/config/                    # DomainMap + ProviderConfig loaders
 internal/testenv/                   # In-memory OPNsense fake (tests and `make fake-opnsense`)
-internal/version/version.go         # Version, Commit, BuildDate (injected via ldflags)
+internal/version/version.go         # Version (injected via ldflags)
 test/integration/                   # Provider against the fake over HTTP, incl. conformance
 test/envtest/                       # Real manager against an envtest API server
 charts/yk-dns-manager/              # Helm chart for deployment
