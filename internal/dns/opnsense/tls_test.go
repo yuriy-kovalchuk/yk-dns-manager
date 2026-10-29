@@ -25,10 +25,6 @@ import (
 // newTestCA mints a throwaway CA — the shape of a default OPNsense install's self-signed certificate.
 func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecdsa.PrivateKey) {
 	t.Helper()
-
-	notBefore := time.Now().Add(-time.Hour)
-	notAfter := time.Now().Add(time.Hour)
-
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate CA key: %v", err)
@@ -36,8 +32,8 @@ func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecds
 	caTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "yk-dns-manager test CA"},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
@@ -56,10 +52,6 @@ func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecds
 // newSelfSignedAPI stands up an HTTPS endpoint whose certificate chains to that CA, and returns its URL and the CA in PEM.
 func newSelfSignedAPI(t *testing.T) (string, []byte) {
 	t.Helper()
-
-	notBefore := time.Now().Add(-time.Hour)
-	notAfter := time.Now().Add(time.Hour)
-
 	caPEM, caCert, caKey := newTestCA(t)
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -69,8 +61,8 @@ func newSelfSignedAPI(t *testing.T) (string, []byte) {
 	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: "opnsense.test"},
-		NotBefore:    notBefore,
-		NotAfter:     notAfter,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -327,9 +319,15 @@ func TestNew_SkipTLSVerifyIsABoolean(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 			tlsConfig := p.client.Transport.(*http.Transport).TLSClientConfig
-			skipped := tlsConfig != nil && tlsConfig.InsecureSkipVerify
-			if skipped != tc.wantSkip {
-				t.Errorf("verification skipped = %v, want %v", skipped, tc.wantSkip)
+			if tlsConfig.InsecureSkipVerify != tc.wantSkip {
+				t.Errorf("verification skipped = %v, want %v", tlsConfig.InsecureSkipVerify, tc.wantSkip)
+			}
+			if tc.wantSkip && tlsConfig.MinVersion != tls.VersionTLS12 {
+				t.Errorf("MinVersion = %d, want TLS 1.2", tlsConfig.MinVersion)
+			}
+			// a default configuration must leave the system root pool in play
+			if !tc.wantSkip && tlsConfig.RootCAs != nil {
+				t.Error("RootCAs must be nil by default so the system roots are used")
 			}
 		})
 	}
