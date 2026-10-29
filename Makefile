@@ -123,7 +123,7 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
-		-t $(IMG)
+		-t $(IMG) .
 
 ## docker-push: multi-platform build and push to registry
 # One buildx step: `docker push` cannot publish the multi-arch manifest that
@@ -134,7 +134,7 @@ docker-push:
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
 		-t $(IMG) \
-		--push
+		--push .
 
 # ── Helm ───────────────────────────────────────────────────────────────────────
 ## helm-lint: lint the chart (strict)
