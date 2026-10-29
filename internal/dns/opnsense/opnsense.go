@@ -1,9 +1,4 @@
-// Package opnsense manages DNS records as OPNsense Unbound host overrides.
-//
-// OPNsense keeps edits to host overrides in a staged config; they only reach
-// Unbound when "reconfigure" publishes them. Every override the controller
-// writes carries ManagedDescription followed by the owners that asked for it,
-// and only such overrides are ever changed or deleted.
+// Package opnsense manages DNS records as OPNsense Unbound host overrides, which only reach Unbound once "reconfigure" publishes them.
 package opnsense
 
 import (
@@ -29,15 +24,12 @@ import (
 )
 
 const (
-	// ManagedDescription marks the overrides the controller manages. Route
-	// editors cannot write it, so it decides what may be changed.
+	// ManagedDescription marks the overrides the controller manages; route editors cannot write it.
 	ManagedDescription = "yk-dns-manager: managed record, do not edit"
-	// ownersPrefix starts the list of owners inside the description: the routes
-	// that asked for the record, which is what authorizes a later delete.
+	// ownersPrefix starts the list of owning routes inside the description: what authorizes a later delete.
 	ownersPrefix = " [owners:"
 	ownersSuffix = "]"
-	// LegacyDescription is what versions before ownership marking wrote. Such
-	// an override is only treated as managed when the caller adopts it.
+	// LegacyDescription is what versions before ownership marking wrote; it counts as managed only when adopted.
 	LegacyDescription = "managed by yk-dns-manager"
 
 	searchPath      = "unbound/settings/searchHostOverride"
@@ -46,8 +38,7 @@ const (
 	delPath         = "unbound/settings/delHostOverride/"
 	reconfigurePath = "unbound/service/reconfigure"
 
-	// Response size limits, so a misbehaving appliance cannot exhaust the
-	// pod's memory. 8MiB covers tens of thousands of override rows.
+	// Response size caps so a misbehaving appliance cannot exhaust the pod; 8MiB covers tens of thousands of rows.
 	maxResponseBytes  = 8 << 20
 	maxErrorBodyBytes = 1 << 10 // error bodies are only logged
 )
@@ -60,17 +51,11 @@ type Provider struct {
 	client    *http.Client
 	log       logr.Logger
 
-	// staged counts writes made by any batch; published is the value staged
-	// had when the last successful reconfigure started. A publish is owed
-	// while published < staged. A new provider starts owing one, since a
-	// previous process may have died with changes staged.
+	// staged counts writes by any batch; published is the staging at the last successful reconfigure, so a publish is owed while published < staged.
 	mu        sync.Mutex
 	staged    uint64
 	published uint64
-	// publishInterval is the shortest gap between two reconfigures: publishing
-	// restarts Unbound, so a burst of route changes must not cost one restart
-	// per change. Zero publishes every batch that owes one. lastPublish, under
-	// the same mutex, is when a reconfigure last succeeded.
+	// publishInterval is the shortest gap between reconfigures: publishing restarts Unbound, so a burst of changes must not cost one restart each.
 	publishInterval time.Duration
 	lastPublish     time.Time
 }
@@ -83,9 +68,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		}
 	}
 
-	// The two opt-outs of transport security are real booleans: "True" or
-	// "1" work, and a value such as "yes" fails rather than quietly meaning
-	// "off". Empty means off.
+	// The transport-security opt-outs are real booleans: "yes" fails rather than quietly meaning "off", empty means off.
 	flags := map[string]bool{}
 	for _, key := range []string{"allow_insecure_http", "skip_tls_verify"} {
 		if settings[key] == "" {
@@ -98,9 +81,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		flags[key] = value
 	}
 
-	// base_url must point at the API, and use https: the API key and secret
-	// go out as basic auth on every request. Plain http is allowed only with
-	// an explicit opt-in, meant for the local test appliance.
+	// base_url must be https: the key and secret go out as basic auth on every request, so http needs an explicit opt-in.
 	baseURL, err := url.Parse(settings["base_url"])
 	if err != nil {
 		return nil, fmt.Errorf("opnsense: invalid base_url %q: %w", settings["base_url"], err)
@@ -122,9 +103,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 		log.Info("opnsense: default_ttl is ignored and will be removed: Unbound host overrides have no per-record TTL", "default_ttl", v)
 	}
 
-	// reconfigure restarts Unbound, which takes seconds and costs resolution in
-	// the middle of a burst of changes. publish_interval is the shortest gap
-	// between two of them; empty or 0 publishes on every batch that owes one.
+	// publish_interval is the shortest gap between two reconfigures; empty or 0 publishes on every batch that owes one.
 	publishInterval := time.Duration(0)
 	if v := settings["publish_interval"]; v != "" {
 		d, err := time.ParseDuration(v)
@@ -154,10 +133,7 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}, nil
 }
 
-// newTransport is the HTTP transport for the appliance API. ca_file pins the
-// CA of a self-signed appliance, the safe option; skip_tls_verify turns
-// verification off and hands the credentials to anyone on the network path, so
-// it warns on every start.
+// newTransport pins a self-signed appliance's CA with ca_file; skip_tls_verify turns verification off and warns on every start.
 func newTransport(log logr.Logger, settings map[string]string, skipVerify bool) (*http.Transport, error) {
 	caFile := settings["ca_file"]
 	if caFile != "" && skipVerify {
@@ -196,8 +172,7 @@ func (p *Provider) Batch() dns.Batch {
 	return &batch{p: p}
 }
 
-// batch is one reconcile's view of the appliance: the override list, read
-// once on first use and kept in step with the batch's own writes.
+// batch is one reconcile's view of the appliance: the override list, read once and kept in step with its own writes.
 type batch struct {
 	p      *Provider
 	used   bool // any call made; Commit only publishes for a used batch
@@ -205,12 +180,7 @@ type batch struct {
 	rows   []hostRow
 }
 
-// Ensure makes record.Hostname resolve to record.Value. See dns.Batch.
-//
-// An enabled override without our mark is someone else's record: Ensure
-// reports a conflict and touches nothing. OPNsense accepts several
-// overrides for one name, and a stale duplicate keeps answering, so whenever
-// Ensure writes it first deletes our duplicates.
+// Ensure writes the override for record, clearing our duplicates of that name first; an unmarked override is someone else's and is a conflict. See dns.Batch.
 func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOptions) (dns.Result, error) {
 	want := rowFor(record)
 	matching, err := b.find(ctx, want)
@@ -246,20 +216,14 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 		}
 	}
 
-	// The owner list is the controller's own bookkeeping, not part of the
-	// record's value: a route claiming a record another route wrote joins it,
-	// and every write keeps the owners already there. Joining only when the row
-	// otherwise matches, or not at all in create-only mode, would drop the other
-	// route's owner and leave the record nobody can delete.
+	// The owner list is bookkeeping, not the record's value: every write keeps the owners already there, or a route could leave a record nobody can delete.
 	needJoin := false
 	if owners := ownersOf(keep.Description); record.Owner != "" && !slices.Contains(owners, record.Owner) {
 		want.Description = markWith(append(owners, record.Owner)...)
 		needJoin = true
 	}
 
-	// Create-only mode leaves a live override with another value alone, except
-	// that its owner list still grows. A disabled one answers nothing, so it is
-	// re-enabled instead.
+	// Create-only leaves a live override with another value alone but still grows its owner list; a disabled one is re-enabled instead.
 	if !opts.Overwrite && keep.Enabled == "1" && keep.Server != want.Server {
 		if !needJoin {
 			return dns.Kept, nil
@@ -300,7 +264,6 @@ func (b *batch) Ensure(ctx context.Context, record dns.Record, opts dns.EnsureOp
 }
 
 // Remove deletes our overrides for hostname, and legacy ones when adopting.
-// Anyone else's are left alone.
 func (b *batch) Remove(ctx context.Context, hostname, recordType, owner string, adoptLegacy bool) error {
 	matching, err := b.find(ctx, rowFor(dns.Record{Hostname: hostname, Type: recordType}))
 	if err != nil {
@@ -310,12 +273,7 @@ func (b *batch) Remove(ctx context.Context, hostname, recordType, owner string, 
 		if !r.ours(adoptLegacy) {
 			continue
 		}
-		// The owner list says who may delete the record. The caller has no claim
-		// on one written by other routes alone: the annotation that named the
-		// hostname is writable by anyone who can edit the route. The controller
-		// only gets here when no live route claims the hostname any more, so the
-		// other owners have stopped claiming it and the record goes with the
-		// caller's claim.
+		// The owner list decides who may delete: the annotation naming the hostname is writable by any route editor, and no live route claims it by the time we get here.
 		if owners := ownersOf(r.Description); len(owners) > 0 && !slices.Contains(owners, owner) {
 			b.p.log.Info("leaving a host override other routes own", "hostname", hostname, "owners", strings.Join(owners, " "))
 			continue
@@ -327,8 +285,7 @@ func (b *batch) Remove(ctx context.Context, hostname, recordType, owner string, 
 	return nil
 }
 
-// Commit publishes with one reconfigure, if any write is still unpublished,
-// including writes of earlier batches whose publish failed.
+// Commit publishes with one reconfigure if any write is still unpublished, including earlier batches' failed publishes.
 func (b *batch) Commit(ctx context.Context) error {
 	p := b.p
 	if !b.used {
@@ -343,9 +300,7 @@ func (b *batch) Commit(ctx context.Context) error {
 		return nil
 	}
 	if wait > 0 {
-		// The writes stay owed, so the next Commit after the wait publishes
-		// everything a burst of reconciles staged, instead of each of them
-		// restarting Unbound.
+		// The writes stay owed, so the next Commit after the wait publishes a whole burst at once.
 		return &dns.PublishDeferred{After: wait}
 	}
 
@@ -358,8 +313,7 @@ func (b *batch) Commit(ctx context.Context) error {
 	}
 	p.log.V(1).Info("reconfigure completed")
 
-	// A write made while this reconfigure ran is above target, so it stays
-	// owed.
+	// A write made while this reconfigure ran is above target, so it stays owed.
 	p.mu.Lock()
 	p.published = max(p.published, target)
 	p.lastPublish = time.Now()
@@ -367,8 +321,7 @@ func (b *batch) Commit(ctx context.Context) error {
 	return nil
 }
 
-// find returns the overrides with want's hostname, domain and record type,
-// reading the override list on the batch's first call.
+// find returns the overrides matching want, reading the override list on the batch's first call.
 func (b *batch) find(ctx context.Context, want hostRow) ([]hostRow, error) {
 	b.used = true
 	if !b.loaded {
@@ -389,8 +342,7 @@ func (b *batch) find(ctx context.Context, want hostRow) ([]hostRow, error) {
 	return matching, nil
 }
 
-// deleteRow deletes one override. "not found" means someone else deleted it
-// already, which is the goal.
+// deleteRow deletes one override; "not found" means someone else already did it.
 func (b *batch) deleteRow(ctx context.Context, uuid string) error {
 	if _, err := b.p.write(ctx, delPath+url.PathEscape(uuid), nil, "deleted", "not found"); err != nil {
 		return err
@@ -399,8 +351,7 @@ func (b *batch) deleteRow(ctx context.Context, uuid string) error {
 	return nil
 }
 
-// replaceRow swaps the batch's stored copy of an override it just rewrote,
-// so later calls in the same batch see what it wrote.
+// replaceRow swaps the batch's stored copy of an override it just rewrote.
 func (b *batch) replaceRow(row hostRow) {
 	for i := range b.rows {
 		if b.rows[i].UUID == row.UUID {
@@ -409,8 +360,7 @@ func (b *batch) replaceRow(row hostRow) {
 	}
 }
 
-// hostRow is one host override: a row of the search response, and the body
-// of an add or set.
+// hostRow is one host override: a row of the search response, and the body of an add or set.
 type hostRow struct {
 	UUID        string `json:"uuid,omitempty"`
 	Enabled     string `json:"enabled"`
@@ -423,8 +373,7 @@ type hostRow struct {
 	MX          string `json:"mx"`
 }
 
-// rowFor is the managed override for record. OPNsense splits the name:
-// "sub.app.example.com" is hostname "sub" in domain "app.example.com".
+// rowFor is the managed override for record; OPNsense splits "sub.app.example.com" into host "sub" and domain "app.example.com".
 func rowFor(record dns.Record) hostRow {
 	hostname, domain, _ := strings.Cut(strings.TrimSuffix(record.Hostname, "."), ".")
 	return hostRow{
@@ -455,9 +404,7 @@ func isManaged(description string) bool {
 	return description == ManagedDescription || strings.HasPrefix(description, ManagedDescription+ownersPrefix)
 }
 
-// ownersOf returns the owners in a description. It is empty for a record
-// written before owners were marked, which leaves it deletable by any route
-// until an Ensure records who asked for it.
+// ownersOf returns the owners in a description; empty for pre-ownership records, which stay deletable by any route.
 func ownersOf(description string) []string {
 	rest, ok := strings.CutPrefix(description, ManagedDescription+ownersPrefix)
 	if !ok {
@@ -472,21 +419,16 @@ func (r hostRow) ours(adoptLegacy bool) bool {
 	return isManaged(r.Description) || (adoptLegacy && r.Description == LegacyDescription)
 }
 
-// apiResult is the answer to a write: "result" for add, set and del, plus
-// "uuid" for add, "status" for reconfigure, and "validations" when the
-// appliance rejected the row.
+// apiResult is the answer to a write: result for add/set/del, uuid for add, status for reconfigure, validations on a rejection.
 type apiResult struct {
 	Result string `json:"result"`
 	UUID   string `json:"uuid"`
 	Status string `json:"status"`
-	// Validations maps the rejected field to the appliance's complaint, e.g.
-	// "host.domain": "A domain is required.". Without it a rejection says only
-	// "failed", which is useless for finding out why a record was refused.
+	// Validations maps the rejected field to the complaint, e.g. "host.domain": "A domain is required.".
 	Validations map[string]string `json:"validations"`
 }
 
-// joinValidations renders the appliance's per-field complaints, sorted so the
-// message stays the same across retries.
+// joinValidations renders the appliance's per-field complaints, sorted so the message stays the same across retries.
 func joinValidations(validations map[string]string) string {
 	fields := make([]string, 0, len(validations))
 	for field, complaint := range validations {
@@ -496,9 +438,7 @@ func joinValidations(validations map[string]string) string {
 	return strings.Join(fields, "; ")
 }
 
-// write POSTs a change to the staged config and counts it as owing a
-// publish. OPNsense rejects a write with HTTP 200 and a result other than
-// the accepted ones, so the status code alone proves nothing.
+// write POSTs a change to the staged config and counts it as owing a publish; OPNsense rejects with HTTP 200, so the status code proves nothing.
 func (p *Provider) write(ctx context.Context, path string, row any, accepted ...string) (apiResult, error) {
 	var body any = struct{}{}
 	if row != nil {
@@ -520,9 +460,7 @@ func (p *Provider) write(ctx context.Context, path string, row any, accepted ...
 	return res, nil
 }
 
-// call sends one API request and decodes the JSON answer into out, which may
-// be nil. A status other than 200 is an error carrying a short snippet of the
-// body.
+// call sends one API request and decodes the JSON answer into out, which may be nil; a non-200 status carries a body snippet.
 func (p *Provider) call(ctx context.Context, method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {

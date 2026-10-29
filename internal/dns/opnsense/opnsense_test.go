@@ -9,8 +9,7 @@ import (
 	"github.com/go-logr/logr"
 )
 
-// validSettings is the smallest configuration New accepts. It is built per
-// call so a test can change or drop a key.
+// validSettings is the smallest configuration New accepts, built per call so a test can change or drop a key.
 func validSettings() map[string]string {
 	return map[string]string{
 		"base_url":   "https://opnsense.local/api",
@@ -30,9 +29,7 @@ func TestNew_ValidSettings(t *testing.T) {
 	}
 }
 
-// TestNew_DefaultTTLIgnored: Unbound host overrides have no per-record TTL,
-// so default_ttl never had an effect. It is still accepted, so existing configs
-// keep working, but it warns.
+// TestNew_DefaultTTLIgnored: host overrides have no per-record TTL, so default_ttl never worked; it is accepted, but warns.
 func TestNew_DefaultTTLIgnored(t *testing.T) {
 	for _, v := range []string{"600", "notanumber"} {
 		msgs := &[]string{}
@@ -47,9 +44,7 @@ func TestNew_DefaultTTLIgnored(t *testing.T) {
 	}
 }
 
-// TestNew_MissingRequiredSetting: every credential the API call needs is
-// required, so a config that omits one fails startup instead of sending
-// anonymous requests to the appliance.
+// TestNew_MissingRequiredSetting: a config missing an API credential fails startup instead of sending anonymous requests.
 func TestNew_MissingRequiredSetting(t *testing.T) {
 	for _, missing := range []string{"base_url", "api_key", "api_secret"} {
 		settings := validSettings()
@@ -79,9 +74,7 @@ func TestNew_SkipTLSVerify(t *testing.T) {
 		t.Errorf("MinVersion = %d, want TLS 1.2 (%d)", transport.TLSClientConfig.MinVersion, tls.VersionTLS12)
 	}
 
-	// A default configuration must leave verification untouched, so the system
-	// root pool stays in play. Clone() always yields a non-nil TLSClientConfig,
-	// so assert on the fields rather than the pointer.
+	// a default configuration must leave the system root pool in play; Clone() always yields a non-nil TLSClientConfig, so assert on the fields
 	delete(settings, "skip_tls_verify")
 	p, err = New(logr.Discard(), settings)
 	if err != nil {

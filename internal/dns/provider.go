@@ -12,11 +12,7 @@ type Record struct {
 	Hostname string // FQDN, e.g. "app.example.com"
 	Type     string // "A"
 	Value    string // IP address
-	// Owner says who asked for the record, in a form only the caller
-	// understands; the controller uses "httproute/<namespace>/<name>". The
-	// provider stores it with the record so a later Remove can tell a record
-	// this owner wrote from one another owner wrote. Empty means no owner is
-	// recorded, which is how records written before owners existed look.
+	// Owner names who asked for the record ("httproute/<namespace>/<name>"); the provider stores it so Remove can tell whose record it is.
 	Owner string
 }
 
@@ -30,11 +26,9 @@ const (
 	Updated
 	// Unchanged means the record already matched; nothing was written.
 	Unchanged
-	// Kept means a managed record holds a different value and was left alone
-	// because overwriting was not allowed.
+	// Kept means a managed record holds another value and overwriting was not allowed.
 	Kept
-	// Conflict means a live record the controller does not manage holds the
-	// name. Nothing was written.
+	// Conflict means an unmanaged live record holds the name; nothing was written.
 	Conflict
 )
 
@@ -57,55 +51,31 @@ func (r Result) String() string {
 
 // EnsureOptions controls what Ensure may change.
 type EnsureOptions struct {
-	// Overwrite lets Ensure change a managed record that holds a different
-	// value. Without it such a record is left alone (Kept).
+	// Overwrite lets Ensure change a managed record that holds another value; without it such a record is Kept.
 	Overwrite bool
-	// AdoptLegacy treats a record written by a version of the controller that
-	// did not mark ownership as managed. The caller sets it only when it has
-	// its own evidence that the record is the controller's.
+	// AdoptLegacy treats pre-ownership records as managed; the caller sets it only on its own evidence.
 	AdoptLegacy bool
 }
 
-// Provider is the interface that DNS providers must implement.
-//
-// A provider must tell the records the controller manages from every other
-// record on the backend, and must never change or delete the others. The
-// conformance suite in internal/dns/dnstest pins the full contract.
+// Provider is a DNS backend: it must tell managed records from every other record and never touch the others.
 type Provider interface {
-	// HealthCheck verifies the backend is reachable and accepts the
-	// configured credentials.
+	// HealthCheck verifies the backend is reachable with the configured credentials.
 	HealthCheck(ctx context.Context) error
-	// Batch starts a unit of work, normally one reconcile. A batch is used by
-	// one goroutine; separate batches may run concurrently.
+	// Batch starts a unit of work, normally one reconcile: one goroutine per batch, batches may run concurrently.
 	Batch() Batch
 }
 
-// Batch works from one view of the backend's records, read on first use,
-// and keeps it in step with its own writes. Its writes may be staged; Commit
-// publishes them.
+// Batch works from one view of the backend's records, read on first use and kept in step with its own writes.
 type Batch interface {
-	// Ensure makes record.Hostname resolve to record.Value as a managed
-	// record. A disabled record does not count as live. Nothing is written
-	// when the record already matches, except that a record missing
-	// record.Owner gains it: the owner is what authorizes a later Remove.
+	// Ensure makes record.Hostname resolve to record.Value, recording record.Owner: the owner is what authorizes a later Remove.
 	Ensure(ctx context.Context, record Record, opts EnsureOptions) (Result, error)
-	// Remove deletes the records for hostname and recordType that owner owns,
-	// and legacy ones when adoptLegacy is set. A record whose owners are known
-	// and do not include owner belongs to someone else and is left alone.
-	// Removing a record that does not exist is not an error.
+	// Remove deletes the records for hostname and recordType that owner owns, plus legacy ones when adoptLegacy is set; other owners' records stay.
 	Remove(ctx context.Context, hostname, recordType, owner string, adoptLegacy bool) error
-	// Commit publishes anything staged and not yet published, including
-	// writes from earlier batches whose publish failed. It does nothing for a
-	// batch that was never used. A provider that coalesces publishes may hold
-	// one back and return *PublishDeferred: the changes stay owed, and Commit
-	// has to be called again once the wait has passed.
+	// Commit publishes anything staged, including earlier batches whose publish failed; *PublishDeferred means a publish is held back and still owed.
 	Commit(ctx context.Context) error
 }
 
-// PublishDeferred reports that a provider held a publish back on purpose, to
-// coalesce several changes into one publish of a backend that is expensive to
-// reload. Nothing is lost: the changes stay owed, and the caller has to call
-// Commit again after After, when the publish is due.
+// PublishDeferred reports a publish held back on purpose to coalesce changes: they stay owed, and Commit must run again after After.
 type PublishDeferred struct {
 	After time.Duration
 }

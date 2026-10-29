@@ -5,8 +5,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// Metrics on top of the reconcile counters controller-runtime already
-// exports, served on the manager's metrics endpoint.
+// Metrics sit on top of the reconcile counters controller-runtime already exports, on the manager's metrics endpoint.
 var (
 	recordResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "yk_dns_manager_records_total",

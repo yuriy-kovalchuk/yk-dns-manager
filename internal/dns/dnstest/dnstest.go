@@ -1,7 +1,4 @@
-// Package dnstest is the conformance suite for dns.Provider implementations.
-// A provider's tests call Run with an adapter over a test backend; the suite
-// pins the behaviour the controller relies on, ownership above all: a
-// provider must never change or delete a record it does not manage.
+// Package dnstest is the conformance suite for dns.Provider: it pins the contract the controller relies on, ownership above all.
 package dnstest
 
 import (
@@ -17,8 +14,7 @@ type Origin int
 const (
 	// Managed records carry the provider's ownership marker.
 	Managed Origin = iota
-	// Legacy records were written by a controller version that did not mark
-	// ownership.
+	// Legacy records were written before ownership was marked.
 	Legacy
 	// Foreign records belong to someone else.
 	Foreign
@@ -32,16 +28,13 @@ type Record struct {
 	Disabled bool
 }
 
-// Backend is the provider-specific side of the suite: direct access to the
-// test backend the provider under test talks to.
+// Backend is the provider-specific side of the suite: direct access to the test backend.
 type Backend interface {
-	// Seed writes a record straight to the backend, already live, as if it
-	// was there before the test.
+	// Seed writes a record straight to the backend, already live.
 	Seed(t *testing.T, r Record)
 	// Stored returns every record for fqdn, published or not.
 	Stored(t *testing.T, fqdn string) []Record
-	// Live returns the records for fqdn the backend is currently serving,
-	// disabled ones included.
+	// Live returns the records the backend currently serves for fqdn, disabled ones included.
 	Live(t *testing.T, fqdn string) []Record
 }
 
@@ -54,8 +47,7 @@ const (
 	ip    = "10.0.0.1"
 	newIP = "10.0.0.2"
 
-	// owner and otherOwner are the callers of Ensure and Remove in the tests
-	// that exercise ownership. Their form means nothing to the provider.
+	// owner and otherOwner are the Ensure/Remove callers in the ownership tests; their form means nothing to the provider.
 	owner      = "route/blue"
 	otherOwner = "route/green"
 )
@@ -185,11 +177,9 @@ func Run(t *testing.T, newBackend Factory) {
 	t.Run("Ensure joins a record another owner wrote", func(t *testing.T) {
 		p, be := newBackend(t)
 		ensure(t, p, ownedBy(ip, owner), createOnly, dns.Created)
-		// The address already matches, so only the owner list changes, and that
-		// is still a write.
+		// The address already matches, so only the owner list changes, and that is still a write.
 		ensure(t, p, ownedBy(ip, otherOwner), createOnly, dns.Updated)
-		// Either owner may release the record: whether anything still claims the
-		// name is the caller's business, and the provider cannot know it.
+		// Either owner may release the record: whether anything still claims the name is the caller's business.
 		remove(t, p, otherOwner, false)
 		expectLive(t, be, host)
 	})
@@ -197,8 +187,7 @@ func Run(t *testing.T, newBackend Factory) {
 	t.Run("Ensure joins a record it will not overwrite", func(t *testing.T) {
 		p, be := newBackend(t)
 		ensure(t, p, ownedBy(ip, owner), createOnly, dns.Created)
-		// Create-only mode keeps the address, but a route claiming the name still
-		// joins the owner list, so it can release the record later.
+		// Create-only keeps the address, but a route claiming the name still joins the owner list so it can release the record later.
 		ensure(t, p, ownedBy(newIP, otherOwner), createOnly, dns.Kept)
 		expectLive(t, be, host, Record{FQDN: host, Value: ip, Origin: Managed})
 		remove(t, p, otherOwner, false)
@@ -208,16 +197,14 @@ func Run(t *testing.T, newBackend Factory) {
 	t.Run("Ensure keeps the owners a rewrite would drop", func(t *testing.T) {
 		p, be := newBackend(t)
 		ensure(t, p, ownedBy(ip, owner), createOnly, dns.Created)
-		// The address changes, so the record is rewritten. The first owner is
-		// still on it, and still able to release it.
+		// The address changes, so the record is rewritten with the first owner still on it.
 		ensure(t, p, ownedBy(newIP, otherOwner), overwrite, dns.Updated)
 		remove(t, p, owner, false)
 		expectLive(t, be, host)
 	})
 
 	t.Run("Remove deletes a record whose owners are unknown", func(t *testing.T) {
-		// A record written before owners were marked belongs to no route in
-		// particular, so any caller may release it.
+		// A record written before owners were marked belongs to no route in particular, so any caller may release it.
 		p, be := newBackend(t)
 		be.Seed(t, Record{FQDN: host, Value: ip, Origin: Managed})
 		remove(t, p, owner, false)

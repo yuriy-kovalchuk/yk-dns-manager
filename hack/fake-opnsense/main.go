@@ -1,10 +1,4 @@
-// Command fake-opnsense serves an in-memory OPNsense Unbound DNS API so the
-// controller can be run end to end without an appliance. It is the same fake the
-// integration tests run against, so what you see locally is what the tests pin.
-//
-// It stores everything in memory and forgets it on exit. Do not point it at a
-// real appliance's configuration, and do not put real credentials in it: it
-// accepts any credentials, or none.
+// Command fake-opnsense serves an in-memory OPNsense Unbound API — the same fake the integration tests run against — accepting any credentials, so never point it at a real appliance.
 package main
 
 import (
@@ -73,10 +67,7 @@ func main() {
 	}
 }
 
-// logRequests prints one line per request, including whether the controller
-// presented credentials. A missing Authorization header almost always means the
-// provider config is pointing somewhere it should not be. The credential itself
-// is never printed.
+// logRequests prints one line per request, including whether credentials were presented but never the credential itself; a missing Authorization header usually means the provider config points somewhere it should not.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusWriter{ResponseWriter: w, status: http.StatusOK}
