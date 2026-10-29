@@ -48,7 +48,7 @@ type HTTPRouteReconciler struct {
 }
 
 // Reconcile brings the DNS records of one HTTPRoute in line with its spec.
-func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	route := &gatewayv1.HTTPRoute{}
 	if err := r.Get(ctx, req.NamespacedName, route); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -60,80 +60,90 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !route.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, route, owned, wanted)
 	}
-
-	// Add the finalizer before any record exists, so a deletion can never skip cleanup; a route with nothing to manage gets none.
-	if !controllerutil.ContainsFinalizer(route, finalizerName) {
-		if len(wanted) == 0 {
-			return ctrl.Result{}, nil
-		}
-		if err := r.setFinalizer(ctx, route, true); err != nil {
-			r.report(route, corev1.EventTypeWarning, "DNSSyncFailed", err.Error())
-			return ctrl.Result{}, err
-		}
+	// A route with nothing to manage gets no finalizer.
+	if len(wanted) == 0 && !controllerutil.ContainsFinalizer(route, finalizerName) {
+		return ctrl.Result{}, nil
 	}
 
-	// All changes go through one batch and are published once at the end, even after an error; a failed publish is returned so it is retried.
+	// All changes go through one batch, published once at the end even after an error.
 	batch := r.DNS.Batch()
-	defer func() {
-		commitErr := batch.Commit(ctx)
-		var deferred *dns.PublishDeferred
-		if errors.As(commitErr, &deferred) {
-			// The provider held the publish back to coalesce a burst: they stay owed, so coming back after the wait publishes them.
-			result.RequeueAfter = max(result.RequeueAfter, deferred.After)
-			return
-		}
-		if commitErr != nil {
-			dnsErrors.WithLabelValues("publish").Inc()
-			err = errors.Join(err, fmt.Errorf("publishing DNS changes: %w", commitErr))
-		}
-		if err != nil {
-			r.report(route, corev1.EventTypeWarning, "DNSSyncFailed", err.Error())
-		}
-	}()
+	syncErr := r.sync(ctx, batch, route, owned, wanted)
+	requeue, commitErr := commit(ctx, batch)
+	if err := errors.Join(syncErr, commitErr); err != nil {
+		r.report(route, corev1.EventTypeWarning, "DNSSyncFailed", err.Error())
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
 
-	// Remove the records of hostnames the route no longer wants.
+// sync adds the finalizer before any record exists, releases the hostnames the route dropped, ensures the ones it wants and records which it now manages.
+func (r *HTTPRouteReconciler) sync(ctx context.Context, batch dns.Batch, route *gatewayv1.HTTPRoute, owned, wanted []string) error {
+	if !controllerutil.ContainsFinalizer(route, finalizerName) {
+		if err := r.setFinalizer(ctx, route, true); err != nil {
+			return err
+		}
+	}
 	for _, h := range owned {
-		if !slices.Contains(wanted, h) {
-			if err := r.removeRecord(ctx, batch, route, h, owned); err != nil {
-				return ctrl.Result{}, fmt.Errorf("deleting removed DNS record for %s: %w", h, err)
-			}
-		}
-	}
-
-	// A legacy record is taken over only for a hostname this route already managed; a name held by someone else's record stays out of the annotation.
-	var managed []string
-	owner := routeOwner(route)
-	for _, h := range wanted {
-		ip, _ := r.DomainMap.LookupIP(h)
-		res, err := batch.Ensure(ctx, dns.Record{Hostname: h, Type: "A", Value: ip, Owner: owner},
-			dns.EnsureOptions{Overwrite: r.Upsert, AdoptLegacy: slices.Contains(owned, h)})
-		if err != nil {
-			dnsErrors.WithLabelValues("ensure").Inc()
-			return ctrl.Result{}, fmt.Errorf("ensuring DNS record for %s: %w", h, err)
-		}
-		recordResults.WithLabelValues(res.String()).Inc()
-		switch res {
-		case dns.Created:
-			r.report(route, corev1.EventTypeNormal, "DNSRecordCreated", h+" -> "+ip)
-		case dns.Updated:
-			r.report(route, corev1.EventTypeNormal, "DNSRecordUpdated", h+" -> "+ip)
-		case dns.Kept:
-			r.report(route, corev1.EventTypeWarning, "DNSRecordDrift", h+" holds a different value than "+ip+"; upsert mode is off, so it is left alone")
-		case dns.Conflict:
-			r.report(route, corev1.EventTypeWarning, "DNSConflict", h+" already has a DNS record this controller does not manage; it is left alone")
+		if slices.Contains(wanted, h) {
 			continue
-		case dns.Unchanged:
 		}
-		managed = append(managed, h)
+		if err := r.removeRecord(ctx, batch, route, h, owned); err != nil {
+			return fmt.Errorf("deleting removed DNS record for %s: %w", h, err)
+		}
 	}
+	var managed []string
+	for _, h := range wanted {
+		isManaged, err := r.ensureRecord(ctx, batch, route, h, slices.Contains(owned, h))
+		if err != nil {
+			return err
+		}
+		if isManaged {
+			managed = append(managed, h)
+		}
+	}
+	if slices.Equal(owned, managed) {
+		return nil
+	}
+	return r.saveManagedHostnames(ctx, route, managed)
+}
 
-	// Save what the route manages now.
-	if !slices.Equal(owned, managed) {
-		if err := r.saveManagedHostnames(ctx, route, managed); err != nil {
-			return ctrl.Result{}, err
-		}
+// ensureRecord points hostname at its domain-map IP and reports whether the route now manages it; a legacy record is adopted only for a hostname the route already managed, and a name held by someone else's record is not managed.
+func (r *HTTPRouteReconciler) ensureRecord(ctx context.Context, batch dns.Batch, route *gatewayv1.HTTPRoute, hostname string, adoptLegacy bool) (bool, error) {
+	ip, _ := r.DomainMap.LookupIP(hostname)
+	res, err := batch.Ensure(ctx, dns.Record{Hostname: hostname, Type: "A", Value: ip, Owner: routeOwner(route)},
+		dns.EnsureOptions{Overwrite: r.Upsert, AdoptLegacy: adoptLegacy})
+	if err != nil {
+		dnsErrors.WithLabelValues("ensure").Inc()
+		return false, fmt.Errorf("ensuring DNS record for %s: %w", hostname, err)
 	}
-	return ctrl.Result{}, nil
+	recordResults.WithLabelValues(res.String()).Inc()
+	switch res {
+	case dns.Created:
+		r.report(route, corev1.EventTypeNormal, "DNSRecordCreated", hostname+" -> "+ip)
+	case dns.Updated:
+		r.report(route, corev1.EventTypeNormal, "DNSRecordUpdated", hostname+" -> "+ip)
+	case dns.Kept:
+		r.report(route, corev1.EventTypeWarning, "DNSRecordDrift", hostname+" holds a different value than "+ip+"; upsert mode is off, so it is left alone")
+	case dns.Conflict:
+		r.report(route, corev1.EventTypeWarning, "DNSConflict", hostname+" already has a DNS record this controller does not manage; it is left alone")
+		return false, nil
+	case dns.Unchanged:
+	}
+	return true, nil
+}
+
+// commit publishes the batch; a publish the provider holds back to coalesce a burst is not an error but a time to come back.
+func commit(ctx context.Context, batch dns.Batch) (time.Duration, error) {
+	err := batch.Commit(ctx)
+	var deferred *dns.PublishDeferred
+	if errors.As(err, &deferred) {
+		return deferred.After, nil
+	}
+	if err != nil {
+		dnsErrors.WithLabelValues("publish").Inc()
+		return 0, fmt.Errorf("publishing DNS changes: %w", err)
+	}
+	return 0, nil
 }
 
 // ownedHostnames are the hostnames the route recorded managing; a corrupt annotation counts as empty because guessing could delete the wrong records.
@@ -207,27 +217,25 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", h, err))
 		}
 	}
-	if err := batch.Commit(ctx); err != nil {
-		var deferred *dns.PublishDeferred
-		if errors.As(err, &deferred) {
-			// The provider is only holding the publish back: the deletion is not published yet, so the finalizer stays and the route comes back when it is due.
-			if timeLeft := time.Until(route.DeletionTimestamp.Add(r.CleanupGracePeriod)); timeLeft > 0 {
-				return ctrl.Result{RequeueAfter: min(deferred.After, timeLeft)}, nil
-			}
-			cleanupErr = errors.Join(cleanupErr, errors.New("the deletion was never published before the grace period ran out"))
-		} else {
-			dnsErrors.WithLabelValues("publish").Inc()
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("publishing: %w", err))
-		}
-	}
+	requeue, err := commit(ctx, batch)
+	cleanupErr = errors.Join(cleanupErr, err)
 
-	if cleanupErr != nil {
-		giveUpAt := route.DeletionTimestamp.Add(r.CleanupGracePeriod)
-		if timeLeft := time.Until(giveUpAt); timeLeft > 0 {
-			r.report(route, corev1.EventTypeWarning, "DNSCleanupFailed", fmt.Sprintf("retrying until %s: %v", giveUpAt.Format(time.RFC3339), cleanupErr))
-			return ctrl.Result{RequeueAfter: min(timeLeft, cleanupRetryInterval)}, nil
+	giveUpAt := route.DeletionTimestamp.Add(r.CleanupGracePeriod)
+	timeLeft := time.Until(giveUpAt)
+	switch {
+	case cleanupErr == nil && requeue == 0:
+		// published
+	case timeLeft <= 0:
+		if requeue > 0 {
+			cleanupErr = errors.Join(cleanupErr, errors.New("the deletion was never published before the grace period ran out"))
 		}
 		r.report(route, corev1.EventTypeWarning, "DNSCleanupAbandoned", fmt.Sprintf("releasing the route after the grace period; DNS records may be left behind: %v", cleanupErr))
+	case cleanupErr == nil:
+		// The provider is only holding the publish back, so the finalizer stays until the deletion actually goes out.
+		return ctrl.Result{RequeueAfter: min(requeue, timeLeft)}, nil
+	default:
+		r.report(route, corev1.EventTypeWarning, "DNSCleanupFailed", fmt.Sprintf("retrying until %s: %v", giveUpAt.Format(time.RFC3339), cleanupErr))
+		return ctrl.Result{RequeueAfter: min(timeLeft, cleanupRetryInterval)}, nil
 	}
 	return ctrl.Result{}, r.setFinalizer(ctx, route, false)
 }
