@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net/netip"
 	"os"
 	"regexp"
@@ -34,28 +35,35 @@ func LoadDomainMap(path string) (*DomainMap, error) {
 
 	entries := make(map[string]string, len(raw))
 	for domain, value := range raw {
-		if strings.TrimSpace(domain) == "" {
-			return nil, fmt.Errorf("domain map file %s: entry with an empty domain key", path)
-		}
-		// keys are compared with route hostnames, which Gateway API keeps lowercase and without a trailing dot, so any other form would never match
-		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
-		if !validDomainKey(key) {
-			return nil, fmt.Errorf("domain map entry %q: not a valid domain name or *.domain wildcard", domain)
+		key, ip, err := parseEntry(domain, value)
+		if err != nil {
+			return nil, fmt.Errorf("domain map file %s: %w", path, err)
 		}
 		if _, dup := entries[key]; dup {
-			return nil, fmt.Errorf("domain map entry %q: duplicates another entry once normalized to %q", domain, key)
+			return nil, fmt.Errorf("domain map file %s: entry %q duplicates another entry once normalized to %q", path, domain, key)
 		}
-		addr, err := netip.ParseAddr(strings.TrimSpace(value))
-		if err != nil {
-			return nil, fmt.Errorf("domain map entry %q: %q is not a valid IP address", domain, value)
-		}
-		if !addr.Is4() {
-			return nil, fmt.Errorf("domain map entry %q: %s is not IPv4; only A records are managed", domain, addr)
-		}
-		entries[key] = addr.String()
+		entries[key] = ip
 	}
-
 	return &DomainMap{entries: entries}, nil
+}
+
+// parseEntry normalizes a key the way Gateway API writes route hostnames, lowercase without a trailing dot, so it can match one, and requires an IPv4 value.
+func parseEntry(domain, value string) (key, ip string, err error) {
+	key = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if key == "" {
+		return "", "", fmt.Errorf("entry with an empty domain key")
+	}
+	if !validDomainKey(key) {
+		return "", "", fmt.Errorf("entry %q: not a valid domain name or *.domain wildcard", domain)
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil {
+		return "", "", fmt.Errorf("entry %q: %q is not a valid IP address", domain, value)
+	}
+	if !addr.Is4() {
+		return "", "", fmt.Errorf("entry %q: %s is not IPv4; only A records are managed", domain, addr)
+	}
+	return key, addr.String(), nil
 }
 
 // dnsLabel is one label of a domain name: letters, digits and hyphens, not starting or ending with a hyphen, at most 63 characters.
@@ -95,9 +103,5 @@ func (dm *DomainMap) LookupIP(hostname string) (string, bool) {
 
 // Entries returns a copy of the configured domain-to-IP mapping.
 func (dm *DomainMap) Entries() map[string]string {
-	out := make(map[string]string, len(dm.entries))
-	for d, ip := range dm.entries {
-		out[d] = ip
-	}
-	return out
+	return maps.Clone(dm.entries)
 }

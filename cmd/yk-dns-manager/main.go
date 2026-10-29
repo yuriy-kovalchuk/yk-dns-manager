@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"os/signal"
@@ -36,7 +37,7 @@ import (
 // providerFactory is a single provider candidate for initialization.
 type providerFactory struct {
 	name string
-	// settings lists every key the provider understands, so a typo such as "sip_tls_verify" fails startup; nil skips the check.
+	// settings lists every key the provider understands, so a typo such as "sip_tls_verify" fails startup.
 	settings []string
 	fn       func(logr.Logger, map[string]string) (dns.Provider, error)
 }
@@ -56,32 +57,31 @@ func newProviders() []providerFactory {
 
 // selectProvider initializes exactly the named provider: a bad name or rejected settings is a config error, and the provider is returned only after the error check because a nil concrete pointer becomes a non-nil interface.
 func selectProvider(log logr.Logger, factories []providerFactory, name string, settings map[string]string) (dns.Provider, error) {
-	known := make([]string, 0, len(factories))
-	for _, pf := range factories {
-		if pf.name != name {
+	i := slices.IndexFunc(factories, func(pf providerFactory) bool { return pf.name == name })
+	if i < 0 {
+		var known []string
+		for _, pf := range factories {
 			known = append(known, pf.name)
-			continue
 		}
-		if pf.settings != nil {
-			var unknown []string
-			for key := range settings {
-				if !slices.Contains(pf.settings, key) {
-					unknown = append(unknown, key)
-				}
-			}
-			if len(unknown) > 0 {
-				slices.Sort(unknown)
-				return nil, fmt.Errorf("DNS provider %q: unknown settings %s; known settings: %s",
-					name, strings.Join(unknown, ", "), strings.Join(pf.settings, ", "))
-			}
-		}
-		p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
-		if err != nil {
-			return nil, fmt.Errorf("initializing DNS provider %q: %w", name, err)
-		}
-		return p, nil
+		return nil, fmt.Errorf("unknown DNS provider %q; available: %s", name, strings.Join(known, ", "))
 	}
-	return nil, fmt.Errorf("unknown DNS provider %q; available: %s", name, strings.Join(known, ", "))
+	pf := factories[i]
+	var unknown []string
+	for key := range settings {
+		if !slices.Contains(pf.settings, key) {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return nil, fmt.Errorf("DNS provider %q: unknown settings %s; known settings: %s",
+			name, strings.Join(unknown, ", "), strings.Join(pf.settings, ", "))
+	}
+	p, err := pf.fn(log.WithName("dns-"+pf.name), settings)
+	if err != nil {
+		return nil, fmt.Errorf("initializing DNS provider %q: %w", name, err)
+	}
+	return p, nil
 }
 
 // healthCheckTimeout bounds the startup connectivity check.
@@ -105,7 +105,6 @@ func run() error {
 	var (
 		logLevel           string
 		domainMapPath      string
-		domainMap          *config.DomainMap
 		cleanupGracePeriod time.Duration
 		requireAccepted    bool
 		leaderElect        bool
@@ -135,7 +134,7 @@ func run() error {
 	if domainMapPath == "" {
 		return fmt.Errorf("--domain-map-path flag or DOMAIN_MAP_PATH environment variable is required")
 	}
-	domainMap, err = config.LoadDomainMap(domainMapPath)
+	domainMap, err := config.LoadDomainMap(domainMapPath)
 	if err != nil {
 		return fmt.Errorf("unable to load domain map: %w", err)
 	}
@@ -218,12 +217,7 @@ func run() error {
 func logDomainMap(log logr.Logger, path string, domainMap *config.DomainMap) {
 	entries := domainMap.Entries()
 	log.Info("loaded domain map", "path", path, "entries", len(entries))
-	domains := make([]string, 0, len(entries))
-	for d := range entries {
-		domains = append(domains, d)
-	}
-	slices.Sort(domains)
-	for _, d := range domains {
+	for _, d := range slices.Sorted(maps.Keys(entries)) {
 		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
 		// exact keys used to cover every name below them too, so an upgrade with such a key releases the subdomains' records
 		if !strings.HasPrefix(d, "*.") && entries["*."+d] == "" {
