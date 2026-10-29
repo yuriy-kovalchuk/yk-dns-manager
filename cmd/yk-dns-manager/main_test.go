@@ -116,6 +116,46 @@ type stubProvider struct {
 	dns.Provider
 }
 
+// sampleSettings is a valid value for every provider settings key the factory
+// list declares. A key with no entry here fails the test, so growing the list
+// is a deliberate act rather than something that slips through.
+var sampleSettings = map[string]string{
+	"base_url":            "https://opnsense.local/api",
+	"api_key":             "key",
+	"api_secret":          "secret",
+	"ca_file":             "", // empty means unset; a real one would need a real PEM
+	"skip_tls_verify":     "true",
+	"allow_insecure_http": "true",
+	"default_ttl":         "600",
+	"publish_interval":    "5s",
+}
+
+// TestProvidersAcceptTheirOwnSettings covers the real newProviders() list,
+// which the selectProvider tests never touch because they pass fake factories:
+// every key a factory declares as known must still build, so a key that was
+// renamed or given stricter validation fails here instead of at startup.
+//
+// What it cannot catch is the other direction. A provider never reports which
+// keys it read, so a declared key the provider has stopped knowing is accepted
+// by the config check and silently ignored by the provider. That is why the
+// list has to stay where the config check can see it.
+func TestProvidersAcceptTheirOwnSettings(t *testing.T) {
+	for _, f := range newProviders() {
+		settings := map[string]string{}
+		for _, key := range f.settings {
+			value, ok := sampleSettings[key]
+			if !ok {
+				t.Errorf("provider %q declares %q, which this test has no value for", f.name, key)
+				continue
+			}
+			settings[key] = value
+		}
+		if _, err := f.fn(logr.Discard(), settings); err != nil {
+			t.Errorf("provider %q refused its own declared settings: %v", f.name, err)
+		}
+	}
+}
+
 func TestSelectProviderPicksByName(t *testing.T) {
 	var called []string
 	factory := func(name string) providerFactory {
