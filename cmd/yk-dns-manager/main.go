@@ -152,25 +152,7 @@ func run() error {
 		return fmt.Errorf("unable to load domain map: %w", err)
 	}
 
-	// Log what the controller will actually manage. A domain map that silently
-	// matches nothing is the most common way this controller appears to do
-	// nothing, so the count goes at info level and the pairs at debug.
-	entries := domainMap.Entries()
-	log.Info("loaded domain map", "path", domainMapPath, "entries", len(entries))
-	domains := make([]string, 0, len(entries))
-	for d := range entries {
-		domains = append(domains, d)
-	}
-	slices.Sort(domains)
-	for _, d := range domains {
-		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
-		// Exact keys used to cover every name below them too. Warn about the
-		// ones that now match only themselves, since an upgrade with such a key
-		// makes the controller release the records of its subdomains.
-		if !strings.HasPrefix(d, "*.") && entries["*."+d] == "" {
-			log.Info("domain map key matches only this exact name; use \"*."+d+"\" to also cover the names below it", "domain", d)
-		}
-	}
+	logDomainMap(log, domainMapPath, domainMap)
 
 	providerCfg, err := config.LoadProviderConfig()
 	if err != nil {
@@ -253,6 +235,28 @@ func run() error {
 	}
 
 	return nil
+}
+
+// logDomainMap says what the controller will actually manage. A domain map
+// that silently matches nothing is the most common way this controller appears
+// to do nothing, so the count goes at info level and the pairs at debug.
+func logDomainMap(log logr.Logger, path string, domainMap *config.DomainMap) {
+	entries := domainMap.Entries()
+	log.Info("loaded domain map", "path", path, "entries", len(entries))
+	domains := make([]string, 0, len(entries))
+	for d := range entries {
+		domains = append(domains, d)
+	}
+	slices.Sort(domains)
+	for _, d := range domains {
+		log.V(1).Info("domain map entry", "domain", d, "ip", entries[d])
+		// Exact keys used to cover every name below them too. Warn about the
+		// ones that now match only themselves, since an upgrade with such a key
+		// makes the controller release the records of its subdomains.
+		if !strings.HasPrefix(d, "*.") && entries["*."+d] == "" {
+			log.Info("domain map key matches only this exact name; use \"*."+d+"\" to also cover the names below it", "domain", d)
+		}
+	}
 }
 
 // newLogger builds the process logger. Development stays off: it swaps in a
