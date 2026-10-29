@@ -4,9 +4,10 @@ package testenv
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -146,21 +147,43 @@ func (f *OPNsense) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (f *OPNsense) Snapshot() map[string]HostOverride {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return copyStore(f.store)
+	return maps.Clone(f.store)
 }
 
 // Published returns a copy of the overrides as of the last successful reconfigure, which is what Unbound would actually answer with.
 func (f *OPNsense) Published() map[string]HostOverride {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return copyStore(f.published)
+	return maps.Clone(f.published)
 }
 
 // Calls returns the request log in order as "METHOD /path".
 func (f *OPNsense) Calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]string(nil), f.calls...)
+	return slices.Clone(f.calls)
+}
+
+// CountCalls counts the requests whose path contains endpoint.
+func (f *OPNsense) CountCalls(endpoint string) int {
+	n := 0
+	for _, c := range f.Calls() {
+		if strings.Contains(c, "/"+endpoint) {
+			n++
+		}
+	}
+	return n
+}
+
+// Rows returns the overrides in store whose name is fqdn.
+func Rows(store map[string]HostOverride, fqdn string) []HostOverride {
+	var out []HostOverride
+	for _, h := range store {
+		if h.FQDN() == fqdn {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // ResetCalls clears the request log.
@@ -174,11 +197,16 @@ func (f *OPNsense) ResetCalls() {
 func (f *OPNsense) Seed(h HostOverride) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.nextID++
-	id := fmt.Sprintf("uuid-%d", f.nextID)
+	id := f.newID()
 	f.store[id] = h
 	f.published[id] = h
 	return id
+}
+
+// newID returns an unused uuid; the caller holds mu.
+func (f *OPNsense) newID() string {
+	f.nextID++
+	return fmt.Sprintf("uuid-%d", f.nextID)
 }
 
 func (f *OPNsense) handleSearch(w http.ResponseWriter, _ *http.Request) {
@@ -197,49 +225,29 @@ func (f *OPNsense) handleSearch(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (f *OPNsense) handleAdd(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		Host HostOverride `json:"host"`
-	}
-	if err := readJSON(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	host, ok := readHost(w, r)
+	if !ok {
 		return
 	}
-	if v := validate(payload.Host); len(v) > 0 {
-		writeJSON(w, map[string]any{"result": "failed", "validations": v})
-		return
-	}
-
 	f.mu.Lock()
-	f.nextID++
-	id := fmt.Sprintf("uuid-%d", f.nextID)
-	f.store[id] = payload.Host
+	id := f.newID()
+	f.store[id] = host
 	f.mu.Unlock()
-
 	writeJSON(w, map[string]string{"result": "saved", "uuid": id})
 }
 
 func (f *OPNsense) handleSet(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, setPathPrefix)
-	var payload struct {
-		Host HostOverride `json:"host"`
-	}
-	if err := readJSON(r, &payload); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.store[id]; !ok {
 		writeJSON(w, map[string]string{"result": "failed"})
 		return
 	}
-	if v := validate(payload.Host); len(v) > 0 {
-		writeJSON(w, map[string]any{"result": "failed", "validations": v})
-		return
+	if host, ok := readHost(w, r); ok {
+		f.store[id] = host
+		writeJSON(w, map[string]string{"result": "saved"})
 	}
-	f.store[id] = payload.Host
-	writeJSON(w, map[string]string{"result": "saved"})
 }
 
 func (f *OPNsense) handleDel(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +265,7 @@ func (f *OPNsense) handleDel(w http.ResponseWriter, r *http.Request) {
 
 func (f *OPNsense) handleReconfigure(w http.ResponseWriter, _ *http.Request) {
 	f.mu.Lock()
-	f.published = copyStore(f.store)
+	f.published = maps.Clone(f.store)
 	hook := f.duringReconfigure
 	f.mu.Unlock()
 	if hook != nil {
@@ -291,23 +299,23 @@ func validate(h HostOverride) map[string]string {
 	return v
 }
 
-func copyStore(in map[string]HostOverride) map[string]HostOverride {
-	out := make(map[string]HostOverride, len(in))
-	for id, h := range in {
-		out[id] = h
-	}
-	return out
-}
-
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func readJSON(r *http.Request, v any) error {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
+// readHost decodes and validates the row of an add or set; false means the answer is already written.
+func readHost(w http.ResponseWriter, r *http.Request) (HostOverride, bool) {
+	var payload struct {
+		Host HostOverride `json:"host"`
 	}
-	return json.Unmarshal(data, v)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return HostOverride{}, false
+	}
+	if v := validate(payload.Host); len(v) > 0 {
+		writeJSON(w, map[string]any{"result": "failed", "validations": v})
+		return HostOverride{}, false
+	}
+	return payload.Host, true
 }

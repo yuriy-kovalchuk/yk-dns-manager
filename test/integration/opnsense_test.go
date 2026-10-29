@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,16 +32,7 @@ func newFake(t *testing.T) (*testenv.OPNsense, string) {
 
 func newProvider(t *testing.T, serverURL string) *opnsense.Provider {
 	t.Helper()
-	p, err := opnsense.New(logrtesting.NewTestLogger(t), map[string]string{
-		"base_url":            serverURL + "/api",
-		"api_key":             "test-key",
-		"api_secret":          "test-secret",
-		"allow_insecure_http": "true",
-	})
-	if err != nil {
-		t.Fatalf("failed to create provider: %v", err)
-	}
-	return p
+	return newProviderWith(t, serverURL, nil)
 }
 
 func record(fqdn, ip string) dns.Record {
@@ -59,34 +51,14 @@ func splitFQDN(fqdn string) (host, domain string) {
 	return host, domain
 }
 
-func rowsFor(store map[string]testenv.HostOverride, fqdn string) []testenv.HostOverride {
-	var out []testenv.HostOverride
-	for _, h := range store {
-		if h.FQDN() == fqdn {
-			out = append(out, h)
-		}
-	}
-	return out
-}
-
 // only returns the single row for fqdn, failing the test if there is not exactly one.
 func only(t *testing.T, store map[string]testenv.HostOverride, fqdn string) testenv.HostOverride {
 	t.Helper()
-	rows := rowsFor(store, fqdn)
+	rows := testenv.Rows(store, fqdn)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows for %s, want 1: %v", len(rows), fqdn, rows)
 	}
 	return rows[0]
-}
-
-func countCalls(fake *testenv.OPNsense, endpoint string) int {
-	n := 0
-	for _, c := range fake.Calls() {
-		if strings.Contains(c, "/"+endpoint) {
-			n++
-		}
-	}
-	return n
 }
 
 func ensure(t *testing.T, b dns.Batch, rec dns.Record, overwrite bool) dns.Result {
@@ -189,7 +161,7 @@ func TestRemoveOfMissingRecordIssuesNoDelete(t *testing.T) {
 	if err := p.Batch().Remove(context.Background(), "ghost.example.com", "A", "route/app", true); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if n := countCalls(fake, testenv.EndpointDel); n != 0 {
+	if n := fake.CountCalls(testenv.EndpointDel); n != 0 {
 		t.Errorf("issued %d deletes for a record that does not exist", n)
 	}
 }
@@ -228,10 +200,10 @@ func TestBatchListsOnce(t *testing.T) {
 	}
 	commit(t, b)
 
-	if n := countCalls(fake, testenv.EndpointSearch); n != 1 {
+	if n := fake.CountCalls(testenv.EndpointSearch); n != 1 {
 		t.Errorf("listed %d times, want 1", n)
 	}
-	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
+	if n := fake.CountCalls(testenv.EndpointReconfigure); n != 1 {
 		t.Errorf("reconfigured %d times, want 1", n)
 	}
 }
@@ -259,7 +231,7 @@ func TestFirstCommitPublishes(t *testing.T) {
 		ensure(t, b, record("app.example.com", "10.0.0.1"), false)
 		commit(t, b)
 	}
-	if n := countCalls(fake, testenv.EndpointReconfigure); n != 1 {
+	if n := fake.CountCalls(testenv.EndpointReconfigure); n != 1 {
 		t.Errorf("reconfigured %d times, want exactly the one publish a new provider owes", n)
 	}
 }
@@ -304,7 +276,7 @@ func TestWriteDuringPublishStaysOwed(t *testing.T) {
 	})
 	commit(t, first)
 
-	if n := len(rowsFor(fake.Published(), "b.example.com")); n != 0 {
+	if n := len(testenv.Rows(fake.Published(), "b.example.com")); n != 0 {
 		t.Fatal("test setup: the racing write was published by the first reconfigure")
 	}
 	commit(t, second)
@@ -332,9 +304,7 @@ func newProviderWith(t *testing.T, serverURL string, extra map[string]string) *o
 		"api_secret":          "test-secret",
 		"allow_insecure_http": "true",
 	}
-	for k, v := range extra {
-		settings[k] = v
-	}
+	maps.Copy(settings, extra)
 	p, err := opnsense.New(logrtesting.NewTestLogger(t), settings)
 	if err != nil {
 		t.Fatalf("creating provider: %v", err)
@@ -364,7 +334,7 @@ func TestPublishIntervalCoalescesPublishes(t *testing.T) {
 		if deferred.After <= 0 || deferred.After > time.Hour {
 			t.Errorf("After = %s, want a wait inside the interval", deferred.After)
 		}
-		if n := len(rowsFor(fake.Published(), "b.example.com")); n != 0 {
+		if n := len(testenv.Rows(fake.Published(), "b.example.com")); n != 0 {
 			t.Errorf("b.example.com was published %d times despite the hold", n)
 		}
 	})
@@ -396,22 +366,8 @@ func TestPublishIntervalCoalescesPublishes(t *testing.T) {
 		}
 		only(t, fake.Published(), "b.example.com")
 		only(t, fake.Published(), "c.example.com")
-		if n := countCalls(fake, testenv.EndpointReconfigure); n != 2 {
+		if n := fake.CountCalls(testenv.EndpointReconfigure); n != 2 {
 			t.Errorf("%d reconfigures for three batches, want 2", n)
-		}
-	})
-
-	t.Run("a nonsense interval fails startup", func(t *testing.T) {
-		_, url := newFake(t)
-		settings := map[string]string{
-			"base_url":            url + "/api",
-			"api_key":             "test-key",
-			"api_secret":          "test-secret",
-			"allow_insecure_http": "true",
-			"publish_interval":    "hourly",
-		}
-		if _, err := opnsense.New(logrtesting.NewTestLogger(t), settings); err == nil {
-			t.Fatal(`publish_interval "hourly" should fail startup`)
 		}
 	})
 }

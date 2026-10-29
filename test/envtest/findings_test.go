@@ -2,6 +2,7 @@ package envtest
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,9 +14,6 @@ import (
 )
 
 // The tests in this file are regression tests for audit findings (S1, B2 from the 2026-10-12 audit; H1, H2 from the follow-up); each comment names the bug it regresses, not the behaviour that survives.
-
-// unaccepted leaves the route without an Accepted parent, as if no Gateway admitted it.
-func unaccepted() routeOption { return func(s *routeSpec) { s.unaccepted = true } }
 
 // bumpGeneration makes a spec change that does not touch hostnames, so the controller reconciles the route without anything it manages changing.
 func (h *harness) bumpGeneration(name string) {
@@ -33,7 +31,7 @@ func (h *harness) bumpGeneration(name string) {
 func (h *harness) waitReconciled() {
 	h.t.Helper()
 	h.eventually("a reconcile reached the appliance", func() bool {
-		return h.countCalls(testenv.EndpointSearch) > 0
+		return h.fake.CountCalls(testenv.EndpointSearch) > 0
 	})
 }
 
@@ -143,9 +141,9 @@ func TestUnchangedRouteCausesNoWrites(t *testing.T) {
 	h.waitReconciled()
 
 	h.consistently("no writes and no reconfigure", func() bool {
-		return h.countCalls(testenv.EndpointAdd) == 0 &&
-			h.countCalls(testenv.EndpointSet) == 0 &&
-			h.countCalls(testenv.EndpointReconfigure) == 0
+		return h.fake.CountCalls(testenv.EndpointAdd) == 0 &&
+			h.fake.CountCalls(testenv.EndpointSet) == 0 &&
+			h.fake.CountCalls(testenv.EndpointReconfigure) == 0
 	})
 }
 
@@ -180,7 +178,7 @@ func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 	h.fake.SetFailure(testenv.EndpointReconfigure, 0)
 
 	h.waitRouteGone("app")
-	if len(rows(h.fake.Published(), "app.example.com")) != 0 {
+	if len(testenv.Rows(h.fake.Published(), "app.example.com")) != 0 {
 		t.Fatal("the route is gone but its record is still published")
 	}
 }
@@ -188,11 +186,11 @@ func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 // TestUnacceptedRouteGetsNoRecord is audit S3: with --require-accepted-routes a route no Gateway admitted gets no DNS, so a namespace the gateway owner locked out cannot claim names under the domain map.
 func TestUnacceptedRouteGetsNoRecord(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, requireAccepted: true})
-	h.createRoute("app", []string{"app.example.com"}, unaccepted())
+	h.createUnacceptedRoute("app", []string{"app.example.com"})
 
 	h.consistently("no finalizer and no appliance writes", func() bool {
 		r := h.getRoute("app")
-		return r != nil && !hasFinalizer(r) && h.countCalls(testenv.EndpointAdd) == 0
+		return r != nil && !slices.Contains(r.Finalizers, finalizerName) && h.fake.CountCalls(testenv.EndpointAdd) == 0
 	})
 }
 
@@ -250,7 +248,7 @@ func TestBurstOfRoutesCostsOnePublish(t *testing.T) {
 		}
 		return true
 	})
-	if n := h.countCalls(testenv.EndpointReconfigure); n > 2 {
+	if n := h.fake.CountCalls(testenv.EndpointReconfigure); n > 2 {
 		t.Errorf("%d reconfigures for five routes created at once, want at most 2", n)
 	}
 }
@@ -288,7 +286,7 @@ func TestSharedHostnameIsReleasedByTheLastRoute(t *testing.T) {
 	h.deleteRoute("green")
 	h.waitRouteGone("green")
 
-	if n := len(rows(h.fake.Published(), "app.example.com")); n != 0 {
+	if n := len(testenv.Rows(h.fake.Published(), "app.example.com")); n != 0 {
 		t.Errorf("%d records left for app.example.com after both routes went", n)
 	}
 }
@@ -306,7 +304,7 @@ func TestRecordFromBeforeOwnersIsStillReleased(t *testing.T) {
 	h.deleteRoute("app")
 	h.waitRouteGone("app")
 
-	if n := len(rows(h.fake.Snapshot(), "app.example.com")); n != 0 {
+	if n := len(testenv.Rows(h.fake.Snapshot(), "app.example.com")); n != 0 {
 		t.Errorf("%d records left for app.example.com after the route went", n)
 	}
 }

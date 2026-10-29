@@ -223,22 +223,14 @@ func Run(t *testing.T, newBackend Factory) {
 
 	t.Run("A batch sees its own writes", func(t *testing.T) {
 		p, be := newBackend(t)
-		ctx := context.Background()
 		b := p.Batch()
-		steps := []func() error{
-			func() error { return expectResult(b.Ensure(ctx, A(host, ip), createOnly))(dns.Created) },
-			func() error { return expectResult(b.Ensure(ctx, A(host, ip), createOnly))(dns.Unchanged) },
-			func() error { return b.Remove(ctx, host, "A", owner, false) },
-			func() error { return expectResult(b.Ensure(ctx, A(host, newIP), createOnly))(dns.Created) },
+		ensureIn(t, b, A(host, ip), createOnly, dns.Created)
+		ensureIn(t, b, A(host, ip), createOnly, dns.Unchanged)
+		if err := b.Remove(context.Background(), host, "A", owner, false); err != nil {
+			t.Fatalf("Remove(%s): %v", host, err)
 		}
-		for i, step := range steps {
-			if err := step(); err != nil {
-				t.Fatalf("step %d: %v", i, err)
-			}
-		}
-		if err := b.Commit(ctx); err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
+		ensureIn(t, b, A(host, newIP), createOnly, dns.Created)
+		commit(t, b)
 		expectLive(t, be, host, Record{FQDN: host, Value: newIP, Origin: Managed})
 	})
 }
@@ -258,42 +250,37 @@ func ownedBy(value, owner string) dns.Record {
 // ensure runs Ensure in its own committed batch and checks the result.
 func ensure(t *testing.T, p dns.Provider, rec dns.Record, opts dns.EnsureOptions, want dns.Result) {
 	t.Helper()
-	ctx := context.Background()
 	b := p.Batch()
-	if err := expectResult(b.Ensure(ctx, rec, opts))(want); err != nil {
+	ensureIn(t, b, rec, opts, want)
+	commit(t, b)
+}
+
+// ensureIn runs Ensure in b and checks the result.
+func ensureIn(t *testing.T, b dns.Batch, rec dns.Record, opts dns.EnsureOptions, want dns.Result) {
+	t.Helper()
+	got, err := b.Ensure(context.Background(), rec, opts)
+	if err != nil {
 		t.Fatalf("Ensure(%s, %+v): %v", rec.Hostname, opts, err)
 	}
-	if err := b.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
+	if got != want {
+		t.Fatalf("Ensure(%s, %+v) = %s, want %s", rec.Hostname, opts, got, want)
 	}
 }
 
 // remove runs Remove for host in its own committed batch.
 func remove(t *testing.T, p dns.Provider, owner string, adoptLegacy bool) {
 	t.Helper()
-	ctx := context.Background()
 	b := p.Batch()
-	if err := b.Remove(ctx, host, "A", owner, adoptLegacy); err != nil {
+	if err := b.Remove(context.Background(), host, "A", owner, adoptLegacy); err != nil {
 		t.Fatalf("Remove(%s): %v", host, err)
 	}
-	if err := b.Commit(ctx); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	commit(t, b)
 }
 
-type resultError struct{ got, want dns.Result }
-
-func (e resultError) Error() string { return "result " + e.got.String() + ", want " + e.want.String() }
-
-func expectResult(got dns.Result, err error) func(dns.Result) error {
-	return func(want dns.Result) error {
-		if err != nil {
-			return err
-		}
-		if got != want {
-			return resultError{got, want}
-		}
-		return nil
+func commit(t *testing.T, b dns.Batch) {
+	t.Helper()
+	if err := b.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
 	}
 }
 
@@ -311,21 +298,16 @@ func expectStored(t *testing.T, be Backend, want ...Record) {
 // expectSet compares records ignoring order.
 func expectSet(t *testing.T, what string, got, want []Record) {
 	t.Helper()
-	remaining := append([]Record(nil), got...)
-	for _, w := range want {
-		found := false
-		for i, g := range remaining {
-			if g == w {
-				remaining = append(remaining[:i], remaining[i+1:]...)
-				found = true
-				break
-			}
-		}
-		if !found {
+	count := map[Record]int{}
+	for _, r := range got {
+		count[r]++
+	}
+	for _, r := range want {
+		count[r]--
+	}
+	for _, n := range count {
+		if n != 0 {
 			t.Fatalf("%s records = %+v, want %+v", what, got, want)
 		}
-	}
-	if len(remaining) > 0 {
-		t.Fatalf("%s records = %+v, want %+v", what, got, want)
 	}
 }

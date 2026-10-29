@@ -40,11 +40,11 @@ func (b opnsenseBackend) Seed(_ *testing.T, r dnstest.Record) {
 }
 
 func (b opnsenseBackend) Stored(_ *testing.T, fqdn string) []dnstest.Record {
-	return toRecords(rowsFor(b.fake.Snapshot(), fqdn))
+	return toRecords(testenv.Rows(b.fake.Snapshot(), fqdn))
 }
 
 func (b opnsenseBackend) Live(_ *testing.T, fqdn string) []dnstest.Record {
-	return toRecords(rowsFor(b.fake.Published(), fqdn))
+	return toRecords(testenv.Rows(b.fake.Published(), fqdn))
 }
 
 func toRecords(rows []testenv.HostOverride) []dnstest.Record {

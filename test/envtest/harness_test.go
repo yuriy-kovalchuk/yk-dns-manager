@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -219,21 +220,9 @@ func start(t *testing.T, opts harnessOptions) *harness {
 	return h
 }
 
-// routeOption adjusts a route before it is created.
-type routeOption func(*routeSpec)
-
-type routeSpec struct {
-	unaccepted bool
-}
-
-// createRoute creates an HTTPRoute with the given hostnames and, unless told otherwise, the status a Gateway controller would write, so these tests keep describing an admitted route (audit S3).
-func (h *harness) createRoute(name string, hostnames []string, opts ...routeOption) {
+// createUnacceptedRoute creates an HTTPRoute with the given hostnames and no status, as if no Gateway admitted it.
+func (h *harness) createUnacceptedRoute(name string, hostnames []string) *gatewayv1.HTTPRoute {
 	h.t.Helper()
-	var spec routeSpec
-	for _, o := range opts {
-		o(&spec)
-	}
-
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.ns},
 		Spec: gatewayv1.HTTPRouteSpec{
@@ -248,10 +237,13 @@ func (h *harness) createRoute(name string, hostnames []string, opts ...routeOpti
 	if err := h.client.Create(context.Background(), route); err != nil {
 		h.t.Fatalf("creating route %s: %v", name, err)
 	}
+	return route
+}
 
-	if spec.unaccepted {
-		return
-	}
+// createRoute also writes the status a Gateway controller would, so these tests keep describing an admitted route (audit S3).
+func (h *harness) createRoute(name string, hostnames []string) {
+	h.t.Helper()
+	route := h.createUnacceptedRoute(name, hostnames)
 	route.Status.Parents = []gatewayv1.RouteParentStatus{{
 		ParentRef:      gatewayv1.ParentReference{Name: "gateway"},
 		ControllerName: "example.com/gateway-controller",
@@ -312,7 +304,7 @@ func (h *harness) waitFinalizer(name string) {
 	h.t.Helper()
 	h.eventually("finalizer on "+name, func() bool {
 		r := h.getRoute(name)
-		return r != nil && hasFinalizer(r)
+		return r != nil && slices.Contains(r.Finalizers, finalizerName)
 	})
 }
 
@@ -410,39 +402,8 @@ func (h *harness) postToAppliance(url string) {
 	}
 }
 
-// countCalls counts appliance requests whose path contains endpoint.
-func (h *harness) countCalls(endpoint string) int {
-	n := 0
-	for _, c := range h.fake.Calls() {
-		if strings.Contains(c, "/"+endpoint) {
-			n++
-		}
-	}
-	return n
-}
-
-// rows returns the overrides in store whose name is fqdn.
-func rows(store map[string]testenv.HostOverride, fqdn string) []testenv.HostOverride {
-	var out []testenv.HostOverride
-	for _, h := range store {
-		if h.FQDN() == fqdn {
-			out = append(out, h)
-		}
-	}
-	return out
-}
-
 // hasRow reports whether store holds exactly one override for fqdn, enabled and pointing at ip.
 func hasRow(store map[string]testenv.HostOverride, fqdn, ip string) bool {
-	r := rows(store, fqdn)
+	r := testenv.Rows(store, fqdn)
 	return len(r) == 1 && r[0].Enabled == "1" && r[0].Server == ip
-}
-
-func hasFinalizer(r *gatewayv1.HTTPRoute) bool {
-	for _, f := range r.Finalizers {
-		if f == finalizerName {
-			return true
-		}
-	}
-	return false
 }

@@ -3,6 +3,7 @@ package envtest
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestHostnameChangeMovesRecord(t *testing.T) {
 
 	h.eventually("record moved from app to web", func() bool {
 		published := h.fake.Published()
-		return hasRow(published, "web.example.com", "10.0.0.1") && len(rows(published, "app.example.com")) == 0
+		return hasRow(published, "web.example.com", "10.0.0.1") && len(testenv.Rows(published, "app.example.com")) == 0
 	})
 	h.waitOwned("app", `["web.example.com"]`)
 }
@@ -62,7 +63,7 @@ func TestDeleteRemovesRecordAndReleasesRoute(t *testing.T) {
 
 	h.waitRouteGone("app")
 	h.eventually("app.example.com unpublished", func() bool {
-		return len(rows(h.fake.Published(), "app.example.com")) == 0
+		return len(testenv.Rows(h.fake.Published(), "app.example.com")) == 0
 	})
 }
 
@@ -74,7 +75,7 @@ func TestUnmatchedRouteIsIgnored(t *testing.T) {
 
 	h.consistently("no finalizer and no appliance writes", func() bool {
 		r := h.getRoute("other")
-		return r != nil && !hasFinalizer(r) && h.countCalls("addHostOverride") == 0
+		return r != nil && !slices.Contains(r.Finalizers, finalizerName) && h.fake.CountCalls("addHostOverride") == 0
 	})
 }
 
@@ -102,7 +103,7 @@ func TestRecordPublishedAfterReconfigureRecovers(t *testing.T) {
 	h.eventually("app.example.com staged", func() bool {
 		return hasRow(h.fake.Snapshot(), "app.example.com", "10.0.0.1")
 	})
-	if len(rows(h.fake.Published(), "app.example.com")) != 0 {
+	if len(testenv.Rows(h.fake.Published(), "app.example.com")) != 0 {
 		t.Fatal("published while reconfigure was failing")
 	}
 
@@ -132,7 +133,7 @@ func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
 	})
 
 	h.eventually("app.example.com adopted with the ownership marker", func() bool {
-		r := rows(h.fake.Published(), "app.example.com")
+		r := testenv.Rows(h.fake.Published(), "app.example.com")
 		return len(r) == 1 &&
 			strings.HasPrefix(r[0].Description, opnsense.ManagedDescription) &&
 			strings.Contains(r[0].Description, "httproute/"+h.ns+"/app")
@@ -150,7 +151,7 @@ func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
 	h.waitReconciled()
 
 	h.consistently("the legacy record is untouched and not claimed", func() bool {
-		r := rows(h.fake.Snapshot(), "app.example.com")
+		r := testenv.Rows(h.fake.Snapshot(), "app.example.com")
 		route := h.getRoute("app")
 		return len(r) == 1 && r[0].Server == "10.0.0.50" && r[0].Description == opnsense.LegacyDescription &&
 			route != nil && !strings.Contains(route.Annotations[managedHostnamesAnnotation], "app.example.com")
@@ -158,7 +159,7 @@ func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
 
 	h.deleteRoute("app")
 	h.waitRouteGone("app")
-	if len(rows(h.fake.Snapshot(), "app.example.com")) != 1 {
+	if len(testenv.Rows(h.fake.Snapshot(), "app.example.com")) != 1 {
 		t.Fatal("deleting the route removed a legacy record it never owned")
 	}
 }
@@ -180,6 +181,6 @@ func TestAcceptanceControlsRecord(t *testing.T) {
 		t.Fatalf("marking the route not accepted: %v", err)
 	}
 	h.eventually("app.example.com released once no longer accepted", func() bool {
-		return len(rows(h.fake.Published(), "app.example.com")) == 0
+		return len(testenv.Rows(h.fake.Published(), "app.example.com")) == 0
 	})
 }

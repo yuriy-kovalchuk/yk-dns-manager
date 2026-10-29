@@ -88,3 +88,14 @@ func TestNew_SkipTLSVerify(t *testing.T) {
 		t.Error("RootCAs must be nil by default so the system roots are used")
 	}
 }
+
+// TestNew_PublishIntervalMustBeADuration: a nonsense or negative interval fails startup.
+func TestNew_PublishIntervalMustBeADuration(t *testing.T) {
+	for _, v := range []string{"hourly", "-1s"} {
+		settings := baseSettings("https://opnsense.local")
+		settings["publish_interval"] = v
+		if _, err := New(logr.Discard(), settings); err == nil {
+			t.Errorf("publish_interval %q should fail startup", v)
+		}
+	}
+}
