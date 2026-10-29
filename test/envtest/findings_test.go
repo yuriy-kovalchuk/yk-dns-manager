@@ -12,16 +12,12 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-// The tests in this file are regression tests for audit findings (IDs such as
-// S1 and B2 from the 2026-10-12 audit, H1 and H2 from the follow-up audit).
-// Each one failed on the code the audit reviewed.
+// The tests in this file are regression tests for audit findings (S1, B2 from the 2026-10-12 audit; H1, H2 from the follow-up), and each one failed on the code the audit reviewed.
 
-// unaccepted leaves the route without an Accepted parent, as if no Gateway
-// admitted it.
+// unaccepted leaves the route without an Accepted parent, as if no Gateway admitted it.
 func unaccepted() routeOption { return func(s *routeSpec) { s.unaccepted = true } }
 
-// bumpGeneration makes a spec change that does not touch hostnames, so the
-// controller reconciles the route without anything it manages changing.
+// bumpGeneration makes a spec change that does not touch hostnames, so the controller reconciles the route without anything it manages changing.
 func (h *harness) bumpGeneration(name string) {
 	h.t.Helper()
 	h.updateRoute(name, func(r *gatewayv1.HTTPRoute) {
@@ -33,9 +29,7 @@ func (h *harness) bumpGeneration(name string) {
 	})
 }
 
-// waitReconciled waits until the controller has asked the appliance for its
-// overrides since the last ResetCalls, which every reconcile of a managed route
-// does.
+// waitReconciled waits until the controller has asked the appliance for its overrides since the last ResetCalls, which every reconcile of a managed route does.
 func (h *harness) waitReconciled() {
 	h.t.Helper()
 	h.eventually("a reconcile reached the appliance", func() bool {
@@ -43,8 +37,7 @@ func (h *harness) waitReconciled() {
 	})
 }
 
-// handMade is an override someone configured on the appliance by hand, which
-// the controller must never change or remove.
+// handMade is an override someone configured on the appliance by hand, which the controller must never change or remove.
 func handMade(hostname, domain, ip string) testenv.HostOverride {
 	return testenv.HostOverride{
 		Enabled: "1", Hostname: hostname, Domain: domain, RR: "A", Server: ip,
@@ -52,9 +45,7 @@ func handMade(hostname, domain, ip string) testenv.HostOverride {
 	}
 }
 
-// TestAnnotationCannotDeleteForeignRecords: the ownership annotation is
-// writable by anyone who can edit the route, and every name in it is deleted
-// from the appliance, whether or not the domain map covers it.
+// TestAnnotationCannotDeleteForeignRecords: the ownership annotation is writable by anyone who can edit the route, and every name in it is deleted from the appliance whether or not the domain map covers it.
 func TestAnnotationCannotDeleteForeignRecords(t *testing.T) {
 	tamper := func(r *gatewayv1.HTTPRoute) {
 		r.Annotations[managedHostnamesAnnotation] = `["app.example.com","vpn.corp.example"]`
@@ -92,8 +83,7 @@ func TestAnnotationCannotDeleteForeignRecords(t *testing.T) {
 	})
 }
 
-// TestUnmanagedRecordIsNotOverwritten: in upsert mode a route claiming a name
-// that already has a hand-made override repoints it at the gateway.
+// TestUnmanagedRecordIsNotOverwritten: in upsert mode a route claiming a name that already has a hand-made override repoints it at the gateway.
 func TestUnmanagedRecordIsNotOverwritten(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(handMade("nas", "example.com", "10.0.0.50"))
@@ -106,9 +96,7 @@ func TestUnmanagedRecordIsNotOverwritten(t *testing.T) {
 	})
 }
 
-// TestUnmanagedRecordSurvivesRouteDeletion: in create mode the existing
-// override is left alone, but the name is still recorded as owned, so deleting
-// the route deletes the hand-made override.
+// TestUnmanagedRecordSurvivesRouteDeletion: in create mode the existing override is left alone, but the name is still recorded as owned, so deleting the route deletes the hand-made override.
 func TestUnmanagedRecordSurvivesRouteDeletion(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap})
 	h.fake.Seed(handMade("nas", "example.com", "10.0.0.50"))
@@ -125,9 +113,7 @@ func TestUnmanagedRecordSurvivesRouteDeletion(t *testing.T) {
 	}
 }
 
-// TestSharedHostnameSurvivesOneRouteDeletion: two routes serving the same name
-// each record it as owned, and deleting either removes the record the other
-// still needs.
+// TestSharedHostnameSurvivesOneRouteDeletion: two routes serving the same name each record it as owned, so deleting either removes the record the other still needs.
 func TestSharedHostnameSurvivesOneRouteDeletion(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("blue", []string{"app.example.com"})
@@ -143,8 +129,7 @@ func TestSharedHostnameSurvivesOneRouteDeletion(t *testing.T) {
 	})
 }
 
-// TestUnchangedRouteCausesNoWrites: upsert mode rewrites the override and
-// reloads Unbound on every reconcile, even when the record is already right.
+// TestUnchangedRouteCausesNoWrites: upsert mode used to rewrite the override and reload Unbound on every reconcile, even when the record was already right.
 func TestUnchangedRouteCausesNoWrites(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("app", []string{"app.example.com"})
@@ -164,8 +149,7 @@ func TestUnchangedRouteCausesNoWrites(t *testing.T) {
 	})
 }
 
-// TestDisabledManagedRecordIsReenabled: a disabled override the controller
-// created counts as existing, so in create mode the name never resolves again.
+// TestDisabledManagedRecordIsReenabled: a disabled override the controller created counts as existing, so in create mode the name never resolved again.
 func TestDisabledManagedRecordIsReenabled(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap})
 	h.fake.Seed(testenv.HostOverride{
@@ -180,9 +164,7 @@ func TestDisabledManagedRecordIsReenabled(t *testing.T) {
 	})
 }
 
-// TestDeleteIsPublishedAfterReconfigureRecovers is audit B9: when reconfigure
-// fails during route deletion, the route is held until the deletion is
-// published, instead of disappearing while its record keeps resolving.
+// TestDeleteIsPublishedAfterReconfigureRecovers is audit B9: when reconfigure fails during route deletion the route is held until the deletion is published, instead of disappearing while its record keeps resolving.
 func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("app", []string{"app.example.com"})
@@ -203,9 +185,7 @@ func TestDeleteIsPublishedAfterReconfigureRecovers(t *testing.T) {
 	}
 }
 
-// TestUnacceptedRouteGetsNoRecord is audit S3: with --require-accepted-routes
-// a route no Gateway admitted gets no DNS, so a namespace the gateway owner
-// locked out cannot claim names under the domain map.
+// TestUnacceptedRouteGetsNoRecord is audit S3: with --require-accepted-routes a route no Gateway admitted gets no DNS, so a namespace the gateway owner locked out cannot claim names under the domain map.
 func TestUnacceptedRouteGetsNoRecord(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, requireAccepted: true})
 	h.createRoute("app", []string{"app.example.com"}, unaccepted())
@@ -216,9 +196,7 @@ func TestUnacceptedRouteGetsNoRecord(t *testing.T) {
 	})
 }
 
-// TestWildcardRouteHostnameGetsNoRecord is audit H2: a route hostname of
-// "*.example.com" matched the domain map's wildcard key and became a wildcard
-// override, so one route answered for every name below the domain.
+// TestWildcardRouteHostnameGetsNoRecord is audit H2: a route hostname of "*.example.com" matched the domain map's wildcard key and became a wildcard override, so one route answered for every name below the domain.
 func TestWildcardRouteHostnameGetsNoRecord(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("wild", []string{"*.example.com", "app.example.com"})
@@ -237,9 +215,7 @@ func TestWildcardRouteHostnameGetsNoRecord(t *testing.T) {
 	})
 }
 
-// TestDriftOnTheApplianceIsHealed is audit M1: the event filter dropped informer
-// resyncs, so a record an operator deleted on the appliance stayed deleted, even
-// in upsert mode, until something in the cluster changed.
+// TestDriftOnTheApplianceIsHealed is audit M1: the event filter used to drop informer resyncs, so a record an operator deleted on the appliance stayed deleted, even in upsert mode, until something in the cluster changed.
 func TestDriftOnTheApplianceIsHealed(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, syncPeriod: 500 * time.Millisecond})
 	h.createRoute("app", []string{"app.example.com"})
@@ -257,9 +233,7 @@ func TestDriftOnTheApplianceIsHealed(t *testing.T) {
 	})
 }
 
-// TestBurstOfRoutesCostsOnePublish is audit M4: every batch that changed
-// something reconfigured Unbound, so applying a burst of routes at once
-// restarted the resolver once per route.
+// TestBurstOfRoutesCostsOnePublish is audit M4: every batch that changed something used to reconfigure Unbound, so applying a burst of routes restarted the resolver once per route.
 func TestBurstOfRoutesCostsOnePublish(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, publishInterval: 5 * time.Second})
 	var names []string
@@ -281,9 +255,7 @@ func TestBurstOfRoutesCostsOnePublish(t *testing.T) {
 	}
 }
 
-// TestAnnotationCannotDeleteAnotherRoutesRecord is audit H1: the ownership
-// marker named no route, so a route whose annotation listed a hostname could
-// delete the record another route wrote.
+// TestAnnotationCannotDeleteAnotherRoutesRecord is audit H1: the ownership marker named no route, so a route whose annotation listed a hostname could delete the record another route wrote.
 func TestAnnotationCannotDeleteAnotherRoutesRecord(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("app", []string{"app.example.com"})
@@ -303,8 +275,7 @@ func TestAnnotationCannotDeleteAnotherRoutesRecord(t *testing.T) {
 	})
 }
 
-// TestSharedHostnameIsReleasedByTheLastRoute: two routes serving one name are
-// both owners of its record, so the last of them to go can still release it.
+// TestSharedHostnameIsReleasedByTheLastRoute: two routes serving one name are both owners of its record, so the last of them to go can still release it.
 func TestSharedHostnameIsReleasedByTheLastRoute(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.createRoute("blue", []string{"app.example.com"})
@@ -322,9 +293,7 @@ func TestSharedHostnameIsReleasedByTheLastRoute(t *testing.T) {
 	}
 }
 
-// TestRecordFromBeforeOwnersIsStillReleased: a record the controller wrote
-// before owners were marked belongs to no route in particular, so the route
-// serving it can still release it.
+// TestRecordFromBeforeOwnersIsStillReleased: a record the controller wrote before owners were marked belongs to no route in particular, so the route serving it can still release it.
 func TestRecordFromBeforeOwnersIsStillReleased(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(testenv.HostOverride{

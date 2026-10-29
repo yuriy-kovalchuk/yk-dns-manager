@@ -17,12 +17,9 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
 )
 
-// These tests pin what is specific to OPNsense: the wire format, how many
-// calls a batch makes, and publishing through reconfigure. The provider
-// contract itself is covered by the conformance suite (conformance_test.go).
+// These tests pin what is specific to OPNsense: the wire format, calls per batch, and publishing through reconfigure; the provider contract itself is in conformance_test.go.
 
-// newFake returns a fake appliance that only accepts the credentials
-// newProvider sends, so every test also proves the provider authenticates.
+// newFake returns a fake appliance that only accepts the credentials newProvider sends, so every test also proves the provider authenticates.
 func newFake(t *testing.T) (*testenv.OPNsense, string) {
 	t.Helper()
 	fake := testenv.NewOPNsense()
@@ -72,8 +69,7 @@ func rowsFor(store map[string]testenv.HostOverride, fqdn string) []testenv.HostO
 	return out
 }
 
-// only returns the single row for fqdn, failing the test if there is not
-// exactly one.
+// only returns the single row for fqdn, failing the test if there is not exactly one.
 func only(t *testing.T, store map[string]testenv.HostOverride, fqdn string) testenv.HostOverride {
 	t.Helper()
 	rows := rowsFor(store, fqdn)
@@ -109,8 +105,7 @@ func commit(t *testing.T, b dns.Batch) {
 	}
 }
 
-// TestEnsureWritesTheOverrideFields pins the row OPNsense receives: the FQDN
-// split into hostname and domain, and the ownership marker as description.
+// TestEnsureWritesTheOverrideFields pins the row OPNsense receives: the FQDN split into hostname and domain, and the ownership marker as description.
 func TestEnsureWritesTheOverrideFields(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
@@ -131,9 +126,7 @@ func TestEnsureWritesTheOverrideFields(t *testing.T) {
 	}
 }
 
-// TestEnsureUnchangedWritesNothing is audit B2: a record that already matches
-// costs one list and no write, and with nothing owed the commit does not
-// reconfigure.
+// TestEnsureUnchangedWritesNothing is audit B2: a record that already matches costs one list, no write, and no reconfigure.
 func TestEnsureUnchangedWritesNothing(t *testing.T) {
 	for _, overwrite := range []bool{false, true} {
 		t.Run(fmt.Sprintf("overwrite=%v", overwrite), func(t *testing.T) {
@@ -166,8 +159,7 @@ func TestEnsureSurfacesValidationFailure(t *testing.T) {
 		want     string
 	}{
 		{"bad address", "app.example.com", "not-an-ip", "host.server: A valid IP address must be specified."},
-		// A single-label hostname has no domain to split off and the appliance
-		// requires one; the error used to say only "failed".
+		// a single-label hostname has no domain to split off and the appliance requires one; the error used to say only "failed"
 		{"no domain", "app", "10.0.0.1", "host.domain: A domain is required."},
 	}
 	for _, tc := range cases {
@@ -175,8 +167,7 @@ func TestEnsureSurfacesValidationFailure(t *testing.T) {
 			fake, url := newFake(t)
 			p := newProvider(t, url)
 
-			// The appliance answers HTTP 200 with result "failed", so a provider
-			// that only checked the status code would report success.
+			// the appliance answers HTTP 200 with result "failed", so a provider checking only the status code would report success
 			_, err := p.Batch().Ensure(context.Background(), record(tc.fqdn, tc.ip), dns.EnsureOptions{})
 			if err == nil {
 				t.Fatal("expected Ensure to fail for a row the appliance rejects")
@@ -203,9 +194,7 @@ func TestRemoveOfMissingRecordIssuesNoDelete(t *testing.T) {
 	}
 }
 
-// TestRemoveToleratesVanishedRecord: the batch works from the list it read
-// first. A row deleted by someone else in the meantime is answered with
-// "not found", which is what Remove wanted anyway.
+// TestRemoveToleratesVanishedRecord: the batch works from the list it read first, so a row someone else deleted answers "not found", which is what Remove wanted.
 func TestRemoveToleratesVanishedRecord(t *testing.T) {
 	fake, url := newFake(t)
 	fake.Seed(managed("app.example.com", "10.0.0.1"))
@@ -225,8 +214,7 @@ func TestRemoveToleratesVanishedRecord(t *testing.T) {
 	}
 }
 
-// TestBatchListsOnce is audit D4: however many records a batch touches, it
-// reads the appliance's list once.
+// TestBatchListsOnce is audit D4: however many records a batch touches, it reads the appliance's list once.
 func TestBatchListsOnce(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
@@ -248,8 +236,7 @@ func TestBatchListsOnce(t *testing.T) {
 	}
 }
 
-// TestUnusedBatchCommitsNothing: a reconcile that never touched DNS must not
-// reach the appliance, even with a publish owed.
+// TestUnusedBatchCommitsNothing: a reconcile that never touched DNS must not reach the appliance, even with a publish owed.
 func TestUnusedBatchCommitsNothing(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
@@ -261,9 +248,7 @@ func TestUnusedBatchCommitsNothing(t *testing.T) {
 	}
 }
 
-// TestFirstCommitPublishes is audit B10: a new process cannot know whether a
-// previous one left staged changes unpublished, so its first used batch
-// publishes even when it changed nothing.
+// TestFirstCommitPublishes is audit B10: a new process cannot know whether a previous one left staged changes, so its first used batch publishes even when it changed nothing.
 func TestFirstCommitPublishes(t *testing.T) {
 	fake, url := newFake(t)
 	fake.Seed(managed("app.example.com", "10.0.0.1"))
@@ -279,9 +264,7 @@ func TestFirstCommitPublishes(t *testing.T) {
 	}
 }
 
-// TestFailedPublishStaysOwed is audit B10 within a process: after a failed
-// reconfigure the next batch finds its records already staged and writes
-// nothing, but must still publish.
+// TestFailedPublishStaysOwed is audit B10 within a process: after a failed reconfigure the next batch finds its records staged and writes nothing, but must still publish.
 func TestFailedPublishStaysOwed(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
@@ -306,9 +289,7 @@ func TestFailedPublishStaysOwed(t *testing.T) {
 	only(t, fake.Published(), "app.example.com")
 }
 
-// TestWriteDuringPublishStaysOwed is audit D3: a write that lands while
-// another batch's reconfigure is in flight is not covered by it, so the
-// writer's own commit must still publish.
+// TestWriteDuringPublishStaysOwed is audit D3: a write landing while another batch's reconfigure is in flight is not covered by it, so the writer's commit must still publish.
 func TestWriteDuringPublishStaysOwed(t *testing.T) {
 	fake, url := newFake(t)
 	p := newProvider(t, url)
@@ -361,18 +342,14 @@ func newProviderWith(t *testing.T, serverURL string, extra map[string]string) *o
 	return p
 }
 
-// TestPublishIntervalCoalescesPublishes is audit M4: every batch that changed
-// something reconfigured Unbound, so a burst of route changes restarted the
-// resolver once per change.
+// TestPublishIntervalCoalescesPublishes is audit M4: every batch that changed something used to reconfigure, restarting the resolver once per route change.
 func TestPublishIntervalCoalescesPublishes(t *testing.T) {
 	t.Run("held back and still owed", func(t *testing.T) {
 		fake, url := newFake(t)
 		p := newProviderWith(t, url, map[string]string{"publish_interval": "1h"})
 		ctx := context.Background()
 
-		// The first publish goes out at once: the provider does not know when
-		// the last one was, and a previous process may have died with changes
-		// staged.
+		// the first publish goes out at once: the provider does not know when the last one was, and a previous process may have died with changes staged
 		b := p.Batch()
 		ensure(t, b, record("a.example.com", "10.0.0.1"), false)
 		commit(t, b)
@@ -406,8 +383,7 @@ func TestPublishIntervalCoalescesPublishes(t *testing.T) {
 		if err := b2.Commit(ctx); err == nil {
 			t.Fatal("the second publish should be held back")
 		}
-		// A second batch inside the same wait is held back too, and its change
-		// joins what is owed: one reconfigure covers both.
+		// a second batch inside the same wait is held back too and its change joins what is owed, so one reconfigure covers both
 		b3 := p.Batch()
 		ensure(t, b3, record("c.example.com", "10.0.0.3"), false)
 		if err := b3.Commit(ctx); err == nil {

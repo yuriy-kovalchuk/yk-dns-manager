@@ -16,9 +16,7 @@ import (
 
 const exampleMap = "\"*.example.com\": 10.0.0.1\n"
 
-// TestCreatePublishesRecord covers the chain the unit tests cannot: the first
-// reconcile only adds the finalizer, and the record appears only because the
-// finalizer update passes the event filter and triggers a second reconcile.
+// TestCreatePublishesRecord covers the chain the unit tests cannot: the first reconcile only adds the finalizer, and the record appears because that update passes the event filter and triggers a second reconcile.
 func TestCreatePublishesRecord(t *testing.T) {
 	for _, upsert := range []bool{false, true} {
 		t.Run(map[bool]string{false: "create mode", true: "upsert mode"}[upsert], func(t *testing.T) {
@@ -68,8 +66,7 @@ func TestDeleteRemovesRecordAndReleasesRoute(t *testing.T) {
 	})
 }
 
-// TestUnmatchedRouteIsIgnored pins that the controller does not take ownership
-// of a route it has nothing to manage: no finalizer, no appliance writes.
+// TestUnmatchedRouteIsIgnored pins that the controller takes no ownership of a route it has nothing to manage: no finalizer, no appliance writes.
 func TestUnmatchedRouteIsIgnored(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 
@@ -81,9 +78,7 @@ func TestUnmatchedRouteIsIgnored(t *testing.T) {
 	})
 }
 
-// TestRouteIsDeletableWhileApplianceFails pins the "always deletable"
-// guarantee: a failing appliance must never leave a route stuck in
-// Terminating. Cleanup is retried for the grace period, then the route goes.
+// TestRouteIsDeletableWhileApplianceFails pins the "always deletable" guarantee: a failing appliance must never leave a route in Terminating, so cleanup is retried for the grace period and then the route goes.
 func TestRouteIsDeletableWhileApplianceFails(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, cleanupGrace: 2 * time.Second})
 
@@ -98,9 +93,7 @@ func TestRouteIsDeletableWhileApplianceFails(t *testing.T) {
 	h.waitRouteGone("app")
 }
 
-// TestRecordPublishedAfterReconfigureRecovers: a failed publish makes the
-// reconcile fail and retry. The retry finds the override already staged and
-// writes nothing, but must still publish it.
+// TestRecordPublishedAfterReconfigureRecovers: a failed publish makes the reconcile retry, and the retry finds the override staged, writes nothing, and still publishes it.
 func TestRecordPublishedAfterReconfigureRecovers(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.SetFailure(testenv.EndpointReconfigure, http.StatusServiceUnavailable)
@@ -119,8 +112,7 @@ func TestRecordPublishedAfterReconfigureRecovers(t *testing.T) {
 	})
 }
 
-// legacy is an override written by a controller version from before
-// ownership was marked.
+// legacy is an override written by a controller version from before ownership was marked.
 func legacy(hostname, domain, ip string) testenv.HostOverride {
 	return testenv.HostOverride{
 		Enabled: "1", Hostname: hostname, Domain: domain, RR: "A", Server: ip,
@@ -128,9 +120,7 @@ func legacy(hostname, domain, ip string) testenv.HostOverride {
 	}
 }
 
-// TestLegacyRecordIsAdoptedByItsRoute covers the upgrade path: a route that
-// recorded owning a name before ownership was marked adopts its record, which
-// is rewritten with the ownership marker and the route as its owner.
+// TestLegacyRecordIsAdoptedByItsRoute covers the upgrade path: a route that recorded owning a name before ownership was marked adopts its record, rewritten with the marker and the route as owner.
 func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(legacy("app", "example.com", "10.0.0.1"))
@@ -150,9 +140,7 @@ func TestLegacyRecordIsAdoptedByItsRoute(t *testing.T) {
 	h.waitOwned("app", `["app.example.com"]`)
 }
 
-// TestLegacyRecordIsNotAdoptedByANewRoute: a route that never recorded owning
-// a name cannot take over a legacy record for it. It is a conflict, and the
-// name stays out of the route's annotation so no later reconcile adopts it.
+// TestLegacyRecordIsNotAdoptedByANewRoute: a route that never recorded owning a name cannot take over its legacy record; that is a conflict, and the name stays out of the annotation so no later reconcile adopts it.
 func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true})
 	h.fake.Seed(legacy("app", "example.com", "10.0.0.50"))
@@ -175,8 +163,7 @@ func TestLegacyRecordIsNotAdoptedByANewRoute(t *testing.T) {
 	}
 }
 
-// TestAcceptanceControlsRecord: with --require-accepted-routes, a route gets
-// its record once a Gateway accepts it, and loses it when acceptance goes.
+// TestAcceptanceControlsRecord: with --require-accepted-routes, a route gets its record once a Gateway accepts it and loses it when acceptance goes.
 func TestAcceptanceControlsRecord(t *testing.T) {
 	h := start(t, harnessOptions{domainMap: exampleMap, upsert: true, requireAccepted: true})
 

@@ -1,11 +1,4 @@
-// Package envtest runs the real controller manager against a real API server
-// (controller-runtime envtest) and the in-memory OPNsense fake, through the real
-// OPNsense provider. Unlike the unit tests, which call Reconcile directly on a
-// fake client, this exercises the event predicates, the finalizer → reconcile
-// chain and the API server's generation and finalizer semantics.
-//
-// It needs the envtest control-plane binaries. `make test-envtest` downloads
-// them and sets KUBEBUILDER_ASSETS; without that variable the suite is skipped.
+// Package envtest runs the real controller manager against a real API server and the in-memory OPNsense fake through the real OPNsense provider, exercising the event predicates, the finalizer chain and the API server's semantics that unit tests bypass; it needs the envtest control-plane binaries, which make test-envtest downloads and points at through KUBEBUILDER_ASSETS.
 package envtest
 
 import (
@@ -51,11 +44,9 @@ const (
 	finalizerName              = "dns.yk/cleanup"
 	managedHostnamesAnnotation = "dns.yk/managed-hostnames"
 
-	// waitTimeout bounds every eventually. A reconcile against the in-process
-	// fake takes milliseconds, so this only matters when something is wrong.
+	// waitTimeout bounds every eventually: a reconcile against the in-process fake takes milliseconds, so it only matters when something is wrong.
 	waitTimeout = 15 * time.Second
-	// settleTime is how long consistently watches for something that must not
-	// happen. It is long enough for several reconciles to run.
+	// settleTime is how long consistently watches for something that must not happen, long enough for several reconciles to run.
 	settleTime = 3 * time.Second
 )
 
@@ -76,8 +67,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	// controller-runtime logs through the global logger. The suite discards it;
-	// each test gives its reconciler a logger that writes into the test output.
+	// controller-runtime logs through the global logger, which the suite discards; each test gives its reconciler a logger writing into the test output.
 	ctrl.SetLogger(zap.New(zap.WriteTo(io.Discard)))
 
 	crdDir, err := gatewayCRDDir()
@@ -104,9 +94,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// gatewayCRDDir returns the standard-channel CRDs shipped in the Gateway API
-// module go.mod pins, so the API server serves exactly the types the controller
-// is compiled against.
+// gatewayCRDDir returns the standard-channel CRDs shipped in the Gateway API module go.mod pins, so the API server serves exactly the types the controller compiles against.
 func gatewayCRDDir() (string, error) {
 	out, err := exec.CommandContext(context.Background(), "go", "list", "-m", "-f", "{{.Dir}}", "sigs.k8s.io/gateway-api").Output()
 	if err != nil {
@@ -121,20 +109,15 @@ type harnessOptions struct {
 	upsert    bool
 	// requireAccepted turns on --require-accepted-routes.
 	requireAccepted bool
-	// cleanupGrace defaults to 30s, long enough for any test that waits for
-	// a failing cleanup to recover.
+	// cleanupGrace defaults to 30s, long enough for a test waiting on a failing cleanup to recover.
 	cleanupGrace time.Duration
-	// syncPeriod is the informer resync period; it defaults to the controller's
-	// own default of one hour.
+	// syncPeriod is the informer resync period; it defaults to the controller's own default of one hour.
 	syncPeriod time.Duration
-	// publishInterval is the provider's publish_interval setting: the shortest
-	// gap between two publishes. Zero means the provider publishes every batch
-	// that owes one.
+	// publishInterval is the provider's publish_interval setting: the shortest gap between two publishes, zero publishing every batch that owes one.
 	publishInterval time.Duration
 }
 
-// harness is one running controller, watching its own namespace and talking to
-// its own fake appliance.
+// harness is one running controller, watching its own namespace and talking to its own fake appliance.
 type harness struct {
 	t      *testing.T
 	ns     string
@@ -143,10 +126,7 @@ type harness struct {
 	srvURL string
 }
 
-// start creates a namespace, a fake appliance and a manager running the real
-// reconciler and provider. Everything is torn down when the test ends: routes
-// are deleted while the controller still runs, so finalizers are released the
-// normal way.
+// start creates a namespace, a fake appliance and a manager running the real reconciler and provider, and tears everything down when the test ends.
 func start(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 	ctx := context.Background()
@@ -199,8 +179,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 			DefaultNamespaces: map[string]cache.Config{ns: {}},
 			SyncPeriod:        ptr.To(cmp.Or(opts.syncPeriod, time.Hour)),
 		},
-		// Every test starts its own manager in the same process, and
-		// controller-runtime rejects a second controller with the same name.
+		// every test starts its own manager in the same process, and controller-runtime rejects a second controller with the same name
 		Controller: ctrlconfig.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
@@ -227,8 +206,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(mgrCtx) }()
 
-	// Cleanups run last-registered first: routes are deleted while the
-	// manager still runs, then the manager stops.
+	// cleanups run last-registered first: routes are deleted while the manager still runs, then the manager stops.
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -248,10 +226,7 @@ type routeSpec struct {
 	unaccepted bool
 }
 
-// createRoute creates an HTTPRoute with the given hostnames. Unless told
-// otherwise it also writes the status a Gateway controller would, marking the
-// route Accepted by its parent, so these tests keep describing an admitted
-// route once the controller starts checking for one (audit S3).
+// createRoute creates an HTTPRoute with the given hostnames and, unless told otherwise, the status a Gateway controller would write, so these tests keep describing an admitted route (audit S3).
 func (h *harness) createRoute(name string, hostnames []string, opts ...routeOption) {
 	h.t.Helper()
 	var spec routeSpec
@@ -307,8 +282,7 @@ func (h *harness) getRoute(name string) *gatewayv1.HTTPRoute {
 	return &route
 }
 
-// updateRoute applies mutate to the latest copy of the route, retrying on
-// conflict since the controller writes the same object.
+// updateRoute applies mutate to the latest copy of the route, retrying on conflict since the controller writes the same object.
 func (h *harness) updateRoute(name string, mutate func(*gatewayv1.HTTPRoute)) {
 	h.t.Helper()
 	h.eventually("route "+name+" updated", func() bool {
@@ -350,9 +324,7 @@ func (h *harness) waitOwned(name, annotation string) {
 	})
 }
 
-// deleteAllRoutes deletes every route in the namespace and waits for the
-// controller to release them. A route still stuck after the wait has its
-// finalizers stripped so the next test starts clean, and the test fails.
+// deleteAllRoutes deletes every route in the namespace and waits for the controller to release them; one still stuck has its finalizers stripped and the test fails.
 func (h *harness) deleteAllRoutes() {
 	ctx := context.Background()
 	var routes gatewayv1.HTTPRouteList
@@ -391,8 +363,7 @@ func (h *harness) eventually(what string, cond func() bool) {
 	}
 }
 
-// consistently fails the test if cond stops holding at any point during
-// settleTime.
+// consistently fails the test if cond stops holding at any point during settleTime.
 func (h *harness) consistently(what string, cond func() bool) {
 	h.t.Helper()
 	deadline := time.Now().Add(settleTime)
@@ -404,9 +375,7 @@ func (h *harness) consistently(what string, cond func() bool) {
 	}
 }
 
-// dropOnAppliance deletes an override through the appliance's own API and
-// republishes Unbound, the way an operator editing the appliance by hand would.
-// The controller is left with a backend that no longer matches the route.
+// dropOnAppliance deletes an override through the appliance's own API and republishes Unbound as an operator editing by hand would, leaving the controller with a backend that no longer matches the route.
 func (h *harness) dropOnAppliance(fqdn string) {
 	h.t.Helper()
 	settings := h.srvURL + "/api/unbound/settings/"
@@ -463,8 +432,7 @@ func rows(store map[string]testenv.HostOverride, fqdn string) []testenv.HostOver
 	return out
 }
 
-// hasRow reports whether store holds exactly one override for fqdn, enabled and
-// pointing at ip.
+// hasRow reports whether store holds exactly one override for fqdn, enabled and pointing at ip.
 func hasRow(store map[string]testenv.HostOverride, fqdn, ip string) bool {
 	r := rows(store, fqdn)
 	return len(r) == 1 && r[0].Enabled == "1" && r[0].Server == ip

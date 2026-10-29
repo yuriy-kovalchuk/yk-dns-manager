@@ -18,8 +18,7 @@ func TestConformance(t *testing.T) {
 	})
 }
 
-// opnsenseBackend adapts the fake appliance to the conformance suite. The
-// override description carries the ownership marker.
+// opnsenseBackend adapts the fake appliance to the conformance suite; the override description carries the ownership marker.
 type opnsenseBackend struct{ fake *testenv.OPNsense }
 
 var descriptions = map[dnstest.Origin]string{
