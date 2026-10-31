@@ -75,6 +75,16 @@ var managed = struct {
 func init() {
 	metrics.Registry.MustRegister(BuildInfo, RecordResults, DNSErrors, CleanupsAbandoned,
 		Publishes, PublishDuration, ProviderRequests, ProviderRequestDuration, ManagedRecords)
+	// rate() and increase() cannot see a series' first sample, so a counter that only appears on its first increment hides it: start every known one at 0.
+	for _, result := range []string{"created", "updated", "unchanged", "kept", "conflict", "released"} {
+		RecordResults.WithLabelValues(result)
+	}
+	for _, stage := range []string{"ensure", "release", "publish"} {
+		DNSErrors.WithLabelValues(stage)
+	}
+	for _, result := range []string{"ok", "failed", "deferred"} {
+		Publishes.WithLabelValues(result)
+	}
 }
 
 // SetManagedRecords replaces a route's series with records (hostname to IP); nil forgets the route.

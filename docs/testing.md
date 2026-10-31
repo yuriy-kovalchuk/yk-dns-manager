@@ -6,7 +6,7 @@ All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUB
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `internal/` | 62 | Config parsing and validation, controller reconcile logic, log-level handling, metrics, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
+| Unit | `internal/` | 63 | Config parsing and validation, controller reconcile logic, log-level handling, metrics, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
 | Appliance | `internal/dns/opnsense/` | conformance | The conformance suite against a real OPNsense; opt-in, see [Against a real appliance](#against-a-real-appliance) |
 | Envtest | `test/envtest/` | 23 | The real manager and predicates against a real API server and the memory provider |
 | E2E | manual | — | Full flow in a kind cluster with the memory provider; see [docs/local-testing.md](local-testing.md) |
@@ -61,6 +61,7 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 
 | Test | Description |
 |---|---|
+| `TestCountersStartAtZero` | Every known record outcome, error stage and publish result is exported at 0 from startup, so `rate()` and `increase()` see the first increment |
 | `TestEndpointOf` | A request is named by its last path segment that is not an object id (UUID, number, long hex) |
 | `TestInstrumentTransportCountsRequests` | The transport wrapper counts every request by endpoint and status code, an unanswered one as `error`, and times them all |
 | `TestManagedRecordsReplacesARoutesSeries` | A route's managed-record series are replaced as a whole, other routes keep theirs, and a forgotten route exports none |

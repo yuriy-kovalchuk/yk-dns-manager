@@ -3,6 +3,7 @@ package metrics
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -24,5 +25,22 @@ func TestManagedRecordsReplacesARoutesSeries(t *testing.T) {
 	SetManagedRecords("web", "blue", nil)
 	if n := testutil.CollectAndCount(ManagedRecords); n != 0 {
 		t.Errorf("%d series left after both routes were forgotten", n)
+	}
+}
+
+// TestCountersStartAtZero: a counter series that first appears with value 1 is invisible to rate() and increase(), so every known outcome is exported from startup.
+func TestCountersStartAtZero(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		collector prometheus.Collector
+		want      int
+	}{
+		{"yk_dns_manager_records_total", RecordResults, 6},
+		{"yk_dns_manager_dns_errors_total", DNSErrors, 3},
+		{"yk_dns_manager_publishes_total", Publishes, 3},
+	} {
+		if got := testutil.CollectAndCount(c.collector, c.name); got != c.want {
+			t.Errorf("%s exports %d series, want %d from startup", c.name, got, c.want)
+		}
 	}
 }
