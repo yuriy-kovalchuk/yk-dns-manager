@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.27.2 (pinned in `go.mod`; with `GOTOOLCHAIN=auto` the go command fetches it on demand)
+- Go 1.27.3 (pinned in `go.mod`; with `GOTOOLCHAIN=auto` the go command fetches it on demand)
 - Docker (for buildx and kind)
 - `kubectl`, and `helm` v3.18 or newer (CI uses 3.18; v4 works too, see the strategy note in the CHANGELOG)
 - For kind-based testing: [`kind`](https://kind.sigs.k8s.io/) **v0.33.0 or newer**.
