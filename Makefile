@@ -74,11 +74,14 @@ build:
 	mkdir -p $(LOCALBIN)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(LOCALBIN)/$(APP_NAME) ./cmd/$(APP_NAME)
 
+# make run falls back to it when .env sets no CONFIG_PATH
+LOCAL_CONFIG := hack/local/config.yaml
+
 ## run: build and run the primary binary locally
 run:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@echo "reconciling against kubecontext: $$(kubectl config current-context 2>/dev/null || echo unknown)"
-	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug --leader-elect=false
+	@set -a && . ./.env && set +a && export CONFIG_PATH=$${CONFIG_PATH:-$(LOCAL_CONFIG)} && echo "config: $$CONFIG_PATH" && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug --leader-elect=false
 
 # ── Testing ────────────────────────────────────────────────────────────────────
 ## test: run all tests (unit + integration + envtest)
@@ -243,7 +246,7 @@ kind-status:
 	@echo "controller:   $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy $(APP_NAME) -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not deployed — make kind-deploy')"
 	@echo "fake in-cluster: $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy fake-opnsense -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not running — make kind-fake-install')"
 	@echo "fake on host:    $$(curl -sf --max-time 2 localhost:8053/records >/dev/null 2>&1 && echo 'listening on :8053' || echo 'not listening — make fake-opnsense')"
-	@test -f .env && echo "config:       $$(grep -E '^CONFIG_PATH=' .env | sed 's/^CONFIG_PATH=//')" || echo "config:       no .env — cp .env.example .env"
+	@test -f .env && echo "config:       $$(grep -E '^CONFIG_PATH=.' .env | sed 's/^CONFIG_PATH=//' | grep . || echo '$(LOCAL_CONFIG) (default)')" || echo "config:       no .env — cp .env.example .env"
 
 ## kind-reset: rebuild the dev cluster from scratch (use it after the kind pin changes)
 kind-reset: kind-down kind-deploy
