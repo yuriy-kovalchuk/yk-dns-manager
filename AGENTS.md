@@ -17,14 +17,13 @@ Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and 
 | Command | Description |
 |---------|-------------|
 | `make build` | Compile binary to `bin/yk-dns-manager` with ldflags |
-| `make test` | All tests (unit + integration + envtest) |
+| `make test` | All tests (unit + envtest) |
 | `make test-unit` | Unit tests only, coverage profile |
-| `make test-integration` | Integration tests with fake HTTP server |
-| `make test-envtest` | Real manager against an envtest API server and the fake appliance (downloads binaries to `bin/k8s`) |
+| `make test-envtest` | Real manager against an envtest API server and the memory provider (downloads binaries to `bin/k8s`) |
 | `make test-cover` | Coverage report (HTML at `coverage.html`) |
 | `make run` | Run the binary locally against your current kubecontext (sources `.env`, `--leader-elect=false`) |
 | `make kind-up` | Start local kind cluster |
-| `make kind-deploy` | kind cluster + Gateway API CRDs + image + in-cluster fake appliance + helm install |
+| `make kind-deploy` | kind cluster + Gateway API CRDs + image + helm install with the memory provider |
 | `make kind-down` | Remove kind cluster |
 | `make lint` | golangci-lint (blocking in CI) |
 | `make docker-build` | Multi-platform build (no push) |
@@ -35,6 +34,8 @@ Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and 
 - **Domain map matching:** an exact key matches only itself; otherwise the most specific `*.parent` wildcard covering the hostname wins, at any depth. One controller serves multiple domains/ILBs via the `domains` section of the config file.
 - **Ownership lives on the DNS record, not the route.** Providers mark every record they write and only change or delete marked records; anything else is a `Conflict`. The mark names the routes that wrote the record (`dns.Record.Owner`), and `Remove` carries the owner, so a route can only release records it wrote. The `dns.yk/managed-hostnames` annotation is writable by any route editor, so it only says which names to release, never what may be deleted. A record shared by several routes is deleted only when none claims it.
 - **Every provider runs the conformance suite** (`internal/dns/dnstest`). The contract is pinned there, not in provider-specific tests.
+- **No fake backends.** Tests above the provider use the memory provider (`internal/dns/memory`), which passes the conformance suite. A real provider tests its wire format against stateless `httptest` stubs in its own package, and runs the conformance suite against the real backend only when asked (OPNsense: `OPNSENSE_TEST_URL`). Do not build a simulator of a vendor API.
+- **Publishing goes through `dns.Publisher`**, which tracks owed publishes and `publish_interval` for any provider whose writes are staged.
 - **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.
 - **Only the leader reconciles.** Leader election is on by default (Lease `yk-dns-manager.dns.yk` in the pod's namespace); the chart refuses `replicaCount` > 1 without it. `make run` passes `--leader-elect=false`.
 - **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` counter.

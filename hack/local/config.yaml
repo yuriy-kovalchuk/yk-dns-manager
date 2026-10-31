@@ -1,22 +1,14 @@
-# Config for local development. base_url points at the in-memory fake from
-# `make fake-opnsense` (hack/fake-opnsense over internal/testenv), which stores
-# everything in memory and accepts any credentials.
+# Config for local development (`make run`). The memory provider keeps records
+# in the process and logs every change, so no appliance or credentials are
+# needed.
 #
-# For a real appliance, copy this file, set base_url to the appliance API and put
-# real credentials in .env.
+# For a real appliance, copy examples/config.yaml, set base_url to the appliance
+# API, put real credentials in .env and point CONFIG_PATH at the copy.
 
-provider: opnsense
+provider: memory
 upsert: true
 
 # The sample HTTPRoute in hack/local/httproute.yaml declares app.example.com,
 # which this wildcard covers.
 domains:
   "*.example.com": 10.0.0.1
-
-settings:
-  base_url: "http://127.0.0.1:8053/api"
-  # The fake speaks plain HTTP. Never set this for a real appliance: the
-  # credentials would cross the network in cleartext.
-  allow_insecure_http: "true"
-  api_key: "${OPNSENSE_API_KEY}"
-  api_secret: "${OPNSENSE_API_SECRET}"

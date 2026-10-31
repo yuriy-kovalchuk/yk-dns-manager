@@ -11,9 +11,10 @@
   1.37.0 regardless of which kind you have — but older kind releases cannot load
   newer node images, so upgrade the tool alongside the pin.
 
-No OPNsense appliance and no real credentials are needed. `make fake-opnsense`
-serves an in-memory stand-in for the appliance API, and the local profile under
-`hack/local/` is wired to it.
+No OPNsense appliance and no real credentials are needed. The local profiles
+(`hack/local/config.yaml` for `make run`, `hack/local-values.yaml` for kind)
+select `provider: memory`, which keeps records in the controller's memory and
+logs every change.
 
 Every `kind-*` target pins `--context kind-yk-dns-manager-dev`, so it acts on the
 dev cluster rather than on whatever your kubeconfig currently points at.
@@ -25,15 +26,16 @@ testing is the cluster.
 
 | You changed | Use | Cost |
 |---|---|---|
-| reconcile logic, config parsing, provider calls, dedup, finalizers | `make test-unit`, `make test-integration` | ~2s each, no cluster, no network |
+| reconcile logic, config parsing, provider calls, dedup, finalizers | `make test-unit` | ~2s, no cluster, no network |
+| the OPNsense provider against a real appliance | `go test -run TestConformanceAgainstAppliance ./internal/dns/opnsense/` with `OPNSENSE_TEST_*` set, see [testing.md](testing.md#against-a-real-appliance) | ~10s, needs a test appliance |
 | the controller's behaviour against a real API server: event filter, finalizers, ownership | `make test-envtest` | ~1 min, no cluster needed |
 | wiring you can only see end to end — manager setup, RBAC, chart, probes, real informer behaviour | Path A below | ~40s bring-up, ~10s per iteration |
 | the binary's own startup, flags, config loading, logging | Path B below | ~2s per restart |
 
 The unit tests cover the reconciler against a mock provider and a fake Kubernetes
-client; the integration tests drive the real provider over HTTP against the same
-in-memory appliance both paths below use; envtest runs the real manager against a
-real API server. That is most of the surface area.
+client, and the OPNsense provider against stubbed API answers; envtest runs the
+real manager against a real API server and the memory provider. That is most of
+the surface area.
 
 ## When something is not doing what you expect
 
@@ -44,9 +46,7 @@ kubecontext:  kind-yk-dns-manager-dev
 cluster:      yk-dns-manager-dev (v1.37.0)
 gateway CRDs: installed
 controller:   1/1 ready
-fake in-cluster: 1/1 ready
-fake on host:    not listening — make fake-opnsense
-config:       hack/local/config.yaml
+config:       hack/local/config.yaml (default)
 ```
 
 Every line names the command that fixes it. Run this before debugging; most local
@@ -59,11 +59,10 @@ sequence will happily wait out helm's timeout and tell you nothing.
 
 ## Path A — everything in kind
 
-One command brings up a cluster, installs the CRDs, builds and loads the image,
-installs the fake appliance and deploys the controller:
+One command brings up a cluster, installs the CRDs, builds and loads the image
+and deploys the controller with the memory provider:
 
 ```bash
-cp .env.example .env   # the fake accepts any credentials
 make kind-deploy
 ```
 
@@ -74,14 +73,10 @@ make kind-demo         # applies hack/local/httproute.yaml (app.example.com)
 make kind-logs         # watch the reconcile
 ```
 
-The controller writes `app.example.com -> 10.0.0.1`. Read it back from the fake
-(the image is distroless, so there is no shell in it):
+The controller writes `app.example.com -> 10.0.0.1`, and the log shows it:
 
-```bash
-kubectl --context kind-yk-dns-manager-dev -n yk-dns-manager-system \
-  port-forward svc/fake-opnsense 8053:8053 &
-curl -s localhost:8053/records
-kill %1
+```
+{"logger":"dns-memory","msg":"memory: record created","fqdn":"app.example.com","value":"10.0.0.1","owners":["httproute/default/local-demo"]}
 ```
 
 Iterate on a code change with `make kind-reload` — rebuild the image, load it into
@@ -90,11 +85,11 @@ rebuilds it; use it when the kind pin changes or when a stale cluster is
 suspected, because `kind-up` reuses an existing cluster and says so.
 `make kind-down` tears it down.
 
-## Path B — standalone binary against the fake
+## Path B — standalone binary
 
 The fast inner loop: no image build, restart in about two seconds. The controller
 runs as a plain binary and connects through your kubeconfig, so it still needs a
-cluster with Gateway API CRDs — only the DNS backend stays on your machine.
+cluster with Gateway API CRDs. The DNS records live in the process.
 
 **Check the context first.** `make run` uses your current kubeconfig context, and
 `make kind-up` switches it to the dev cluster. If your current context is a real
@@ -102,44 +97,30 @@ cluster, the controller will reconcile against it and write real DNS records.
 `make run` prints the context it is about to use.
 
 ```bash
-cp .env.example .env
-make fake-opnsense     # foreground; listens on :8053
-```
-
-In another shell:
-
-```bash
 make kind-up           # or use any cluster you already have a context for
 make kind-crds         # the controller watches HTTPRoutes; without the CRDs it starts and then fails to sync
 make run               # prints the kubecontext it is about to reconcile against
 ```
 
-`hack/local/config.yaml` points at `http://127.0.0.1:8053/api`, which works
-for a binary on your machine. It does not work for a pod — see the Service DNS
-name in `hack/local-values.yaml`.
-
-Inspect what the controller wrote:
-
-```bash
-curl -s localhost:8053/records
-```
-
-The fake logs one line per request, including whether the controller presented
-credentials. A missing `Authorization` header usually means the config file
-is pointing somewhere it should not be.
+`make run` needs no `.env`: without one it uses `hack/local/config.yaml`. Every
+record the controller writes, updates or deletes is logged as a `memory: record …`
+line; they are gone when the process stops.
 
 ## Against a real appliance
 
-Copy the local profile and change only the backend:
+Start from the example config and change the backend:
 
 ```bash
-cp hack/local/config.yaml .developer/config.yaml
-# set settings.base_url to https://<appliance>/api and delete allow_insecure_http
+cp examples/config.yaml .developer/config.yaml
+# set settings.base_url to https://<appliance>/api
+cp .env.example .env
+# set CONFIG_PATH=.developer/config.yaml and the real OPNSENSE_API_KEY / OPNSENSE_API_SECRET
 ```
 
-Then set `CONFIG_PATH=.developer/config.yaml` in `.env` and put the real
-credentials there. An `.env` from before the single config file still sets
-`DOMAIN_MAP_PATH` and `DNS_PROVIDER_PATH`; replace both with `CONFIG_PATH`.
+An `.env` from before the single config file still sets `DOMAIN_MAP_PATH` and
+`DNS_PROVIDER_PATH`; replace both with `CONFIG_PATH`. For kind, follow the
+comments in `hack/local-values.yaml` and run `make kind-secret` before
+`make kind-deploy`.
 
 If the appliance uses a self-signed certificate, put its CA in a ConfigMap under
 the key `ca.pem`, name that ConfigMap in `dnsProvider.caConfigMap`, and set
@@ -150,19 +131,16 @@ request.
 ## Running tests
 
 ```bash
-make test              # unit + integration + envtest
+make test              # unit + envtest
 make test-envtest      # the real manager against an envtest API server (~1 min)
 make test-unit         # unit only — no network, no external processes
-make test-integration  # provider over real HTTP against internal/testenv
 make test-cover        # HTML report at coverage.html + function summary
 go test ./internal/config/ -v
 go test -run TestNewDomainMap ./internal/config/ -v
 ```
 
-The integration tests verify wire-format correctness: JSON shapes, URL
-construction, status handling and response parsing against the fake appliance in
-`internal/testenv` — the same one `make fake-opnsense` serves. See
-[testing.md](testing.md) for the full inventory.
+See [testing.md](testing.md) for the full inventory, and for running the
+conformance suite against a real appliance.
 
 ## External dependencies
 
@@ -170,4 +148,4 @@ construction, status handling and response parsing against the fake appliance in
 |---|---|
 | Kubernetes cluster | kind (`make kind-up`), minikube, or any remote cluster with kubeconfig access |
 | Gateway API CRDs | `make kind-crds` for a kind cluster; `kind-deploy` installs them as a prerequisite. Anywhere else: `kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml` |
-| DNS provider (OPNsense) | `make fake-opnsense` on the host, `make kind-fake-install` inside the cluster, or a real appliance as above |
+| DNS backend | `provider: memory` (the local default), or a real appliance as above |

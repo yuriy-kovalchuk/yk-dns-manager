@@ -21,9 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org).
 - `networkPolicy.apiServer` and `networkPolicy.provider` set the egress ports, and optionally CIDRs, for the API server and the DNS provider.
 - `allow_insecure_http` provider setting, the opt-in for a plain-HTTP appliance URL.
 - envtest suite (`make test-envtest`), part of `make test` and CI.
+- `memory` DNS provider: keeps records in the controller's memory and logs every change. The local profiles (`make run`, `make kind-deploy`) use it, so local development needs no appliance, credentials or `.env`.
+- `TestConformanceAgainstAppliance` runs the provider conformance suite against a real OPNsense when `OPNSENSE_TEST_URL` is set.
 
 ### Changed
 
+- The in-memory OPNsense fake is gone (`internal/testenv`, `hack/fake-opnsense`, `Dockerfile.fake`, `make fake-opnsense`, `make kind-fake-install`, `make test-integration`). envtest runs on the memory provider, the OPNsense provider's wire format is tested against stateless HTTP stubs, and its conformance against a real appliance.
 - **Breaking:** the domain map and the DNS provider config are one file. Its `domains` section holds what the domain map file held, next to `provider`, `upsert` and `settings`. It is read from `--config` or `CONFIG_PATH`, which replace `--domain-map-path`, `DOMAIN_MAP_PATH` and `DNS_PROVIDER_PATH`. The Helm values are unchanged; the chart renders one ConfigMap instead of two. **Before upgrading** a deployment outside the chart, move the domain map under `domains:` in the provider config and point `CONFIG_PATH` at it. See `examples/config.yaml`.
 - **Breaking (provider API):** `dns.Record` gained `Owner` and `Batch.Remove` takes the owner who is releasing the name. Providers store it with the record and refuse to delete records another owner wrote. Only providers written against this interface are affected; nothing in the config or the chart changes.
 - **Breaking:** an exact domain-map key matches only that one name. It used to cover every name below it as well, so `example.com: 10.0.0.1` also served `app.example.com`. Wildcards are unchanged: `*.example.com` covers every name below example.com at any depth. **Before upgrading**, replace each exact key that is meant to cover subdomains with its `*.` form (keep the exact key too if the bare name needs a record); otherwise the controller releases the records of those subdomains. At startup the controller logs every exact key without a matching wildcard. The chart default is now `"*.example.com"`.

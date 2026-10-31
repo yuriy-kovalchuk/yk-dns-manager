@@ -53,8 +53,8 @@ jobs:
           fi
 
       - name: Vet, build, test, lint
-        # `make test` is unit + integration; integration never ran here before, and
-        # lint is blocking now (it used to carry continue-on-error: true).
+        # `make test` is unit + envtest; lint is blocking (it used to carry
+        # continue-on-error: true).
         run: make vet build test lint
 
       - name: Vulnerability scan

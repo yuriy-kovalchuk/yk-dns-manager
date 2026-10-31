@@ -27,10 +27,6 @@ coverage.*
 charts/
 docs/
 hack/
-# Dockerfile.fake builds ./hack/fake-opnsense, so it has to survive the exclusion
-# above.
-!hack/fake-opnsense/
-!hack/fake-opnsense/**
 test/
 
 # OS noise

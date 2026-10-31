@@ -52,6 +52,9 @@ const (
 	otherOwner = "route/green"
 )
 
+// Names are the FQDNs the suite writes; a backend shared with other data must clear them before each test.
+var Names = []string{host, other}
+
 // Run runs the conformance suite against the provider newBackend builds.
 func Run(t *testing.T, newBackend Factory) {
 	overwrite := dns.EnsureOptions{Overwrite: true}

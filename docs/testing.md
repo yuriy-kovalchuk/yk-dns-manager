@@ -6,10 +6,10 @@ All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUB
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `cmd/`, `internal/` | 60 | Config parsing and validation, provider construction and TLS, controller reconcile logic, log-level handling, the fake appliance's contract |
-| Integration | `test/integration/` | 11 + conformance | The provider conformance suite and OPNsense-specific checks, against an in-process fake appliance over HTTP |
-| Envtest | `test/envtest/` | 17 | The real manager, predicates and provider against a real API server and the fake appliance |
-| E2E | manual | — | Full flow in a kind cluster with the fake appliance; see [docs/local-testing.md](local-testing.md) |
+| Unit | `internal/` | 57 | Config parsing and validation, controller reconcile logic, log-level handling, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
+| Appliance | `internal/dns/opnsense/` | conformance | The conformance suite against a real OPNsense; opt-in, see [Against a real appliance](#against-a-real-appliance) |
+| Envtest | `test/envtest/` | 23 | The real manager and predicates against a real API server and the memory provider |
+| E2E | manual | — | Full flow in a kind cluster with the memory provider; see [docs/local-testing.md](local-testing.md) |
 
 There are no mocking frameworks. Tests use plain structs implementing `dns.Provider` and `sigs.k8s.io/controller-runtime/pkg/client/fake`.
 
@@ -44,7 +44,39 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestLookupIP` | An exact key matches only itself, case-insensitively and with a trailing dot (D2); a wildcard covers any depth; the most specific key wins |
 | `TestLookupIPWildcardSkipsBareDomain` | `*.x` never matches `x` itself |
 
+### Publish gate — `internal/dns/publish_test.go`
+
+`dns.Publisher` decides when a provider with staged writes publishes; OPNsense and the memory provider share it.
+
+| Test | Description |
+|---|---|
+| `TestPublisherFirstPublishIsOwed` | A new process publishes once even with nothing staged, in case an earlier one left changes staged (B10) |
+| `TestPublisherFailedPublishStaysOwed` | After a failed publish, the next one goes out although nothing new was staged (B10) |
+| `TestPublisherWriteDuringPublishStaysOwed` | A write made while a publish runs is still owed afterwards (D3) |
+| `TestPublisherIntervalCoalesces` | Inside the interval a publish is held back with `*dns.PublishDeferred`, and one later publish covers the burst (M4) |
+
+### Provider conformance — `internal/dns/dnstest`
+
+The contract every provider must meet, written once against `dns.Provider` and run by each provider through an adapter that seeds and reads records on its backend. It covers:
+
+- creating, updating, keeping (create-only mode) and re-enabling managed records, and writing nothing when a record already matches;
+- never touching someone else's record: a live one is a `Conflict`, a disabled one is ignored, and `Remove` leaves both;
+- owner scoping: only an owner named on the record can delete it, a caller that is not one leaves it alone, `Ensure` adds an owner to a record another owner wrote, and a record whose owners are unknown (written before owners existed) is deletable by any caller;
+- legacy records: foreign unless adopted, rewritten with the marker when adopted, removed only when adopting;
+- converging duplicate managed records, removing a missing record, and a batch seeing its own writes.
+
+### Memory provider — `internal/dns/memory/`
+
+The `provider: memory` backend for local development, and the backend under envtest. Its `Seed`, `Stored`, `Live`, `Drop`, `FailPublish` and `Counts` methods act on the backend directly, as an operator or a broken backend would.
+
+| Test | Description |
+|---|---|
+| `TestConformance` | The full conformance suite, so tests built on it run against the same contract as a real backend |
+| `TestNew_PublishIntervalMustBeADuration` | A nonsense or negative `publish_interval` fails startup |
+
 ### OPNsense provider — `internal/dns/opnsense/`
+
+The API tests run against `httptest` stubs that answer only what each test needs and keep no state; they pin the wire format and how the appliance's answers are read. Whether OPNsense really behaves that way is what the [appliance run](#against-a-real-appliance) checks.
 
 | Test | Description |
 |---|---|
@@ -60,19 +92,14 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestResponseBodyLimit` | A body over the cap is reported as a limit error, not as truncated JSON |
 | `TestErrorBodyTruncated` | Error bodies are capped rather than dumped whole into the log |
 | `TestCommitChecksReconfigureStatus` | A reconfigure answering a status other than `ok` fails the commit, and the publish stays owed |
-
-### Fake appliance — `internal/testenv/`
-
-The fake is only useful while it behaves like OPNsense, so its contract is pinned too.
-
-| Test | Description |
-|---|---|
-| `TestFakeRequiresCredentialsWhenConfigured` | With `RequireCredentials`, missing or wrong basic auth gets 401 |
-| `TestFakeUnknownUUIDAnswers200WithResult` | Unknown uuids get HTTP 200 with `result: failed` (set) or `not found` (del), not a 404 |
-| `TestFakeValidatesRows` | Rows the appliance would reject get `result: failed` with `validations` |
-| `TestFakeWritesRequirePOST` | Write endpoints ignore other methods |
-| `TestFakePublishesOnlyOnReconfigure` | Writes are staged; only a successful reconfigure publishes them |
-| `TestFakeSeedIsPublished` | Seeded rows count as configuration that was already live |
+| `TestEnsureWritesTheOverrideFields` | The FQDN is split into hostname and domain, and the description carries the ownership marker and owner |
+| `TestEnsureUnchangedWritesNothing` | A matching record costs one list, no write and no reconfigure (B2) |
+| `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error carrying the appliance's reason, not a success (M3) |
+| `TestRemoveOfMissingRecordIssuesNoDelete` | Removing a record that does not exist issues no delete |
+| `TestRemoveToleratesVanishedRecord` | A row deleted by someone else since the batch listed (`not found`) is not an error |
+| `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
+| `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
+| `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
 
 ### HTTPRoute controller — `internal/controller/httproute_controller_test.go`
 
@@ -93,46 +120,22 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events and in the counters (D6) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
-## Integration tests
+## Against a real appliance
 
-`test/integration/` drives the real provider over real HTTP against `internal/testenv.OPNsense`, the same in-memory appliance `make fake-opnsense` serves.
-
-The fake follows the appliance where the provider depends on it. Writes are staged (`Snapshot`) and only published (`Published`) by reconfigure. Unknown uuids get HTTP 200 with a result body. Invalid rows are rejected with `validations`. In these tests it requires the credentials the provider sends. `SetFailure` makes an endpoint return an error status, and `DuringReconfigure` lets a write race a publish.
+No fake stands in for OPNsense. `TestConformanceAgainstAppliance` runs the conformance suite against a real one, and is skipped unless `OPNSENSE_TEST_URL` is set:
 
 ```bash
-make test-integration
+OPNSENSE_TEST_URL=https://<appliance>/api \
+OPNSENSE_TEST_KEY=... OPNSENSE_TEST_SECRET=... \
+OPNSENSE_TEST_CA_FILE=/path/to/ca.pem \
+go test -run TestConformanceAgainstAppliance -v ./internal/dns/opnsense/
 ```
 
-### Provider conformance — `internal/dns/dnstest`
-
-The contract every provider must meet, written once against `dns.Provider` and run by each provider through an adapter that seeds and reads records on its test backend (`conformance_test.go` for OPNsense). It covers:
-
-- creating, updating, keeping (create-only mode) and re-enabling managed records, and writing nothing when a record already matches;
-- never touching someone else's record: a live one is a `Conflict`, a disabled one is ignored, and `Remove` leaves both;
-- owner scoping: only an owner named on the record can delete it, a caller that is not one leaves it alone, `Ensure` adds an owner to a record another owner wrote, and a record whose owners are unknown (written before owners existed) is deletable by any caller;
-- legacy records: foreign unless adopted, rewritten with the marker when adopted, removed only when adopting;
-- converging duplicate managed records, removing a missing record, and a batch seeing its own writes.
-
-### OPNsense-specific — `opnsense_test.go`
-
-| Test | Description |
-|---|---|
-| `TestEnsureWritesTheOverrideFields` | The FQDN is split into hostname and domain, and the description carries the ownership marker |
-| `TestEnsureUnchangedWritesNothing` | A matching record costs one list, no write and no reconfigure (B2) |
-| `TestEnsureSurfacesValidationFailure` | A row the appliance rejects (HTTP 200, `result: failed`) is an error carrying the appliance's reason, not a success (M3) |
-| `TestRemoveOfMissingRecordIssuesNoDelete` | Removing a record that does not exist issues no delete |
-| `TestRemoveToleratesVanishedRecord` | A row deleted by someone else since the batch listed is not an error |
-| `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
-| `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
-| `TestFirstCommitPublishes` | A new provider's first used batch publishes, in case an earlier process left changes staged (B10) |
-| `TestFailedPublishStaysOwed` | After a failed reconfigure, a later batch that writes nothing still publishes (B10) |
-| `TestWriteDuringPublishStaysOwed` | A write made during another batch's reconfigure is still published by its own commit (D3) |
-| `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
-| `TestPublishIntervalCoalescesPublishes` | Inside `publish_interval` a publish is held back, its changes stay owed, and one reconfigure covers them all (M4) |
+It deletes every override for `app.example.com` and `other.example.com` before and after each case, so point it at a test appliance. Run it before a release and after changing the provider. The API lists staged overrides only, so on the appliance "live" means stored after a successful commit.
 
 ## Envtest
 
-`test/envtest/` starts a real API server and etcd (controller-runtime envtest) with the Gateway API CRDs from the module go.mod pins. Each test starts its own manager, running the real reconciler and OPNsense provider against its own fake appliance and watching its own namespace. This covers what the controller unit tests cannot, because they call `Reconcile` directly on a fake client: the event predicates, the finalizer → reconcile chain, and the API server's generation and finalizer semantics.
+`test/envtest/` starts a real API server and etcd (controller-runtime envtest) with the Gateway API CRDs from the module go.mod pins. Each test starts its own manager, running the real reconciler against its own memory provider and watching its own namespace. This covers what the controller unit tests cannot, because they call `Reconcile` directly on a fake client: the event predicates, the finalizer → reconcile chain, and the API server's generation and finalizer semantics.
 
 ```bash
 make test-envtest   # downloads pinned control-plane binaries into bin/k8s, then runs the suite
@@ -145,23 +148,23 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 | `TestCreatePublishesRecord` | In both modes, the finalizer is added, the record is published, and the route records ownership |
 | `TestHostnameChangeMovesRecord` | Changing a hostname publishes the new record and removes the old one |
 | `TestDeleteRemovesRecordAndReleasesRoute` | Deleting the route unpublishes the record and releases the finalizer |
-| `TestUnmatchedRouteIsIgnored` | A route the domain map does not cover gets no finalizer and no appliance writes |
-| `TestRouteIsDeletableWhileApplianceFails` | With every appliance call failing, the route is released once the cleanup grace period runs out |
-| `TestRecordPublishedAfterReconfigureRecovers` | A record staged while reconfigure fails is published once it recovers |
+| `TestUnmatchedRouteIsIgnored` | A route the domain map does not cover gets no finalizer and no DNS writes |
+| `TestRouteIsDeletableWhileBackendFails` | With every publish failing, the route is released once the cleanup grace period runs out |
+| `TestRecordPublishedAfterFailedPublish` | A record staged while publishing fails is published once it recovers |
 | `TestAnnotationCannotDeleteForeignRecords` | Names written into the ownership annotation outside the domain map are never deleted (S1) |
-| `TestUnchangedRouteCausesNoWrites` | Reconciling an unchanged route makes no writes and no reconfigure (B2) |
-| `TestDisabledManagedRecordIsReenabled` | A disabled managed override is re-enabled (B8) |
+| `TestUnchangedRouteCausesNoWrites` | Reconciling an unchanged route makes no writes and no publish (B2) |
+| `TestDisabledManagedRecordIsReenabled` | A disabled managed record is re-enabled (B8) |
 | `TestUnmanagedRecordIsNotOverwritten` | A hand-made record for a route's hostname is never repointed (S2) |
 | `TestUnmanagedRecordSurvivesRouteDeletion` | Deleting the route leaves a hand-made record in place (S2) |
 | `TestSharedHostnameSurvivesOneRouteDeletion` | Deleting one of two routes sharing a hostname keeps the record published (B1) |
 | `TestLegacyRecordIsAdoptedByItsRoute` | A record from before ownership marking is adopted and re-marked by the route that recorded owning it |
 | `TestLegacyRecordIsNotAdoptedByANewRoute` | A route that never owned a name cannot adopt or delete its legacy record |
 | `TestAcceptanceControlsRecord` | With `--require-accepted-routes`, a route gets its record once accepted and loses it when acceptance goes |
-| `TestDeleteIsPublishedAfterReconfigureRecovers` | A route is held while its deletion cannot be published, then goes with its record (B9) |
+| `TestDeleteIsPublishedAfterFailedPublish` | A route is held while its deletion cannot be published, then goes with its record (B9) |
 | `TestUnacceptedRouteGetsNoRecord` | With `--require-accepted-routes`, an unaccepted route gets no finalizer and no record (S3) |
-| `TestWildcardRouteHostnameGetsNoRecord` | A route hostname of `*.example.com` creates no wildcard override (H2) |
-| `TestDriftOnTheApplianceIsHealed` | A record deleted on the appliance is republished on the next resync (M1) |
-| `TestBurstOfRoutesCostsOnePublish` | Five routes applied at once cost at most two reconfigures (M4) |
+| `TestWildcardRouteHostnameGetsNoRecord` | A route hostname of `*.example.com` creates no wildcard record (H2) |
+| `TestDriftOnTheBackendIsHealed` | A record deleted on the DNS backend is republished on the next resync (M1) |
+| `TestBurstOfRoutesCostsOnePublish` | Five routes applied at once cost at most two publishes (M4) |
 | `TestAnnotationCannotDeleteAnotherRoutesRecord` | A route cannot delete a record another route wrote, whatever its annotation claims (H1) |
 | `TestSharedHostnameIsReleasedByTheLastRoute` | The last of two routes sharing a hostname releases the record |
 | `TestRecordFromBeforeOwnersIsStillReleased` | A record marked before owners existed is still released when its route goes |
@@ -173,22 +176,21 @@ Without `KUBEBUILDER_ASSETS` the suite skips, so a plain `go test ./...` (and th
 Not automated in CI. The manual path is documented in [docs/local-testing.md](local-testing.md):
 
 ```bash
-make kind-deploy   # cluster + image + fake appliance + controller
+make kind-deploy   # cluster + image + controller with the memory provider
 make kind-demo     # apply hack/local/httproute.yaml
 ```
 
 The controller logs `app.example.com -> 10.0.0.1` with reason `DNSRecordCreated`
-(also an Event on the route, see `kubectl describe httproute local-demo`) followed
-by one `reconfigure completed`, and `GET /records` on the fake shows the row. Automating this as `make test-e2e` is open work.
+(also an Event on the route, see `kubectl describe httproute local-demo`), and the
+memory provider logs `memory: record created` for it. Automating this as `make test-e2e` is open work.
 
 ## Running tests
 
 ```bash
-make test              # unit + integration + envtest
+make test              # unit + envtest
 make test-envtest      # envtest only
 make test-unit         # unit only, with a coverage profile
 make test-cover        # function summary + coverage.html
-make test-integration  # integration only
 make vuln              # govulncheck, same as CI
 
 go test -race ./...    # race detector

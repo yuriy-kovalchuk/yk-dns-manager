@@ -24,16 +24,16 @@ internal/app/                       # Startup wiring: flags, config, provider he
 internal/logging/                   # zap logger and --zap-log-level parsing
 internal/controller/                # HTTPRoute reconciler (the only reconciler) and its metrics
 internal/dns/provider.go            # Provider and Batch interfaces
+internal/dns/publish.go             # Publisher: owed publishes and publish_interval
   providers/                        # Factory list and selection by config name
   opnsense/opnsense.go              # OPNsense Unbound implementation
+  memory/                           # In-memory provider: local development and envtest
   dnstest/                          # Conformance suite every provider runs
 internal/config/                    # Config file loader (provider, settings, DomainMap)
-internal/testenv/                   # In-memory OPNsense fake (tests and `make fake-opnsense`)
 internal/version/version.go         # Version (injected via ldflags)
-test/integration/                   # Provider against the fake over HTTP, incl. conformance
-test/envtest/                       # Real manager against an envtest API server
+test/envtest/                       # Real manager against an envtest API server and the memory provider
 charts/yk-dns-manager/              # Helm chart for deployment
-hack/                               # kind config, local profiles, the fake's entrypoint
+hack/                               # kind config and local profiles
 ```
 
 The controller is a **single-reconciler** design: one `HTTPRouteReconciler` handles all HTTPRoute resources. Domain separation between handler/service/repository layers is unnecessary — the reconciler itself is thin enough (parsing, delegation to DNS provider) that a monolithic structure with clean boundaries suffices.
@@ -162,12 +162,17 @@ func (b *batch) Commit(ctx context.Context) error                               
 
 The provider must be able to tell its own records from everyone else's, and which of them the caller owns (see [Ownership](#ownership)): it needs somewhere on the backend to store the marker and its owners. A backend that applies every write immediately can make `Commit` a no-op.
 
-Run the conformance suite against it. It pins the whole contract, ownership included, and only needs an adapter that seeds records and reads them back from a test backend; `test/integration/conformance_test.go` is the OPNsense one:
+If writes only take effect once published, let `dns.Publisher` decide when: call `Staged()` on every write and `Publish` from `Commit`, and `publish_interval` and owed publishes work as they do for OPNsense.
+
+Run the conformance suite against it. It pins the whole contract, ownership included, and only needs an adapter that seeds records and reads them back from the backend. Do not write a fake of the vendor API: run the suite against a real backend, from a container in CI when the backend ships one, or opt-in against a test instance otherwise (`internal/dns/opnsense/appliance_test.go`). Pin the wire format with stateless `httptest` stubs in the provider's own package (`api_test.go`):
 
 ```go
-func TestConformance(t *testing.T) {
+func TestConformanceAgainstBackend(t *testing.T) {
+    if os.Getenv("MYPROVIDER_TEST_URL") == "" {
+        t.Skip("MYPROVIDER_TEST_URL is not set")
+    }
     dnstest.Run(t, func(t *testing.T) (dns.Provider, dnstest.Backend) {
-        // start a fake backend, return the provider and an adapter over it
+        // clear dnstest.Names on the backend, return the provider and an adapter over it
     })
 }
 ```

@@ -1,4 +1,4 @@
-// Package envtest runs the real controller manager against a real API server and the in-memory OPNsense fake through the real OPNsense provider, exercising the event predicates, the finalizer chain and the API server's semantics that unit tests bypass; it needs the envtest control-plane binaries, which make test-envtest downloads and points at through KUBEBUILDER_ASSETS.
+// Package envtest runs the real controller manager against a real API server and the in-memory DNS provider, exercising the event predicates, the finalizer chain and the API server's semantics that unit tests bypass; it needs the envtest control-plane binaries, which make test-envtest downloads and points at through KUBEBUILDER_ASSETS.
 package envtest
 
 import (
@@ -6,8 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,15 +35,14 @@ import (
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/config"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/controller"
-	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
-	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/testenv"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/memory"
 )
 
 const (
 	finalizerName              = "dns.yk/cleanup"
 	managedHostnamesAnnotation = "dns.yk/managed-hostnames"
 
-	// waitTimeout bounds every eventually: a reconcile against the in-process fake takes milliseconds, so it only matters when something is wrong.
+	// waitTimeout bounds every eventually: a reconcile against the in-memory provider takes milliseconds, so it only matters when something is wrong.
 	waitTimeout = 15 * time.Second
 	// settleTime is how long consistently watches for something that must not happen, long enough for several reconciles to run.
 	settleTime = 3 * time.Second
@@ -118,16 +115,15 @@ type harnessOptions struct {
 	publishInterval time.Duration
 }
 
-// harness is one running controller, watching its own namespace and talking to its own fake appliance.
+// harness is one running controller, watching its own namespace and writing to its own in-memory DNS backend.
 type harness struct {
 	t      *testing.T
 	ns     string
-	fake   *testenv.OPNsense
+	dns    *memory.Provider
 	client client.Client
-	srvURL string
 }
 
-// start creates a namespace, a fake appliance and a manager running the real reconciler and provider, and tears everything down when the test ends.
+// start creates a namespace, a DNS backend and a manager running the real reconciler, and tears everything down when the test ends.
 func start(t *testing.T, opts harnessOptions) *harness {
 	t.Helper()
 	ctx := context.Background()
@@ -142,23 +138,9 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		t.Fatalf("creating namespace: %v", err)
 	}
 
-	fake := testenv.NewOPNsense()
-	fake.RequireCredentials("envtest-key", "envtest-secret")
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
-
 	log := testr.NewWithOptions(t, testr.Options{Verbosity: 1})
 
-	settings := map[string]string{
-		"base_url":            srv.URL + "/api",
-		"api_key":             "envtest-key",
-		"api_secret":          "envtest-secret",
-		"allow_insecure_http": "true",
-	}
-	if opts.publishInterval > 0 {
-		settings["publish_interval"] = opts.publishInterval.String()
-	}
-	provider, err := opnsense.New(log.WithName("dns-opnsense"), settings)
+	provider, err := memory.New(log.WithName("dns-memory"), map[string]string{"publish_interval": opts.publishInterval.String()})
 	if err != nil {
 		t.Fatalf("creating provider: %v", err)
 	}
@@ -211,7 +193,7 @@ func start(t *testing.T, opts harnessOptions) *harness {
 		}
 	})
 
-	h := &harness{t: t, ns: ns, fake: fake, client: c, srvURL: srv.URL}
+	h := &harness{t: t, ns: ns, dns: provider, client: c}
 	t.Cleanup(h.deleteAllRoutes)
 	return h
 }
@@ -363,43 +345,7 @@ func (h *harness) consistently(what string, cond func() bool) {
 	}
 }
 
-// dropOnAppliance deletes an override through the appliance's own API and republishes Unbound as an operator editing by hand would, leaving the controller with a backend that no longer matches the route.
-func (h *harness) dropOnAppliance(fqdn string) {
-	h.t.Helper()
-	settings := h.srvURL + "/api/unbound/settings/"
-	found := false
-	for uuid, row := range h.fake.Snapshot() {
-		if row.FQDN() != fqdn {
-			continue
-		}
-		found = true
-		h.postToAppliance(settings + testenv.EndpointDel + "/" + uuid)
-	}
-	if !found {
-		h.t.Fatalf("no override for %s to delete", fqdn)
-	}
-	h.postToAppliance(h.srvURL + "/api/unbound/service/" + testenv.EndpointReconfigure)
-}
-
-func (h *harness) postToAppliance(url string) {
-	h.t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, strings.NewReader("{}"))
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	req.SetBasicAuth("envtest-key", "envtest-secret")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		h.t.Fatalf("posting to %s: %v", url, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		h.t.Fatalf("posting to %s: status %d", url, resp.StatusCode)
-	}
-}
-
-// hasRow reports whether store holds exactly one override for fqdn, enabled and pointing at ip.
-func hasRow(store map[string]testenv.HostOverride, fqdn, ip string) bool {
-	r := testenv.Rows(store, fqdn)
-	return len(r) == 1 && r[0].Enabled == "1" && r[0].Server == ip
+// hasRecord reports whether records is exactly one enabled record pointing at ip.
+func hasRecord(records []memory.Record, ip string) bool {
+	return len(records) == 1 && !records[0].Disabled && records[0].Value == ip
 }

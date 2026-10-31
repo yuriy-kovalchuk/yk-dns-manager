@@ -141,6 +141,7 @@ The controller only changes or deletes DNS records it created. It marks each one
 | Provider | Backend |
 |---|---|
 | OPNsense | Unbound DNS host overrides via OPNsense API |
+| Memory | Records in the controller's memory, lost on restart; for local development and tests (`provider: memory`, optional `publish_interval`) |
 | Pi-hole | Planned |
 | AdGuard Home | Planned |
 | CoreDNS | Planned |
@@ -171,9 +172,8 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 ## Testing
 
 ```bash
-make test              # all tests (unit + integration + envtest)
-make test-unit         # unit tests only
-make test-integration  # provider against the fake appliance, incl. the conformance suite
+make test              # all tests (unit + envtest)
+make test-unit         # unit tests, incl. the provider conformance suite
 make test-envtest      # the real controller against an envtest API server
 ```
 
@@ -181,12 +181,12 @@ See [docs/testing.md](docs/testing.md) for details.
 
 ## Development
 
-No appliance and no real credentials are needed locally; an in-memory fake stands
-in for OPNsense.
+No appliance and no real credentials are needed locally: the local profiles use
+`provider: memory`, which keeps records in the controller's memory and logs every
+change.
 
 ```bash
-cp .env.example .env
-make kind-deploy   # cluster + CRDs + image + fake appliance + controller
+make kind-deploy   # cluster + CRDs + image + controller with the memory provider
 make kind-demo     # apply a sample HTTPRoute and watch the record appear
 make kind-status   # what is running, and what is missing
 ```
