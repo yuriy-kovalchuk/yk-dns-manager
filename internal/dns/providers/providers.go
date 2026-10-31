@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 
 	dns "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/memory"
 	opnsense "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/opnsense"
 )
 
@@ -28,6 +29,13 @@ func newProviders() []providerFactory {
 			settings: []string{"base_url", "api_key", "api_secret", "ca_file", "skip_tls_verify", "allow_insecure_http", "default_ttl", "publish_interval"},
 			fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
 				return opnsense.New(log, settings)
+			},
+		},
+		{
+			name:     "memory",
+			settings: []string{"publish_interval"},
+			fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
+				return memory.New(log, settings)
 			},
 		},
 	}
