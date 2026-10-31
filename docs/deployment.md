@@ -66,10 +66,52 @@ The chart is published under `oci://ghcr.io/yuriy-kovalchuk/charts/`. The image 
 defaults to is `ghcr.io/yuriy-kovalchuk/yk-dns-manager`, tagged with the chart's
 `appVersion`, which the release pipeline stamps from the release tag.
 
+To run an unreleased build, install the chart from a checkout of the repository
+and point it at the image CI publishes for every commit on master:
+
+```bash
+helm upgrade --install yk-dns-manager charts/yk-dns-manager \
+  --namespace yk-dns-manager \
+  -f values.local.yaml \
+  --set image.tag=master-<full commit sha>
+```
+
+## Monitoring
+
+The controller serves Prometheus metrics on port 9090 (listed in the
+[README](../README.md#observability)). Two values ship what a Prometheus Operator
+setup or Grafana Alloy needs:
+
+```yaml
+serviceMonitor:
+  enabled: true          # scraped by anything that reads ServiceMonitors
+grafanaDashboard:
+  enabled: true          # ConfigMap labelled grafana_dashboard: "1" for the Grafana sidecar
+  # annotations:
+  #   grafana_folder: DNS   # only used when the sidecar's folderAnnotation is set
+```
+
+The dashboard is also in `charts/yk-dns-manager/dashboards/yk-dns-manager.json`
+for importing by hand.
+
 ## Verification
 
-Check the logs to ensure the controller has started and correctly identified its version:
+Check the logs to ensure the controller has started, loaded its config and
+reached the provider:
 
 ```bash
 kubectl logs -l app.kubernetes.io/name=yk-dns-manager -n yk-dns-manager -f
 ```
+
+Look for `loaded config`, `loaded domain map` with the number of entries, and
+no `DNS provider is unreachable` error. Then:
+
+```bash
+# the replica that manages DNS
+kubectl -n yk-dns-manager get lease yk-dns-manager.dns.yk
+# what happened to each route's records
+kubectl get events -A --field-selector reportingComponent=yk-dns-manager
+```
+
+Every route the domain map covers carries the `dns.yk/cleanup` finalizer and lists
+its hostnames in the `dns.yk/managed-hostnames` annotation.

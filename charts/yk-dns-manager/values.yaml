@@ -34,8 +34,9 @@ logLevel: info
 requireAcceptedRoutes: false
 
 # -- How often every HTTPRoute is reconciled again even when nothing changed in
-# the cluster. This is what republishes a DNS record someone changed or deleted
-# on the DNS backend. Set to 0 to turn it off.
+# the cluster. This recreates a DNS record someone deleted on the backend and,
+# with dnsProvider.upsert, corrects one someone changed; without upsert a changed
+# record is reported as drift. Set to 0 to turn it off.
 resyncPeriod: 1h
 
 # -- Deployment strategy. Recreate stops the old pod before starting the new
@@ -65,9 +66,10 @@ priorityClassName: ""
 # -- Domain-to-IP mapping, rendered as the domains section of the config
 # file next to dnsProvider: which IP the DNS record of a matching HTTPRoute
 # hostname points to. Required, and empty by default: Helm merges maps, so a
-# default entry would end up in every release's map. A "*.example.com" key covers every name below
-# example.com, at any depth; an exact key such as "example.com" covers only
-# that one name. An exact key wins, then the most specific wildcard.
+# default entry would end up in every release's map. A "*.example.com" key
+# covers every name below example.com, at any depth; an exact key such as
+# "example.com" covers only that one name. An exact key wins, then the most
+# specific wildcard.
 # Example:
 #   "*.example.com": "10.0.0.1"
 #   "special.example.com": "10.0.0.2"

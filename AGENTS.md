@@ -4,7 +4,7 @@
 A Kubernetes controller built with `controller-runtime` that watches Gateway API HTTPRoute resources and automatically manages DNS A records on pluggable backends. When an HTTPRoute with a domain-map-matched hostname is created/updated, the controller creates or updates the corresponding DNS record via the configured provider API. On deletion, a finalizer (`dns.yk/cleanup`) triggers cleanup of stale DNS records.
 
 ## Architecture
-Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and calls `app.Run`, which wires flags, logging, config, provider and manager in `internal/app`. one `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) the config package (`config.Config`, `config.DomainMap`) holds pure structs with no business logic. The controller reads routes from the informer cache, re-reads through `APIReader` only inside the finalizer conflict-retry loops, and writes its annotation as a merge patch.
+Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and calls `app.Run`, which wires flags, logging, config, provider and manager in `internal/app`. One `HTTPRouteReconciler` handles all HTTPRoutes. Feature-based package layout — no handler/service/repository split since the reconciler is thin (parsing → delegation → JSON). Domain separation exists at two boundaries: (1) the `Provider` interface in `internal/dns/` abstracts all DNS-specific logic, and (2) the config package (`config.Config`, `config.DomainMap`) holds pure structs with no business logic. The controller reads routes from the informer cache, re-reads through `APIReader` only inside the finalizer conflict-retry loops, and writes its annotation as a merge patch.
 
 ## Design Decisions
 - **Provider factory list over `init()` registry:** `newProviders()` in `internal/dns/providers` iterates configured providers at startup. More explicit than blank-import registration, easier to test and debug. Restore the aggregation pattern only if the provider count grows substantially.
@@ -21,11 +21,13 @@ Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and 
 | `make test-unit` | Unit tests only, coverage profile |
 | `make test-envtest` | Real manager against an envtest API server and the memory provider (downloads binaries to `bin/k8s`) |
 | `make test-cover` | Coverage report (HTML at `coverage.html`) |
-| `make run` | Run the binary locally against your current kubecontext (sources `.env`, `--leader-elect=false`) |
+| `make run` | Run the binary locally against your current kubecontext with `--leader-elect=false`; uses `hack/local/config.yaml` (memory provider) unless an optional `.env` sets `CONFIG_PATH` |
 | `make kind-up` | Start local kind cluster |
 | `make kind-deploy` | kind cluster + Gateway API CRDs + image + helm install with the memory provider |
 | `make kind-down` | Remove kind cluster |
 | `make lint` | golangci-lint (blocking in CI) |
+| `make vuln` | govulncheck (blocking in CI) |
+| `make helm-lint` | Strict chart lint with `charts/yk-dns-manager/ci/values.yaml` (CI also runs `make helm-template`) |
 | `make docker-build` | Multi-platform build (no push) |
 | `make docker-push` | Multi-platform build + push to GHCR |
 
@@ -38,5 +40,5 @@ Single-reconciler design: `cmd/yk-dns-manager/main.go` only handles signals and 
 - **Publishing goes through `dns.Publisher`**, which tracks owed publishes and `publish_interval` for any provider whose writes are staged.
 - **The HTTPRoute must always be deletable.** A failing DNS cleanup holds the finalizer and is retried until `--cleanup-grace-period` after the deletion request, then the finalizer is removed anyway. The cleanup is published before the finalizer goes.
 - **Only the leader reconciles.** Leader election is on by default (Lease `yk-dns-manager.dns.yk` in the pod's namespace); the chart refuses `replicaCount` > 1 without it. `make run` passes `--leader-elect=false`.
-- **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` metric, defined in `internal/metrics` and charted in `charts/yk-dns-manager/dashboards/yk-dns-manager.json`. Providers carry no metrics code: an HTTP-based provider accepts transport wrappers in its constructor, and `newProviders()` passes `metrics.InstrumentTransport(name)`, which counts and times every request; publish metrics come from `dns.Publisher`.
+- **Report outcomes, not just logs.** New DNS outcomes get an Event on the HTTPRoute and a `yk_dns_manager_*` metric, defined in `internal/metrics` and charted in `charts/yk-dns-manager/dashboards/yk-dns-manager.json`. A new label value of an outcome counter also goes into the zero-start list in `internal/metrics`, or `rate()` cannot see its first increment after a restart. Providers carry no metrics code: an HTTP-based provider accepts transport wrappers in its constructor, and `newProviders()` passes `metrics.InstrumentTransport(name)`, which counts and times every request; publish metrics come from `dns.Publisher`.
 - **Config values use `${ENV_VAR}` expansion** in YAML for credential injection from Kubernetes Secrets or local `.env` files. Only `${NAME}` is expanded, and an unset variable fails startup. Config is strict: unknown fields and unknown provider settings keys (listed per factory in `newProviders()`) fail startup.

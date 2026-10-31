@@ -1,6 +1,6 @@
 # Testing
 
-All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUBEBUILDER_ASSETS` is set. CI runs `make vet build test lint` and `make vuln` on every push and pull request, and again on every release tag before anything is published; both are blocking.
+All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUBEBUILDER_ASSETS` is set. CI runs `make vet build test lint`, `make vuln`, the Helm lint and render, and Trivy scans of the image and the repository on every push and pull request, and again on every release tag before anything is published. All are blocking; the Trivy gates fail on fixable CRITICAL/HIGH findings and report everything to the GitHub Security tab.
 
 ## Overview
 
@@ -121,13 +121,17 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_Ensure` | A covered hostname gets one record, created or upserted, and never a second write; an existing record is left alone without upsert; a hostname outside the domain map is skipped |
 | `TestHTTPRouteReconciler_Deletion` | Finalizer cleanup releases the spec and annotation hostnames, and a route whose hostnames no longer match the domain map is still deletable — the orphaned-finalizer bug |
 | `TestHTTPRouteReconciler_CleanupOfUnownedHostnames` | Hostnames dropped from the spec or the domain map are released; names outside the map are released without adopting legacy records; corrupt annotations do not wedge the route |
+| `TestHTTPRouteReconciler_WildcardHostnameIsIgnored` | A route hostname such as `*.my-domain1.com` gets no record, while the route's exact names still get theirs (H2) |
 | `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
 | `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
 | `TestHTTPRouteReconciler_SharedHostnameIsKept` | Deleting one of two routes sharing a hostname keeps the record (B1) |
 | `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route, counts the abandoned cleanup and drops its managed-record series (B9, D10) |
+| `TestHTTPRouteReconciler_PublishHeldBackIsRequeued` | A publish held back by `publish_interval` is not a failure: the route is requeued for when it is due and still records what it manages (M4) |
+| `TestHTTPRouteReconciler_DeletionWaitsForAHeldBackPublish` | A deletion keeps the finalizer until the held-back publish actually goes out |
 | `TestHTTPRouteReconciler_RequireAccepted` | Off by default; on, only accepted routes get DNS (S3) |
 | `TestHTTPRouteReconciler_OneReconcilePublishes` | The reconcile that adds the finalizer also publishes (D7) |
 | `TestHTTPRouteReconciler_WantsUpdate` | Which updates trigger a reconcile (D8) |
+| `TestHTTPRouteReconciler_CannotReleaseAnotherRoutesRecord` | Writing another route's hostname into the annotation does not let a route delete that route's record (H1) |
 | `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events, in the counters, and as a managed-record series for each managed hostname but not a conflicting one (D6) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 

@@ -23,7 +23,7 @@ func parseFlags() options {
 	flag.BoolVar(&o.leaderElect, "leader-elect", true, "elect a leader so only one replica manages DNS at a time; turn off only when running a single instance outside a cluster")
 	flag.BoolVar(&o.requireAccepted, "require-accepted-routes", false, "only publish DNS for HTTPRoutes that at least one parent Gateway has accepted")
 	flag.DurationVar(&o.cleanupGracePeriod, "cleanup-grace-period", 5*time.Minute, "how long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway")
-	flag.DurationVar(&o.resyncPeriod, "resync-period", time.Hour, "how often every HTTPRoute is reconciled again even when nothing changed in the cluster, which is what republishes a record someone changed or deleted on the DNS backend; 0 turns it off")
+	flag.DurationVar(&o.resyncPeriod, "resync-period", time.Hour, "how often every HTTPRoute is reconciled again even when nothing changed in the cluster, which recreates a record someone deleted on the DNS backend and, with upsert, corrects one someone changed (without upsert a changed record is reported as drift); 0 turns it off")
 	flag.Parse()
 	return o
 }

@@ -98,7 +98,7 @@ Earlier versions let an exact key cover every name below it too. The controller 
 | `--leader-elect` | — | `true` | Elect a leader through a Lease so only one replica manages DNS; turn off only for a single instance outside a cluster (`make run` does) |
 | `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
 | `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
-| `--resync-period` | — | `1h` | How often every HTTPRoute is reconciled again even when nothing changed in the cluster; this republishes a record someone changed or deleted on the DNS backend. `0` turns it off |
+| `--resync-period` | — | `1h` | How often every HTTPRoute is reconciled again even when nothing changed in the cluster; this recreates a record someone deleted on the DNS backend and, with upsert, corrects one someone changed (without upsert a changed record is reported as drift). `0` turns it off |
 
 ### Config File
 
@@ -126,7 +126,7 @@ settings:
 - `upsert: true` also corrects a managed record that holds a different IP; when `false`, existing records are left alone and only missing ones are created. Either way nothing is written when a record is already correct.
 - Settings support `${ENV_VAR}` expansion for credential injection; a reference to an unset variable fails startup, and a `$` anywhere else is kept as is. Unknown fields and unknown `settings` keys also fail startup. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
 - `skip_tls_verify` and `allow_insecure_http` are booleans (`true`/`false`, also `True`, `1`, `0`); any other value fails startup.
-- `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for the local fake.
+- `base_url` must be `https`. Plain `http` sends the API credentials in cleartext and is refused unless `allow_insecure_http: "true"` is set, which is meant only for a test appliance on a trusted network.
 - `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
 - `publish_interval` is the shortest gap between two publishes of the backend (for OPNsense, an Unbound reconfigure, which restarts the resolver). A burst of route changes then costs one publish instead of one per change: the held-back changes stay owed and go out as soon as the wait is over. Empty or `0` publishes on every change.
 
@@ -156,11 +156,13 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 |---|---|
 | `domainMap` | Domain-to-IP mapping (rendered as `domains` in the config ConfigMap). Required: there is no default, and a `null` entry drops one another values file set |
 | `dnsProvider.provider` | DNS provider name |
+| `dnsProvider.upsert` | Also correct a managed record that holds a different IP (off by default) |
 | `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [Config File](#config-file) |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
 | `dnsProvider.caConfigMap` | ConfigMap with the appliance CA under the key `ca.pem`, mounted at `/etc/yk-dns-manager/ca` |
 | `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |
 | `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
+| `resyncPeriod` | How often every route is reconciled again (`1h`); see `--resync-period` |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
 | `grafanaDashboard.enabled` | Ship the Grafana dashboard as a ConfigMap for the Grafana sidecar (`grafanaDashboard.labels`, `.annotations`, `.namespace`) |
 | `networkPolicy.enabled` | Restrict the pod's traffic; egress ports and CIDRs under `networkPolicy.apiServer` and `networkPolicy.provider` |
@@ -182,7 +184,7 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 | `yk_dns_manager_provider_requests_total` | counter | `provider`, `endpoint`, `code` | API requests to the backend by HTTP status, `error` when no response arrived |
 | `yk_dns_manager_provider_request_duration_seconds` | histogram | `provider`, `endpoint` | API request duration |
 
-- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), a table of the managed HTTPRoutes with their hostnames and IPs, record outcomes and conflicts, errors, publishing, provider API, and controller latency and work queue.
+- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), a table of the managed HTTPRoutes with their hostnames and IPs, record outcomes and conflicts, errors, publishing, provider API, and controller latency and work queue. Latencies are heatmaps: publishes and requests are sparse, so empty cells mean nothing happened, and no panel fills in values between events.
 
 ## Testing
 
