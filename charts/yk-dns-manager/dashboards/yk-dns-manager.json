@@ -609,6 +609,7 @@
             "fillOpacity": 30,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -663,6 +664,7 @@
             "fillOpacity": 60,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -730,6 +732,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -811,6 +814,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -878,6 +882,7 @@
             "fillOpacity": 30,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -890,7 +895,7 @@
     {
       "type": "timeseries",
       "title": "Publish duration",
-      "description": "How long a publish takes.",
+      "description": "How long a publish takes. Publishes only happen on changes, so each point is a window with publishes; the line connects them.",
       "id": 18,
       "datasource": {
         "type": "prometheus",
@@ -908,7 +913,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -917,7 +922,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p95",
           "refId": "B"
         },
@@ -926,7 +931,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -949,7 +954,8 @@
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 1,
-            "showPoints": "never",
+            "showPoints": "always",
+            "spanNulls": true,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1017,6 +1023,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1071,6 +1078,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1083,7 +1091,7 @@
     {
       "type": "timeseries",
       "title": "Request latency p95",
-      "description": "95th percentile request duration per endpoint.",
+      "description": "95th percentile request duration per endpoint. Requests come in bursts (reconciles, the hourly resync), so each point is a window with requests; the line connects them.",
       "id": 22,
       "datasource": {
         "type": "prometheus",
@@ -1101,7 +1109,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(yk_dns_manager_provider_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(yk_dns_manager_provider_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))) >= 0",
           "legendFormat": "{{endpoint}}",
           "refId": "A"
         }
@@ -1124,7 +1132,8 @@
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 1,
-            "showPoints": "never",
+            "showPoints": "always",
+            "spanNulls": true,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1168,7 +1177,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -1177,7 +1186,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p95",
           "refId": "B"
         },
@@ -1186,7 +1195,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -1209,7 +1218,8 @@
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 1,
-            "showPoints": "never",
+            "showPoints": "always",
+            "spanNulls": true,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1264,6 +1274,7 @@
             "fillOpacity": 30,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "normal",
               "group": "A"
@@ -1327,6 +1338,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1357,7 +1369,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p95",
           "refId": "A"
         }
@@ -1380,7 +1392,8 @@
             "drawStyle": "line",
             "fillOpacity": 10,
             "lineWidth": 1,
-            "showPoints": "never",
+            "showPoints": "always",
+            "spanNulls": true,
             "stacking": {
               "mode": "none",
               "group": "A"
@@ -1435,6 +1448,7 @@
             "fillOpacity": 10,
             "lineWidth": 1,
             "showPoints": "never",
+            "spanNulls": false,
             "stacking": {
               "mode": "none",
               "group": "A"
