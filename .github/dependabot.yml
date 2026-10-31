@@ -1,3 +1,4 @@
+# Weekly bumps for Go modules, Actions (SHA-pinned) and Docker images; prefixes build:/ci: match docs/commits.md (bump go.mod with the Go builder).
 version: 2
 
 updates:
@@ -5,6 +6,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    commit-message:
+      prefix: build
     groups:
       go-dependencies:
         patterns: ["*"]
@@ -13,11 +16,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    commit-message:
+      prefix: build
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    commit-message:
+      prefix: ci
     groups:
       github-actions:
         patterns: ["*"]

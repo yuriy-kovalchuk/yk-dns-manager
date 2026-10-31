@@ -1,9 +1,10 @@
 name: Checks
 
 # The checks every change and every release has to pass: format, vet, build,
-# unit + integration + envtest, lint, govulncheck, image build and helm lint.
-# CI runs them on every push and PR; CD runs them on the release tag before
-# anything is published.
+# unit + envtest, lint, govulncheck, helm lint, and Trivy scans of the image and
+# the repository. CI runs them on every push and PR; CD runs them on the release
+# tag before anything is published. The scan jobs upload SARIF, so callers grant
+# security-events: write.
 
 on:
   workflow_call:
@@ -24,25 +25,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Pinned to a patch, not "1.27": setup-go runs with GOTOOLCHAIN=local, so the
-          # toolchain installed here is the standard library govulncheck judges, and a
-          # floating minor is just whatever the runner image happens to carry ("1.26"
-          # resolved to go1.26.8, which predates the net/http, net/textproto, crypto/tls
-          # and html/template fixes go1.26.9 carries). Keep this equal to the go.mod go
-          # directive and the Dockerfile base image, and keep golangci-lint below built
-          # with at least this Go — it refuses modules newer than its own build.
-          go-version: "1.27.3"
+          # go.mod pins the patch: setup-go runs with GOTOOLCHAIN=local, so this is the
+          # standard library govulncheck judges, and the Dockerfile base image must match.
+          go-version-file: go.mod
           cache: true
-
-      - name: Install golangci-lint
-        # golangci-lint refuses to load a module whose Go version is newer than the Go
-        # it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright. v2.14.0
-        # is built with go1.27.0. Install script pinned to the same tag — `master`
-        # install.sh also mis-greps the .sbom.json checksum and fails the install.
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.14.0/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.14.0
-          golangci-lint version
 
       - name: Format check
         run: |
@@ -58,25 +44,8 @@ jobs:
         run: make vet build test lint
 
       - name: Vulnerability scan
-        # Blocking. Replaces the Trivy fs/image SARIF uploads, which ran after the
-        # image was already published and gated nothing.
+        # Blocking: reachable vulnerabilities in our code, the modules and the standard library.
         run: make vuln
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build image (amd64, no push)
-        # Deliberate deviation from the reference, which has no Dockerfile check in
-        # CI: this catches Dockerfile/.dockerignore breakage on the PR instead of
-        # after merge. Single platform and no --load, so it cannot hit the
-        # multi-platform-export failure that `make docker-build` used to.
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Install helm
         run: |
@@ -87,5 +56,96 @@ jobs:
       - name: Helm lint
         run: make helm-lint
 
-      - name: Helm template render (default values)
+      - name: Helm template render (CI values)
         run: make helm-template
+
+  image-scan:
+    name: Image build + Trivy scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (amd64, loaded for the scan)
+        # Also catches Dockerfile and .dockerignore breakage before anything is published.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: yk-dns-manager:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: yk-dns-manager:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          limit-severities-for-sarif: true
+
+      - name: Upload image findings to the Security tab
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # The report above records everything; only fixable CRITICAL/HIGH fails the build.
+      - name: Fail on fixable CRITICAL/HIGH image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: yk-dns-manager:${{ github.sha }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  fs-scan:
+    name: Trivy repository scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Trivy repository scan (report)
+        # Dependencies, Dockerfile and chart misconfigurations, and committed secrets.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          limit-severities-for-sarif: true
+
+      - name: Upload repository findings to the Security tab
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+      - name: Fail on fixable CRITICAL/HIGH findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

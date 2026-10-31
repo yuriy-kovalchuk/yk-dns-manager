@@ -33,6 +33,9 @@ jobs:
   # through CI.
   checks:
     uses: ./.github/workflows/checks.yaml
+    permissions:
+      contents: read
+      security-events: write # the Trivy jobs upload SARIF
 
   publish:
     name: Publish image + helm chart
@@ -155,3 +158,38 @@ jobs:
             --generate-notes \
             --notes-file notes.md \
             "${{ steps.helm-package.outputs.tgz }}"
+
+  # A record of what shipped: the released image's findings go to the Security tab. CI's gate already
+  # failed on fixable CRITICAL/HIGH before this tag could be published.
+  scan-release:
+    name: Trivy scan of the released image
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          format: sarif
+          output: trivy-release.sarif
+          severity: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+          limit-severities-for-sarif: true
+
+      - name: Upload findings to the Security tab
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        with:
+          sarif_file: trivy-release.sarif
+          category: trivy-release

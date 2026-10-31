@@ -26,6 +26,9 @@ env:
 jobs:
   checks:
     uses: ./.github/workflows/checks.yaml
+    permissions:
+      contents: read
+      security-events: write # the Trivy jobs upload SARIF
 
   publish:
     name: Publish :master image

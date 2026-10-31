@@ -22,10 +22,10 @@ KIND_NAMESPACE      ?= yk-dns-manager-system
 GATEWAY_API_VERSION ?= v1.6.3
 
 LOCALBIN              ?= $(shell pwd)/bin
-# golangci-lint refuses to load a module whose Go version is newer than the Go
-# it was built with: v2.11.4 (go1.26.1) rejects a go1.27 module outright.
-# v2.14.0 is built with go1.27.0. Keep this >= the go.mod go directive.
-GOLANGCI_LINT_VERSION ?= v2.14.0
+# golangci-lint refuses to load a module whose Go minor is newer than the Go it
+# was built with (v2.11.4, built with go1.26, rejects a go1.27 module). CI uses
+# this pin too, through `make lint`.
+GOLANGCI_LINT_VERSION ?= v2.15.0
 # envtest control plane. The Kubernetes minor matches the k8s.io/* modules in
 # go.mod; setup-envtest matches the controller-runtime release.
 ENVTEST_K8S_VERSION   ?= 1.37.0
@@ -109,7 +109,7 @@ test-envtest:
 # with the go.mod go version. A globally installed govulncheck is pinned to
 # whatever Go built it and refuses to load a newer module.
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 ## docker-build: multi-platform build via buildx (no push)
