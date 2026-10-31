@@ -144,6 +144,22 @@ serviceMonitor:
   # -- Namespace for the ServiceMonitor. Defaults to the release namespace.
   namespace: ""
 
+grafanaDashboard:
+  # -- If true, ship the Grafana dashboard as a ConfigMap for the Grafana
+  # sidecar. Its queries need the metrics in Prometheus, so enable
+  # serviceMonitor too (or scrape the metrics port another way).
+  enabled: false
+  # -- Labels the Grafana sidecar selects dashboard ConfigMaps by;
+  # kube-prometheus-stack's default is grafana_dashboard: "1".
+  labels:
+    grafana_dashboard: "1"
+  # -- Annotations on the ConfigMap, e.g. grafana_folder: DNS to pick a folder
+  # when the sidecar's folderAnnotation is set.
+  annotations: {}
+  # -- Namespace for the ConfigMap, for a sidecar that only watches its own.
+  # Defaults to the release namespace.
+  namespace: ""
+
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532

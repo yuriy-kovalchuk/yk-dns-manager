@@ -162,12 +162,27 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 | `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |
 | `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
+| `grafanaDashboard.enabled` | Ship the Grafana dashboard as a ConfigMap for the Grafana sidecar (`grafanaDashboard.labels`, `.annotations`, `.namespace`) |
 | `networkPolicy.enabled` | Restrict the pod's traffic; egress ports and CIDRs under `networkPolicy.apiServer` and `networkPolicy.provider` |
 
 ## Observability
 
 - **Events** on each HTTPRoute: `kubectl describe httproute <name>` shows records created, updated and released, and warnings for conflicts, drift in create-only mode, and failures.
-- **Metrics** on port 9090: `yk_dns_manager_records_total{result}` and `yk_dns_manager_dns_errors_total{stage}`, alongside controller-runtime's reconcile metrics.
+- **Metrics** on port 9090, alongside controller-runtime's reconcile, work queue, leader election and Kubernetes client metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `yk_dns_manager_build_info` | gauge | `version`, `provider` | Always 1; which version runs against which backend |
+| `yk_dns_manager_managed_hostnames` | gauge | | Hostnames the leader manages records for (other replicas report 0) |
+| `yk_dns_manager_records_total` | counter | `result` | Record outcomes: `created`, `updated`, `unchanged`, `kept`, `conflict`, `released` |
+| `yk_dns_manager_dns_errors_total` | counter | `stage` | Failed provider calls: `ensure`, `release`, `publish` |
+| `yk_dns_manager_cleanups_abandoned_total` | counter | | Deleted routes released after `--cleanup-grace-period` with their cleanup still failing; their records may be left behind |
+| `yk_dns_manager_publishes_total` | counter | `result` | Publishes `ok`, `failed`, or `deferred` by `publish_interval` |
+| `yk_dns_manager_publish_duration_seconds` | histogram | | Duration of publishes that ran (for OPNsense, the Unbound reconfigure) |
+| `yk_dns_manager_provider_requests_total` | counter | `provider`, `endpoint`, `code` | API requests to the backend by HTTP status, `error` when no response arrived |
+| `yk_dns_manager_provider_request_duration_seconds` | histogram | `provider`, `endpoint` | API request duration |
+
+- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), record outcomes and conflicts, errors, publishing, provider API, controller latency and work queue, Kubernetes API, process.
 
 ## Testing
 

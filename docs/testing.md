@@ -6,7 +6,7 @@ All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUB
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `internal/` | 57 | Config parsing and validation, controller reconcile logic, log-level handling, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
+| Unit | `internal/` | 60 | Config parsing and validation, controller reconcile logic, log-level handling, metrics, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
 | Appliance | `internal/dns/opnsense/` | conformance | The conformance suite against a real OPNsense; opt-in, see [Against a real appliance](#against-a-real-appliance) |
 | Envtest | `test/envtest/` | 23 | The real manager and predicates against a real API server and the memory provider |
 | E2E | manual | — | Full flow in a kind cluster with the memory provider; see [docs/local-testing.md](local-testing.md) |
@@ -54,6 +54,13 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | `TestPublisherFailedPublishStaysOwed` | After a failed publish, the next one goes out although nothing new was staged (B10) |
 | `TestPublisherWriteDuringPublishStaysOwed` | A write made while a publish runs is still owed afterwards (D3) |
 | `TestPublisherIntervalCoalesces` | Inside the interval a publish is held back with `*dns.PublishDeferred`, and one later publish covers the burst (M4) |
+| `TestPublisherCountsOutcomes` | Publishes are counted as `ok`, `failed` or `deferred`, and only those that ran are timed |
+
+### Metrics — `internal/metrics/`
+
+| Test | Description |
+|---|---|
+| `TestManagedHostnamesSumsRoutes` | The managed-hostnames gauge is the sum of each route's latest count, and 0 drops the route |
 
 ### Provider conformance — `internal/dns/dnstest`
 
@@ -100,6 +107,7 @@ The API tests run against `httptest` stubs that answer only what each test needs
 | `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
 | `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
 | `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
+| `TestRequestsAreCounted` | Every API request is counted by endpoint and status code, without the uuid, and an unanswered one as `error` |
 
 ### HTTPRoute controller — `internal/controller/httproute_controller_test.go`
 
@@ -113,11 +121,11 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
 | `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
 | `TestHTTPRouteReconciler_SharedHostnameIsKept` | Deleting one of two routes sharing a hostname keeps the record (B1) |
-| `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route (B9, D10) |
+| `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route and counts the abandoned cleanup (B9, D10) |
 | `TestHTTPRouteReconciler_RequireAccepted` | Off by default; on, only accepted routes get DNS (S3) |
 | `TestHTTPRouteReconciler_OneReconcilePublishes` | The reconcile that adds the finalizer also publishes (D7) |
 | `TestHTTPRouteReconciler_WantsUpdate` | Which updates trigger a reconcile (D8) |
-| `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events and in the counters (D6) |
+| `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events, in the counters and in the managed-hostnames gauge (D6) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
 ## Against a real appliance
