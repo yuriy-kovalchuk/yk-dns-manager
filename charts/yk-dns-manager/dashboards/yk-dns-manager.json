@@ -888,9 +888,9 @@
       }
     },
     {
-      "type": "bargauge",
+      "type": "heatmap",
       "title": "Publish duration",
-      "description": "How long a publish takes, over the selected time range. Publishes only happen on changes, so a per-minute chart would be mostly empty; No data means nothing was published in the range.",
+      "description": "Each publish lands in the cell for its time and duration (for OPNsense, the Unbound reconfigure). Publishes only happen on changes, so empty columns mean nothing was published; read it next to Publishes by result.",
       "id": 18,
       "datasource": {
         "type": "prometheus",
@@ -902,56 +902,55 @@
         "x": 12,
         "y": 35
       },
+      "interval": "1m",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__range])))",
-          "legendFormat": "p50",
-          "refId": "A",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__range])))",
-          "legendFormat": "p95",
-          "refId": "B",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__range])))",
-          "legendFormat": "p99",
-          "refId": "C",
-          "instant": true
+          "expr": "sum by (le) (increase(yk_dns_manager_publish_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
         }
       ],
       "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "calculate": false,
+        "cellGap": 1,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 2
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "tooltip": {
+          "mode": "single",
+          "yHistogram": true,
+          "showColorScale": true
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto",
+          "value": "events"
         }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "min": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
+          "custom": {
+            "scaleDistribution": {
+              "type": "linear"
+            }
           }
         },
         "overrides": []
@@ -1079,9 +1078,9 @@
       }
     },
     {
-      "type": "bargauge",
-      "title": "Request latency p95",
-      "description": "95th percentile request duration per endpoint, over the selected time range. Requests come in bursts (reconciles, the hourly resync).",
+      "type": "heatmap",
+      "title": "Request latency",
+      "description": "Every API request to the DNS backend in the cell for its time and duration. Requests come in bursts (reconciles, the hourly resync), so empty columns mean no requests.",
       "id": 22,
       "datasource": {
         "type": "prometheus",
@@ -1093,36 +1092,109 @@
         "x": 16,
         "y": 44
       },
+      "interval": "1m",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(yk_dns_manager_provider_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__range])))",
-          "legendFormat": "{{endpoint}}",
-          "refId": "A",
-          "instant": true
+          "expr": "sum by (le) (increase(yk_dns_manager_provider_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
         }
       ],
       "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "calculate": false,
+        "cellGap": 1,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 2
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "tooltip": {
+          "mode": "single",
+          "yHistogram": true,
+          "showColorScale": true
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto",
+          "value": "events"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request latency p95 by endpoint",
+      "description": "95th percentile per endpoint, per time slot. A gap means that endpoint got no requests in the slot; nothing is filled in.",
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(yk_dns_manager_provider_request_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))) >= 0",
+          "legendFormat": "{{endpoint}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
           }
         },
         "overrides": []
@@ -1131,21 +1203,21 @@
     {
       "type": "row",
       "title": "Controller",
-      "id": 23,
+      "id": 24,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 60
       },
       "panels": []
     },
     {
-      "type": "bargauge",
+      "type": "heatmap",
       "title": "Reconcile latency",
-      "description": "Time per HTTPRoute reconcile, including the DNS backend calls, over the selected time range.",
-      "id": 24,
+      "description": "Each HTTPRoute reconcile, including its DNS backend calls, in the cell for its time and duration. Most happen at startup and in the hourly resync.",
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1154,58 +1226,57 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 53
+        "y": 61
       },
+      "interval": "1m",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__range])))",
-          "legendFormat": "p50",
-          "refId": "A",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__range])))",
-          "legendFormat": "p95",
-          "refId": "B",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__range])))",
-          "legendFormat": "p99",
-          "refId": "C",
-          "instant": true
+          "expr": "sum by (le) (increase(controller_runtime_reconcile_time_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", controller=\"httproute\"}[$__rate_interval]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
         }
       ],
       "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "calculate": false,
+        "cellGap": 1,
+        "yAxis": {
+          "unit": "s",
+          "decimals": 2
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "tooltip": {
+          "mode": "single",
+          "yHistogram": true,
+          "showColorScale": true
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto",
+          "value": "events"
         }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "min": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
+          "custom": {
+            "scaleDistribution": {
+              "type": "linear"
+            }
           }
         },
         "overrides": []
@@ -1215,7 +1286,7 @@
       "type": "timeseries",
       "title": "Reconciles by result",
       "description": "success, error, requeue (back off and retry) and requeue_after (held-back publish or cleanup retry).",
-      "id": 25,
+      "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1224,7 +1295,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 53
+        "y": 61
       },
       "targets": [
         {
@@ -1269,7 +1340,7 @@
       "type": "timeseries",
       "title": "Work queue",
       "description": "Routes waiting to be reconciled, and how often they are retried.",
-      "id": 26,
+      "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1278,7 +1349,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 53
+        "y": 61
       },
       "targets": [
         {
@@ -1329,10 +1400,10 @@
       }
     },
     {
-      "type": "bargauge",
-      "title": "Queue wait",
-      "description": "How long a route waits in the queue before a worker picks it up, over the selected time range.",
-      "id": 27,
+      "type": "timeseries",
+      "title": "Queue wait p95",
+      "description": "How long a route waits in the queue before a worker picks it up. A gap means no route was queued in the slot.",
+      "id": 28,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1341,7 +1412,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
@@ -1349,50 +1420,34 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__range])))",
-          "legendFormat": "p50",
-          "refId": "A",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__range])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__rate_interval]))) >= 0",
           "legendFormat": "p95",
-          "refId": "B",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"}[$__range])))",
-          "legendFormat": "p99",
-          "refId": "C",
-          "instant": true
+          "refId": "A"
         }
       ],
       "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true,
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0,
-          "color": {
-            "mode": "continuous-GrYlRd"
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
           }
         },
         "overrides": []
@@ -1402,7 +1457,7 @@
       "type": "timeseries",
       "title": "Longest running reconcile",
       "description": "Age of the oldest reconcile still running; a value that keeps growing means a stuck reconcile.",
-      "id": 28,
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1411,7 +1466,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 69
       },
       "targets": [
         {
