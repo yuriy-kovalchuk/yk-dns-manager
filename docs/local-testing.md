@@ -125,7 +125,7 @@ curl -s localhost:8053/records
 ```
 
 The fake logs one line per request, including whether the controller presented
-credentials. A missing `Authorization` header usually means the provider config
+credentials. A missing `Authorization` header usually means the config file
 is pointing somewhere it should not be.
 
 ## Against a real appliance
@@ -136,6 +136,10 @@ Copy the local profile and change only the backend:
 cp hack/local/config.yaml .developer/config.yaml
 # set settings.base_url to https://<appliance>/api and delete allow_insecure_http
 ```
+
+Then set `CONFIG_PATH=.developer/config.yaml` in `.env` and put the real
+credentials there. An `.env` from before the single config file still sets
+`DOMAIN_MAP_PATH` and `DNS_PROVIDER_PATH`; replace both with `CONFIG_PATH`.
 
 If the appliance uses a self-signed certificate, put its CA in a ConfigMap under
 the key `ca.pem`, name that ConfigMap in `dnsProvider.caConfigMap`, and set

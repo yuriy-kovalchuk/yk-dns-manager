@@ -62,7 +62,8 @@ podLabels: {}
 
 priorityClassName: ""
 
-# -- Domain-to-IP mapping: which IP the DNS record of a matching HTTPRoute
+# -- Domain-to-IP mapping, rendered as the domains section of the config
+# file next to dnsProvider: which IP the DNS record of a matching HTTPRoute
 # hostname points to. A "*.example.com" key covers every name below
 # example.com, at any depth; an exact key such as "example.com" covers only
 # that one name. An exact key wins, then the most specific wildcard.
@@ -72,8 +73,8 @@ priorityClassName: ""
 domainMap:
   "*.example.com": "10.0.0.1"
 
-# -- DNS provider configuration. The controller will not manage any DNS
-# records until a provider is configured.
+# -- DNS provider configuration. provider, upsert and settings are rendered
+# into the same config file as domainMap.
 dnsProvider:
   # -- Provider name (e.g. "opnsense"). Must match a registered provider.
   provider: "opnsense"

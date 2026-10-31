@@ -124,9 +124,9 @@ The controller records Events on each HTTPRoute (`DNSRecordCreated`, `DNSRecordU
 
 The original design used `init()` + a registry (standard pluggable Go pattern), but this has maintenance costs: new providers require importing into an aggregation package just to register. The current factory-list approach (`newProviders()` in `main.go`) is more explicit and testable, with zero hidden side effects. A future enhancement could restore registration-based discovery if the provider list grows significantly.
 
-### Why checksum annotations on ConfigMaps?
+### Why a checksum annotation on the ConfigMap?
 
-The Helm chart adds `checksum/` annotations to the pod spec based on ConfigMap content hashes. This triggers a rolling restart whenever the config changes — essential because the controller reads config only at startup (no hot-reload).
+The Helm chart renders `domainMap` and `dnsProvider` into one `config.yaml` ConfigMap and adds a `checksum/config` annotation to the pod spec from its content hash. This triggers a rolling restart whenever the config changes — essential because the controller reads config only at startup (no hot-reload).
 
 ## Adding a New Provider
 
