@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -50,14 +49,8 @@ type Provider struct {
 	apiSecret string
 	client    *http.Client
 	log       logr.Logger
-
-	// staged counts writes by any batch; published is the staging at the last successful reconfigure, so a publish is owed while published < staged.
-	mu        sync.Mutex
-	staged    uint64
-	published uint64
-	// publishInterval is the shortest gap between reconfigures: publishing restarts Unbound, so a burst of changes must not cost one restart each.
-	publishInterval time.Duration
-	lastPublish     time.Time
+	// publisher spaces reconfigures publish_interval apart: each one restarts Unbound, so a burst of changes must not cost one restart each.
+	publisher *dns.Publisher
 }
 
 // New creates an OPNsense provider from its settings.
@@ -91,13 +84,12 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	}
 
 	return &Provider{
-		baseURL:         strings.TrimRight(settings["base_url"], "/") + "/",
-		apiKey:          settings["api_key"],
-		apiSecret:       settings["api_secret"],
-		client:          &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:             log,
-		staged:          1,
-		publishInterval: publishInterval,
+		baseURL:   strings.TrimRight(settings["base_url"], "/") + "/",
+		apiKey:    settings["api_key"],
+		apiSecret: settings["api_secret"],
+		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		log:       log,
+		publisher: dns.NewPublisher(publishInterval),
 	}, nil
 }
 
@@ -286,23 +278,14 @@ func (b *batch) Remove(ctx context.Context, hostname, recordType, owner string, 
 
 // Commit publishes with one reconfigure if any write is still unpublished, including earlier batches' failed publishes.
 func (b *batch) Commit(ctx context.Context) error {
-	p := b.p
 	if !b.used {
 		return nil
 	}
-	p.mu.Lock()
-	target := p.staged
-	owed := p.published < target
-	wait := p.publishInterval - time.Since(p.lastPublish)
-	p.mu.Unlock()
-	if !owed {
-		return nil
-	}
-	if wait > 0 {
-		// The writes stay owed, so the next Commit after the wait publishes a whole burst at once.
-		return &dns.PublishDeferred{After: wait}
-	}
+	return b.p.publisher.Publish(ctx, b.p.reconfigure)
+}
 
+// reconfigure makes Unbound serve the staged overrides.
+func (p *Provider) reconfigure(ctx context.Context) error {
 	var res apiResult
 	if err := p.call(ctx, http.MethodPost, reconfigurePath, struct{}{}, &res); err != nil {
 		return err
@@ -311,12 +294,6 @@ func (b *batch) Commit(ctx context.Context) error {
 		return fmt.Errorf("opnsense: reconfigure returned status %q", res.Status)
 	}
 	p.log.V(1).Info("reconfigure completed")
-
-	// A write made while this reconfigure ran is above target, so it stays owed.
-	p.mu.Lock()
-	p.published = max(p.published, target)
-	p.lastPublish = time.Now()
-	p.mu.Unlock()
 	return nil
 }
 
@@ -465,9 +442,7 @@ func (p *Provider) write(ctx context.Context, path string, row any, accepted ...
 		}
 		return res, fmt.Errorf("opnsense: %s unexpected result: %s", path, res.Result)
 	}
-	p.mu.Lock()
-	p.staged++
-	p.mu.Unlock()
+	p.publisher.Staged()
 	return res, nil
 }
 
