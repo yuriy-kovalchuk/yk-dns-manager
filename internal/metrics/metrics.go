@@ -59,36 +59,36 @@ var (
 		Buckets: prometheus.DefBuckets,
 	}, []string{"provider", "endpoint"})
 
-	// ManagedHostnames is the sum of every route's count; set it only through SetManagedHostnames.
-	ManagedHostnames = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "yk_dns_manager_managed_hostnames",
-		Help: "Hostnames the controller currently manages DNS records for; only the leader reconciles, so other replicas report 0.",
-	})
+	// ManagedRecords has one series per hostname a route manages; set it only through SetManagedRecords.
+	ManagedRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "yk_dns_manager_managed_record_info",
+		Help: "Always 1, one series per hostname an HTTPRoute manages, with the IP its record points at; only the leader reconciles, so other replicas export none.",
+	}, []string{"route_namespace", "route", "hostname", "ip"})
 )
 
-// managed holds each route's count, since the gauge is their sum and a route's count replaces its previous one.
+// managed remembers each route's series, so a route's next set replaces them all.
 var managed = struct {
 	sync.Mutex
-	byRoute map[string]int
-}{byRoute: map[string]int{}}
+	byRoute map[string][]prometheus.Labels
+}{byRoute: map[string][]prometheus.Labels{}}
 
 func init() {
 	metrics.Registry.MustRegister(BuildInfo, RecordResults, DNSErrors, CleanupsAbandoned,
-		Publishes, PublishDuration, ProviderRequests, ProviderRequestDuration, ManagedHostnames)
+		Publishes, PublishDuration, ProviderRequests, ProviderRequestDuration, ManagedRecords)
 }
 
-// SetManagedHostnames records how many hostnames route manages; 0 forgets the route.
-func SetManagedHostnames(route string, n int) {
+// SetManagedRecords replaces a route's series with records (hostname to IP); nil forgets the route.
+func SetManagedRecords(namespace, name string, records map[string]string) {
 	managed.Lock()
 	defer managed.Unlock()
-	if n == 0 {
-		delete(managed.byRoute, route)
-	} else {
-		managed.byRoute[route] = n
+	key := namespace + "/" + name
+	for _, l := range managed.byRoute[key] {
+		ManagedRecords.Delete(l)
 	}
-	total := 0
-	for _, c := range managed.byRoute {
-		total += c
+	delete(managed.byRoute, key)
+	for hostname, ip := range records {
+		l := prometheus.Labels{"route_namespace": namespace, "route": name, "hostname": hostname, "ip": ip}
+		ManagedRecords.With(l).Set(1)
+		managed.byRoute[key] = append(managed.byRoute[key], l)
 	}
-	ManagedHostnames.Set(float64(total))
 }

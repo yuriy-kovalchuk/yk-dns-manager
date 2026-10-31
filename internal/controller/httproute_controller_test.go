@@ -528,7 +528,12 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 			r.CleanupGracePeriod = 5 * time.Minute
 
 			abandoned := testutil.ToFloat64(metrics.CleanupsAbandoned)
+			metrics.SetManagedRecords("default", "route", map[string]string{"app.my-domain1.com": "10.0.8.100"})
 			res := reconcile(t, r, "route")
+			// DeleteLabelValues reports whether the series was still there
+			if exported := metrics.ManagedRecords.DeleteLabelValues("default", "route", "app.my-domain1.com", "10.0.8.100"); exported != tc.wantFinalizer {
+				t.Errorf("managed record still exported = %v, want %v: a released route drops its series", exported, tc.wantFinalizer)
+			}
 			if d := testutil.ToFloat64(metrics.CleanupsAbandoned) - abandoned; d != tc.wantAbandoned {
 				t.Errorf("abandoned cleanups rose by %v, want %v", d, tc.wantAbandoned)
 			}
@@ -719,7 +724,6 @@ func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
 func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
 	createdBefore := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("created"))
 	conflictBefore := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("conflict"))
-	managedBefore := testutil.ToFloat64(metrics.ManagedHostnames)
 
 	// its own name, so no other test's count for the same route is replaced
 	route := managedRoute("metrics", "", "app.my-domain1.com", "web.my-domain1.com")
@@ -729,9 +733,9 @@ func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
 	r := newTestReconciler(t, mock, c)
 	r.Recorder = recorder
 	reconcile(t, r, "metrics")
-	// the conflicting name is not managed
-	if d := testutil.ToFloat64(metrics.ManagedHostnames) - managedBefore; d != 1 {
-		t.Errorf("managed hostnames rose by %v, want 1", d)
+	// the conflicting name is not managed, so only app gets a series
+	if v := testutil.ToFloat64(metrics.ManagedRecords.WithLabelValues("default", "metrics", "app.my-domain1.com", "10.0.8.100")); v != 1 {
+		t.Errorf("managed record series for app = %v, want 1", v)
 	}
 
 	close(recorder.Events)

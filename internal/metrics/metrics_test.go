@@ -6,23 +6,23 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// TestManagedHostnamesSumsRoutes: each route's count replaces its last one, and 0 removes the route from the total.
-func TestManagedHostnamesSumsRoutes(t *testing.T) {
-	steps := []struct {
-		route string
-		n     int
-		want  float64
-	}{
-		{"httproute/a/one", 2, 2},
-		{"httproute/a/two", 3, 5},
-		{"httproute/a/one", 1, 4},
-		{"httproute/a/two", 0, 1},
-		{"httproute/a/one", 0, 0},
+// TestManagedRecordsReplacesARoutesSeries: a route's set replaces all its series, other routes keep theirs, and nil forgets the route.
+func TestManagedRecordsReplacesARoutesSeries(t *testing.T) {
+	ManagedRecords.Reset()
+	SetManagedRecords("web", "blue", map[string]string{"a.example.com": "10.0.0.1", "b.example.com": "10.0.0.1"})
+	SetManagedRecords("web", "green", map[string]string{"a.example.com": "10.0.0.1"})
+	SetManagedRecords("web", "blue", map[string]string{"c.example.com": "10.0.0.2"})
+
+	if n := testutil.CollectAndCount(ManagedRecords); n != 2 {
+		t.Fatalf("%d series, want blue's c and green's a", n)
 	}
-	for _, s := range steps {
-		SetManagedHostnames(s.route, s.n)
-		if got := testutil.ToFloat64(ManagedHostnames); got != s.want {
-			t.Fatalf("after %s=%d: gauge = %v, want %v", s.route, s.n, got, s.want)
-		}
+	if v := testutil.ToFloat64(ManagedRecords.WithLabelValues("web", "blue", "c.example.com", "10.0.0.2")); v != 1 {
+		t.Errorf("blue's new record = %v, want 1", v)
+	}
+
+	SetManagedRecords("web", "green", nil)
+	SetManagedRecords("web", "blue", nil)
+	if n := testutil.CollectAndCount(ManagedRecords); n != 0 {
+		t.Errorf("%d series left after both routes were forgotten", n)
 	}
 }

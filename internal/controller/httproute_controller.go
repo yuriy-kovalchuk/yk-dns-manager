@@ -107,7 +107,11 @@ func (r *HTTPRouteReconciler) sync(ctx context.Context, batch dns.Batch, route *
 			return err
 		}
 	}
-	metrics.SetManagedHostnames(routeOwner(route), len(managed))
+	records := map[string]string{}
+	for _, h := range managed {
+		records[h], _ = r.DomainMap.LookupIP(h)
+	}
+	metrics.SetManagedRecords(route.Namespace, route.Name, records)
 	return nil
 }
 
@@ -245,7 +249,7 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 	if err := r.setFinalizer(ctx, route, false); err != nil {
 		return ctrl.Result{}, err
 	}
-	metrics.SetManagedHostnames(routeOwner(route), 0)
+	metrics.SetManagedRecords(route.Namespace, route.Name, nil)
 	return ctrl.Result{}, nil
 }
 
