@@ -11,10 +11,8 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
-	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 // These tests pin what is specific to OPNsense: the wire format, calls per batch, and how the appliance's answers are read. The provider contract is pinned by the conformance suite in appliance_test.go.
@@ -221,31 +219,5 @@ func TestHealthCheckRejectsWrongCredentials(t *testing.T) {
 	err := p.HealthCheck(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
 		t.Fatalf("HealthCheck = %v, want an authentication failure", err)
-	}
-}
-
-// TestRequestsAreCounted: every API request is counted by endpoint and status code, a uuid in the path is not part of the endpoint, and a request that got no answer counts as "error".
-func TestRequestsAreCounted(t *testing.T) {
-	count := func(endpoint, code string) float64 {
-		return testutil.ToFloat64(metrics.ProviderRequests.WithLabelValues("opnsense", endpoint, code))
-	}
-	search, set, denied, unreachable := count("searchHostOverride", "200"), count("setHostOverride", "200"), count("searchHostOverride", "401"), count("searchHostOverride", "error")
-
-	_, p := newStub(t, managedRow("u1", "app", "10.0.0.1"))
-	mustEnsure(t, p.Batch(), aRecord("app.example.com", "10.0.0.2"), true)
-	p.apiKey = "wrong"
-	_ = p.HealthCheck(context.Background())
-	p.baseURL = "http://127.0.0.1:1/api/"
-	_ = p.HealthCheck(context.Background())
-
-	for name, d := range map[string]float64{
-		"search 200":   count("searchHostOverride", "200") - search,
-		"set 200":      count("setHostOverride", "200") - set,
-		"search 401":   count("searchHostOverride", "401") - denied,
-		"search error": count("searchHostOverride", "error") - unreachable,
-	} {
-		if d != 1 {
-			t.Errorf("%s rose by %v, want 1", name, d)
-		}
 	}
 }

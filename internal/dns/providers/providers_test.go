@@ -1,13 +1,18 @@
 package providers
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	dns "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 // stubProvider satisfies dns.Provider without implementing anything; name tells which factory built it.
@@ -100,5 +105,28 @@ func TestSelectProvider(t *testing.T) {
 		if got := p.(stubProvider).name; got != tc.name {
 			t.Errorf("selected %q, want %q", got, tc.name)
 		}
+	}
+}
+
+// TestOPNsenseRequestsAreInstrumented: the provider carries no metrics code, so the factory list is what must wrap its transport.
+func TestOPNsenseRequestsAreInstrumented(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"rows":[]}`))
+	}))
+	defer srv.Close()
+	searches := metrics.ProviderRequests.WithLabelValues("opnsense", "searchHostOverride", "200")
+	before := testutil.ToFloat64(searches)
+
+	p, err := New(logr.Discard(), "opnsense", map[string]string{
+		"base_url": srv.URL + "/api", "api_key": "key", "api_secret": "secret", "allow_insecure_http": "true",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := p.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("HealthCheck: %v", err)
+	}
+	if d := testutil.ToFloat64(searches) - before; d != 1 {
+		t.Errorf("searchHostOverride requests rose by %v, want 1", d)
 	}
 }

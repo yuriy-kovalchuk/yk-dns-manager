@@ -6,7 +6,7 @@ All tests run via `make test`; a plain `go test ./...` skips envtest unless `KUB
 
 | Layer | Location | Count | What it covers |
 |---|---|---|---|
-| Unit | `internal/` | 60 | Config parsing and validation, controller reconcile logic, log-level handling, metrics, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
+| Unit | `internal/` | 62 | Config parsing and validation, controller reconcile logic, log-level handling, metrics, the publish gate, the conformance suite against the memory provider, and the OPNsense provider against stubbed API answers |
 | Appliance | `internal/dns/opnsense/` | conformance | The conformance suite against a real OPNsense; opt-in, see [Against a real appliance](#against-a-real-appliance) |
 | Envtest | `test/envtest/` | 23 | The real manager and predicates against a real API server and the memory provider |
 | E2E | manual | — | Full flow in a kind cluster with the memory provider; see [docs/local-testing.md](local-testing.md) |
@@ -28,6 +28,7 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 | Test | Description |
 |---|---|
 | `TestProvidersAcceptTheirOwnSettings` | Every settings key a real factory declares still builds that provider |
+| `TestOPNsenseRequestsAreInstrumented` | The real OPNsense factory wraps the provider's transport, so its requests are counted though the provider has no metrics code |
 | `TestSelectProvider` | Only the named provider is initialized; an unknown name lists the available ones; the provider's own error is the startup error; a factory returning `(nil, err)` never leaves a typed-nil provider behind; an unknown settings key fails startup (D11) |
 
 ### Config — `internal/config/`
@@ -60,6 +61,8 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 
 | Test | Description |
 |---|---|
+| `TestEndpointOf` | A request is named by its last path segment that is not an object id (UUID, number, long hex) |
+| `TestInstrumentTransportCountsRequests` | The transport wrapper counts every request by endpoint and status code, an unanswered one as `error`, and times them all |
 | `TestManagedRecordsReplacesARoutesSeries` | A route's managed-record series are replaced as a whole, other routes keep theirs, and a forgotten route exports none |
 
 ### Provider conformance — `internal/dns/dnstest`
@@ -107,7 +110,6 @@ The API tests run against `httptest` stubs that answer only what each test needs
 | `TestBatchListsOnce` | A batch lists once however many records it touches, and commits with one reconfigure (D4) |
 | `TestUnusedBatchCommitsNothing` | A batch that was never used makes no calls on commit |
 | `TestHealthCheckRejectsWrongCredentials` | A 401 from the appliance surfaces as an authentication failure |
-| `TestRequestsAreCounted` | Every API request is counted by endpoint and status code, without the uuid, and an unanswered one as `error` |
 
 ### HTTPRoute controller — `internal/controller/httproute_controller_test.go`
 

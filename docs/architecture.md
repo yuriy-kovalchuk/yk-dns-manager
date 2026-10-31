@@ -122,7 +122,7 @@ The reconciler reads routes from the informer cache. Finalizer changes re-read t
 
 ### Observability
 
-The controller records Events on each HTTPRoute (`DNSRecordCreated`, `DNSRecordUpdated`, `DNSRecordReleased`, and warnings `DNSConflict`, `DNSRecordDrift`, `DNSSyncFailed`, `DNSCleanupFailed`, `DNSCleanupAbandoned`) and exports the `yk_dns_manager_*` metrics defined in `internal/metrics` next to controller-runtime's own: record outcomes and errors from the controller, publish results and durations from `dns.Publisher`, API requests and their duration from the provider, abandoned cleanups, a series per managed hostname with its route and IP, and build info. The README lists them; the chart's Grafana dashboard (`charts/yk-dns-manager/dashboards/`) charts them. Readiness does not track the provider, so an unreachable appliance does not make the pod unready.
+The controller records Events on each HTTPRoute (`DNSRecordCreated`, `DNSRecordUpdated`, `DNSRecordReleased`, and warnings `DNSConflict`, `DNSRecordDrift`, `DNSSyncFailed`, `DNSCleanupFailed`, `DNSCleanupAbandoned`) and exports the `yk_dns_manager_*` metrics defined in `internal/metrics` next to controller-runtime's own: record outcomes and errors from the controller, publish results and durations from `dns.Publisher`, API requests and their duration from `metrics.InstrumentTransport`, which `newProviders()` wraps around a provider's HTTP transport so the provider itself carries no metrics code, abandoned cleanups, a series per managed hostname with its route and IP, and build info. The README lists them; the chart's Grafana dashboard (`charts/yk-dns-manager/dashboards/`) charts them. Readiness does not track the provider, so an unreachable appliance does not make the pod unready.
 
 ### Why no `init()` for provider registration anymore?
 
@@ -178,13 +178,13 @@ func TestConformanceAgainstBackend(t *testing.T) {
 }
 ```
 
-**2. Register it in `newProviders()` in `internal/dns/providers/providers.go`**, listing every settings key it understands; any other key fails startup:
+**2. Register it in `newProviders()` in `internal/dns/providers/providers.go`**, listing every settings key it understands; any other key fails startup. If it talks HTTP, let `New` take transport wrappers and pass `metrics.InstrumentTransport("myprovider")`, so its requests show up on the dashboard without any metrics code in the provider:
 ```go
 {
     name:     "myprovider",
     settings: []string{"base_url", "api_token"},
     fn: func(log logr.Logger, settings map[string]string) (dns.Provider, error) {
-        return myprovider.New(log, settings)
+        return myprovider.New(log, settings, metrics.InstrumentTransport("myprovider"))
     },
 },
 ```

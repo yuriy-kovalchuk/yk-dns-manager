@@ -20,7 +20,6 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
-	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 const (
@@ -54,8 +53,8 @@ type Provider struct {
 	publisher *dns.Publisher
 }
 
-// New creates an OPNsense provider from its settings.
-func New(log logr.Logger, settings map[string]string) (*Provider, error) {
+// New creates an OPNsense provider from its settings; each wrap, outermost last, wraps the HTTP transport, e.g. for metrics.
+func New(log logr.Logger, settings map[string]string, wrap ...func(http.RoundTripper) http.RoundTripper) (*Provider, error) {
 	for _, key := range []string{"base_url", "api_key", "api_secret"} {
 		if settings[key] == "" {
 			return nil, fmt.Errorf("opnsense: missing required setting '%s'", key)
@@ -83,12 +82,16 @@ func New(log logr.Logger, settings map[string]string) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	var rt http.RoundTripper = transport
+	for _, w := range wrap {
+		rt = w(rt)
+	}
 
 	return &Provider{
 		baseURL:   strings.TrimRight(settings["base_url"], "/") + "/",
 		apiKey:    settings["api_key"],
 		apiSecret: settings["api_secret"],
-		client:    &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		client:    &http.Client{Timeout: 30 * time.Second, Transport: rt},
 		log:       log,
 		publisher: dns.NewPublisher(publishInterval),
 	}, nil
@@ -466,16 +469,11 @@ func (p *Provider) call(ctx context.Context, method, path string, body, out any)
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	start := time.Now()
 	resp, err := p.client.Do(req)
-	endpoint := strings.Split(path, "/")[2] // "unbound/settings/setHostOverride/<uuid>" counts as setHostOverride
-	metrics.ProviderRequestDuration.WithLabelValues("opnsense", endpoint).Observe(time.Since(start).Seconds())
 	if err != nil {
-		metrics.ProviderRequests.WithLabelValues("opnsense", endpoint, "error").Inc()
 		return fmt.Errorf("opnsense: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	metrics.ProviderRequests.WithLabelValues("opnsense", endpoint, strconv.Itoa(resp.StatusCode)).Inc()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
