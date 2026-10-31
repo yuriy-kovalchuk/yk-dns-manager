@@ -10,6 +10,8 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/config"
 	dns "github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns/providers"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/version"
 )
 
 // healthCheckTimeout bounds the startup connectivity check.
@@ -22,6 +24,7 @@ func newProvider(ctx context.Context, log logr.Logger, cfg *config.Config) (dns.
 		return nil, err
 	}
 	log.Info("initialized DNS provider", "name", cfg.Provider)
+	metrics.BuildInfo.WithLabelValues(version.Version, cfg.Provider).Set(1)
 
 	log.Info("checking DNS provider connectivity")
 	// Its own short deadline: the HTTP client's 30s timeout is per request, and startup must not hang on an appliance that is down.

@@ -5,6 +5,11 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 // publishCounter returns a publish func and the number of times it ran.
@@ -84,4 +89,37 @@ func TestPublisherIntervalCoalesces(t *testing.T) {
 	if *n != 2 {
 		t.Errorf("%d publishes, want 2: the first and one covering the burst", *n)
 	}
+}
+
+// TestPublisherCountsOutcomes: every publish that ran is timed and counted as ok or failed, and a held-back one as deferred.
+func TestPublisherCountsOutcomes(t *testing.T) {
+	count := func(result string) float64 { return testutil.ToFloat64(metrics.Publishes.WithLabelValues(result)) }
+	ok, failed, deferred := count("ok"), count("failed"), count("deferred")
+	timed := publishesTimed(t)
+
+	p := NewPublisher(time.Hour)
+	ctx := context.Background()
+	_ = p.Publish(ctx, func(context.Context) error { return errors.New("down") })
+	_ = p.Publish(ctx, func(context.Context) error { return nil })
+	p.Staged()
+	_ = p.Publish(ctx, func(context.Context) error { return nil })
+
+	for result, before := range map[string]float64{"ok": ok, "failed": failed, "deferred": deferred} {
+		if d := count(result) - before; d != 1 {
+			t.Errorf("%s rose by %v, want 1", result, d)
+		}
+	}
+	// the deferred publish never ran, so only two are timed
+	if d := publishesTimed(t) - timed; d != 2 {
+		t.Errorf("publish duration observed %d publishes, want 2", d)
+	}
+}
+
+func publishesTimed(t *testing.T) uint64 {
+	t.Helper()
+	var m dto.Metric
+	if err := metrics.PublishDuration.Write(&m); err != nil {
+		t.Fatalf("reading the histogram: %v", err)
+	}
+	return m.GetHistogram().GetSampleCount()
 }

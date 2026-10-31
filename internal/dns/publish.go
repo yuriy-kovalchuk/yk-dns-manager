@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 // Publisher decides when a provider whose writes are staged must publish them, and spaces those publishes Interval apart.
@@ -41,11 +43,17 @@ func (p *Publisher) Publish(ctx context.Context, publish func(context.Context) e
 	}
 	if wait > 0 {
 		// The writes stay owed, so the next Publish after the wait covers a whole burst at once.
+		metrics.Publishes.WithLabelValues("deferred").Inc()
 		return &PublishDeferred{After: wait}
 	}
-	if err := publish(ctx); err != nil {
+	start := time.Now()
+	err := publish(ctx)
+	metrics.PublishDuration.Observe(time.Since(start).Seconds())
+	if err != nil {
+		metrics.Publishes.WithLabelValues("failed").Inc()
 		return err
 	}
+	metrics.Publishes.WithLabelValues("ok").Inc()
 	// A write staged while publish ran is above target, so it stays owed.
 	p.mu.Lock()
 	p.published = max(p.published, target)

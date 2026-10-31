@@ -24,6 +24,7 @@ import (
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/config"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 // mockDNSProvider records DNS operations for assertions: Ensure is an upsert or a create depending on overwrite, conflictHosts hold records the controller does not manage, and Remove only deletes rows whose owners include the caller.
@@ -509,11 +510,12 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 		mock          *mockDNSProvider
 		deletedAgo    time.Duration
 		wantFinalizer bool
+		wantAbandoned float64
 	}{
-		{"delete fails within grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Minute, true},
-		{"publish fails within grace", &mockDNSProvider{flushErr: errors.New("reconfigure failed")}, time.Minute, true},
-		{"delete fails after grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Hour, false},
-		{"cleanup succeeds", &mockDNSProvider{}, time.Minute, false},
+		{"delete fails within grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Minute, true, 0},
+		{"publish fails within grace", &mockDNSProvider{flushErr: errors.New("reconfigure failed")}, time.Minute, true, 0},
+		{"delete fails after grace", &mockDNSProvider{removeErr: errors.New("appliance down")}, time.Hour, false, 1},
+		{"cleanup succeeds", &mockDNSProvider{}, time.Minute, false, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -525,7 +527,11 @@ func TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod(t *testing.T) {
 			r := newTestReconciler(t, tc.mock, c)
 			r.CleanupGracePeriod = 5 * time.Minute
 
+			abandoned := testutil.ToFloat64(metrics.CleanupsAbandoned)
 			res := reconcile(t, r, "route")
+			if d := testutil.ToFloat64(metrics.CleanupsAbandoned) - abandoned; d != tc.wantAbandoned {
+				t.Errorf("abandoned cleanups rose by %v, want %v", d, tc.wantAbandoned)
+			}
 			var got gatewayv1.HTTPRoute
 			held := c.Get(context.Background(), routeRequest("route").NamespacedName, &got) == nil && slices.Contains(got.Finalizers, finalizerName)
 			if held != tc.wantFinalizer {
@@ -711,16 +717,22 @@ func TestHTTPRouteReconciler_WantsUpdate(t *testing.T) {
 
 // TestHTTPRouteReconciler_EventsAndMetrics is audit D6: outcomes show up as Events on the route and in the Prometheus counters.
 func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
-	createdBefore := testutil.ToFloat64(recordResults.WithLabelValues("created"))
-	conflictBefore := testutil.ToFloat64(recordResults.WithLabelValues("conflict"))
+	createdBefore := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("created"))
+	conflictBefore := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("conflict"))
+	managedBefore := testutil.ToFloat64(metrics.ManagedHostnames)
 
-	route := managedRoute("route", "", "app.my-domain1.com", "web.my-domain1.com")
+	// its own name, so no other test's count for the same route is replaced
+	route := managedRoute("metrics", "", "app.my-domain1.com", "web.my-domain1.com")
 	c := newFakeRouteClient(t, route)
 	recorder := events.NewFakeRecorder(10)
 	mock := &mockDNSProvider{conflictHosts: map[string]bool{"web.my-domain1.com": true}}
 	r := newTestReconciler(t, mock, c)
 	r.Recorder = recorder
-	reconcile(t, r, "route")
+	reconcile(t, r, "metrics")
+	// the conflicting name is not managed
+	if d := testutil.ToFloat64(metrics.ManagedHostnames) - managedBefore; d != 1 {
+		t.Errorf("managed hostnames rose by %v, want 1", d)
+	}
 
 	close(recorder.Events)
 	var got []string
@@ -735,10 +747,10 @@ func TestHTTPRouteReconciler_EventsAndMetrics(t *testing.T) {
 		t.Errorf("events = %q, want %q", got, want)
 	}
 
-	if d := testutil.ToFloat64(recordResults.WithLabelValues("created")) - createdBefore; d != 1 {
+	if d := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("created")) - createdBefore; d != 1 {
 		t.Errorf("created counter rose by %v, want 1", d)
 	}
-	if d := testutil.ToFloat64(recordResults.WithLabelValues("conflict")) - conflictBefore; d != 1 {
+	if d := testutil.ToFloat64(metrics.RecordResults.WithLabelValues("conflict")) - conflictBefore; d != 1 {
 		t.Errorf("conflict counter rose by %v, want 1", d)
 	}
 }

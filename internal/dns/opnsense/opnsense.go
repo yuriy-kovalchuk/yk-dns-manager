@@ -20,6 +20,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 const (
@@ -465,11 +466,16 @@ func (p *Provider) call(ctx context.Context, method, path string, body, out any)
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	start := time.Now()
 	resp, err := p.client.Do(req)
+	endpoint := strings.Split(path, "/")[2] // "unbound/settings/setHostOverride/<uuid>" counts as setHostOverride
+	metrics.ProviderRequestDuration.WithLabelValues("opnsense", endpoint).Observe(time.Since(start).Seconds())
 	if err != nil {
+		metrics.ProviderRequests.WithLabelValues("opnsense", endpoint, "error").Inc()
 		return fmt.Errorf("opnsense: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	metrics.ProviderRequests.WithLabelValues("opnsense", endpoint, strconv.Itoa(resp.StatusCode)).Inc()
 
 	switch resp.StatusCode {
 	case http.StatusOK:

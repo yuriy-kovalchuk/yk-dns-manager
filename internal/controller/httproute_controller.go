@@ -25,6 +25,7 @@ import (
 
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/config"
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
+	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/metrics"
 )
 
 const (
@@ -101,10 +102,13 @@ func (r *HTTPRouteReconciler) sync(ctx context.Context, batch dns.Batch, route *
 			managed = append(managed, h)
 		}
 	}
-	if slices.Equal(owned, managed) {
-		return nil
+	if !slices.Equal(owned, managed) {
+		if err := r.saveManagedHostnames(ctx, route, managed); err != nil {
+			return err
+		}
 	}
-	return r.saveManagedHostnames(ctx, route, managed)
+	metrics.SetManagedHostnames(routeOwner(route), len(managed))
+	return nil
 }
 
 // ensureRecord points hostname at its domain-map IP and reports whether the route now manages it; a legacy record is adopted only for a hostname the route already managed, and a name held by someone else's record is not managed.
@@ -113,10 +117,10 @@ func (r *HTTPRouteReconciler) ensureRecord(ctx context.Context, batch dns.Batch,
 	res, err := batch.Ensure(ctx, dns.Record{Hostname: hostname, Type: "A", Value: ip, Owner: routeOwner(route)},
 		dns.EnsureOptions{Overwrite: r.Upsert, AdoptLegacy: adoptLegacy})
 	if err != nil {
-		dnsErrors.WithLabelValues("ensure").Inc()
+		metrics.DNSErrors.WithLabelValues("ensure").Inc()
 		return false, fmt.Errorf("ensuring DNS record for %s: %w", hostname, err)
 	}
-	recordResults.WithLabelValues(res.String()).Inc()
+	metrics.RecordResults.WithLabelValues(res.String()).Inc()
 	switch res {
 	case dns.Created:
 		r.report(route, corev1.EventTypeNormal, "DNSRecordCreated", hostname+" -> "+ip)
@@ -140,7 +144,7 @@ func commit(ctx context.Context, batch dns.Batch) (time.Duration, error) {
 		return deferred.After, nil
 	}
 	if err != nil {
-		dnsErrors.WithLabelValues("publish").Inc()
+		metrics.DNSErrors.WithLabelValues("publish").Inc()
 		return 0, fmt.Errorf("publishing DNS changes: %w", err)
 	}
 	return 0, nil
@@ -229,6 +233,7 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 		if requeue > 0 {
 			cleanupErr = errors.Join(cleanupErr, errors.New("the deletion was never published before the grace period ran out"))
 		}
+		metrics.CleanupsAbandoned.Inc()
 		r.report(route, corev1.EventTypeWarning, "DNSCleanupAbandoned", fmt.Sprintf("releasing the route after the grace period; DNS records may be left behind: %v", cleanupErr))
 	case cleanupErr == nil:
 		// The provider is only holding the publish back, so the finalizer stays until the deletion actually goes out.
@@ -237,7 +242,11 @@ func (r *HTTPRouteReconciler) reconcileDelete(ctx context.Context, route *gatewa
 		r.report(route, corev1.EventTypeWarning, "DNSCleanupFailed", fmt.Sprintf("retrying until %s: %v", giveUpAt.Format(time.RFC3339), cleanupErr))
 		return ctrl.Result{RequeueAfter: min(timeLeft, cleanupRetryInterval)}, nil
 	}
-	return ctrl.Result{}, r.setFinalizer(ctx, route, false)
+	if err := r.setFinalizer(ctx, route, false); err != nil {
+		return ctrl.Result{}, err
+	}
+	metrics.SetManagedHostnames(routeOwner(route), 0)
+	return ctrl.Result{}, nil
 }
 
 // removeRecord deletes the record for hostname unless another live route still claims it; the provider deletes only rows it marked, and only those this route owns.
@@ -256,10 +265,10 @@ func (r *HTTPRouteReconciler) removeRecord(ctx context.Context, batch dns.Batch,
 
 	_, inDomainMap := r.DomainMap.LookupIP(hostname)
 	if err := batch.Remove(ctx, hostname, "A", routeOwner(route), inDomainMap && slices.Contains(owned, hostname)); err != nil {
-		dnsErrors.WithLabelValues("release").Inc()
+		metrics.DNSErrors.WithLabelValues("release").Inc()
 		return err
 	}
-	recordResults.WithLabelValues("released").Inc()
+	metrics.RecordResults.WithLabelValues("released").Inc()
 	r.report(route, corev1.EventTypeNormal, "DNSRecordReleased", hostname)
 	return nil
 }
