@@ -6,7 +6,7 @@
 # image, so a floating minor silently reintroduces fixed CVEs. Keep the
 # golangci-lint pin in the Makefile built with at least this Go — it refuses
 # modules newer than its own build.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
 
