@@ -15,13 +15,18 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 
 ## Unit tests
 
-### Entrypoint — `cmd/yk-dns-manager/main_test.go`
+### Logging — `internal/logging/`
 
 | Test | Description |
 |---|---|
 | `TestParseLogLevel` | Named levels, numeric logr verbosity (`-3` means `V(3)`), and rejects garbage |
 | `TestDebugLevelEnablesVerbosity` | `debug` actually turns `V(1)` output on |
 | `TestDebugLevelKeepsProductionEncoder` | Debug does not switch zap to development mode |
+
+### Provider selection — `internal/dns/providers/`
+
+| Test | Description |
+|---|---|
 | `TestProvidersAcceptTheirOwnSettings` | Every settings key a real factory declares still builds that provider |
 | `TestSelectProvider` | Only the named provider is initialized; an unknown name lists the available ones; the provider's own error is the startup error; a factory returning `(nil, err)` never leaves a typed-nil provider behind; an unknown settings key fails startup (D11) |
 

@@ -19,9 +19,12 @@
 ### Package Layout
 
 ```
-cmd/yk-dns-manager/main.go          # Entrypoint: flags, provider selection, manager bootstrap
+cmd/yk-dns-manager/main.go          # Entrypoint: signal handling, calls app.Run
+internal/app/                       # Startup wiring: flags, config, provider health check, manager
+internal/logging/                   # zap logger and --zap-log-level parsing
 internal/controller/                # HTTPRoute reconciler (the only reconciler) and its metrics
 internal/dns/provider.go            # Provider and Batch interfaces
+  providers/                        # Factory list and selection by config name
   opnsense/opnsense.go              # OPNsense Unbound implementation
   dnstest/                          # Conformance suite every provider runs
 internal/config/                    # Config file loader (provider, settings, DomainMap)
@@ -91,7 +94,7 @@ A wildcard covers names at any depth below it, like a DNS wildcard, but not its 
 
 ### DNS Provider Selection
 
-At startup in `main()`, the controller looks up the factory named by the config file's `provider` field in `newProviders()` and initializes it with the configured settings. There is no fallback: an unknown name, or settings the provider rejects, fails startup with that provider's own error. This means:
+At startup `app.Run` calls `providers.New`, which looks up the factory named by the config file's `provider` field in `newProviders()` (`internal/dns/providers`) and initializes it with the configured settings. There is no fallback: an unknown name, or settings the provider rejects, fails startup with that provider's own error. This means:
 - Only one provider is active at a time.
 - Adding a new provider is as simple as returning a factory from `newProviders()`.
 
@@ -122,7 +125,7 @@ The controller records Events on each HTTPRoute (`DNSRecordCreated`, `DNSRecordU
 
 ### Why no `init()` for provider registration anymore?
 
-The original design used `init()` + a registry (standard pluggable Go pattern), but this has maintenance costs: new providers require importing into an aggregation package just to register. The current factory-list approach (`newProviders()` in `main.go`) is more explicit and testable, with zero hidden side effects. A future enhancement could restore registration-based discovery if the provider list grows significantly.
+The original design used `init()` + a registry (standard pluggable Go pattern), but this has maintenance costs: new providers require importing into an aggregation package just to register. The current factory-list approach (`newProviders()` in `internal/dns/providers`) is more explicit and testable, with zero hidden side effects. A future enhancement could restore registration-based discovery if the provider list grows significantly.
 
 ### Why a checksum annotation on the ConfigMap?
 
@@ -169,7 +172,7 @@ func TestConformance(t *testing.T) {
 }
 ```
 
-**2. Register it in `newProviders()` in `cmd/yk-dns-manager/main.go`**, listing every settings key it understands; any other key fails startup:
+**2. Register it in `newProviders()` in `internal/dns/providers/providers.go`**, listing every settings key it understands; any other key fails startup:
 ```go
 {
     name:     "myprovider",
