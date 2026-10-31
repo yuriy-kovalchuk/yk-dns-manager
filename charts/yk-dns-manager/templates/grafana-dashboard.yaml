@@ -1,0 +1,20 @@
+{{- if .Values.grafanaDashboard.enabled }}
+# The Grafana sidecar (kube-prometheus-stack's grafana.sidecar.dashboards) loads
+# every ConfigMap carrying its label; dashboards/yk-dns-manager.json can also be
+# imported by hand.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "yk-dns-manager.fullname" . }}-dashboard
+  namespace: {{ .Values.grafanaDashboard.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "yk-dns-manager.labels" . | nindent 4 }}
+    {{- toYaml .Values.grafanaDashboard.labels | nindent 4 }}
+  {{- with .Values.grafanaDashboard.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  yk-dns-manager.json: |-
+{{ .Files.Get "dashboards/yk-dns-manager.json" | indent 4 }}
+{{- end }}

@@ -13,16 +13,12 @@ import (
 	"github.com/yuriy-kovalchuk/yk-dns-manager/internal/dns"
 )
 
-// TestResponseBodyLimit covers the unbounded reads the provider used to do.
-// Every response body was read in full while the pod carries a 256Mi memory
-// limit, so an appliance (or anything answering for it) could OOM the controller
-// by streaming a large body.
+// TestResponseBodyLimit covers the unbounded reads that let a large body OOM the pod's 256Mi limit.
 func TestResponseBodyLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Past the cap, so the read stops at the limit rather than buffering the
-		// whole thing.
+		// past the cap, so the read stops at the limit rather than buffering the whole thing
 		_, _ = io.WriteString(w, strings.Repeat("a", maxResponseBytes+4096))
 	}))
 	defer srv.Close()
@@ -41,8 +37,7 @@ func TestResponseBodyLimit(t *testing.T) {
 	}
 }
 
-// TestErrorBodyTruncated checks that a failing status does not embed an
-// arbitrarily large body in the error, which then reaches the logs.
+// TestErrorBodyTruncated checks a failing status does not embed an arbitrarily large body in the error, which then reaches the logs.
 func TestErrorBodyTruncated(t *testing.T) {
 	const padding = "PADPAD"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,17 +68,14 @@ func TestErrorBodyTruncated(t *testing.T) {
 	}
 }
 
-// httpSettings is baseSettings for a plain-HTTP test server, which the
-// provider only accepts with allow_insecure_http.
+// httpSettings is baseSettings for a plain-HTTP test server, which the provider only accepts with allow_insecure_http.
 func httpSettings(baseURL string) map[string]string {
 	s := baseSettings(baseURL)
 	s["allow_insecure_http"] = "true"
 	return s
 }
 
-// TestCommitChecksReconfigureStatus: OPNsense answers a reconfigure with
-// HTTP 200 and a status field. Anything but "ok" is a failure, and the publish
-// stays owed.
+// TestCommitChecksReconfigureStatus: a reconfigure answers HTTP 200, so anything but status "ok" is a failure and the publish stays owed.
 func TestCommitChecksReconfigureStatus(t *testing.T) {
 	status := "failed"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

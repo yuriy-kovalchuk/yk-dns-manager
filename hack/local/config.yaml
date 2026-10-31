@@ -1,0 +1,14 @@
+# Config for local development (`make run`). The memory provider keeps records
+# in the process and logs every change, so no appliance or credentials are
+# needed.
+#
+# For a real appliance, copy examples/config.yaml, set base_url to the appliance
+# API, put real credentials in .env and point CONFIG_PATH at the copy.
+
+provider: memory
+upsert: true
+
+# The sample HTTPRoute in hack/local/httproute.yaml declares app.example.com,
+# which this wildcard covers.
+domains:
+  "*.example.com": 10.0.0.1

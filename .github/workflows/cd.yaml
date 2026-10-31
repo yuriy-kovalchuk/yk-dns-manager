@@ -79,8 +79,6 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           {
             echo "VERSION=${version}"
-            echo "COMMIT=$(git rev-parse --short HEAD)"
-            echo "BUILDDATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo 'TAGS<<EOF'
             echo "${IMAGE}:latest"
             echo "${IMAGE}:${version}"
@@ -96,8 +94,6 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
-            COMMIT=${{ steps.version.outputs.COMMIT }}
-            BUILD_DATE=${{ steps.version.outputs.BUILDDATE }}
           tags: ${{ steps.version.outputs.TAGS }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

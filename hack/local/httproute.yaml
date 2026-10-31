@@ -4,8 +4,8 @@
 #
 # Apply it with:
 #   kubectl --context kind-yk-dns-manager-dev apply -f hack/local/httproute.yaml
-# and read the result back from the fake with:
-#   curl -s localhost:8053/records
+# and watch the memory provider log the record with `make kind-logs`, or in the
+# `make run` output.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

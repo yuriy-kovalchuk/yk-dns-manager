@@ -45,6 +45,11 @@ resources:
     memory: 128Mi
 ```
 
+The chart renders `domainMap` and `dnsProvider` into one config file, mounted at
+`/etc/yk-dns-manager/config/config.yaml`. To run the binary outside the chart,
+write that file yourself (see `examples/config.yaml`) and pass it with `--config`
+or `CONFIG_PATH`.
+
 ## Installation
 
 Run the following command to install the controller from the OCI registry:

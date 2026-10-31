@@ -1,4 +1,0 @@
-# Domain map for local development. The sample HTTPRoute in
-# hack/local/httproute.yaml declares app.example.com, which this wildcard covers.
-
-"*.example.com": 10.0.0.1

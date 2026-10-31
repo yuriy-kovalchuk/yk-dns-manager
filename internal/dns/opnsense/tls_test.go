@@ -22,14 +22,9 @@ import (
 	"github.com/go-logr/logr"
 )
 
-// newTestCA mints a throwaway CA — the shape of a default OPNsense install's
-// self-signed certificate.
+// newTestCA mints a throwaway CA — the shape of a default OPNsense install's self-signed certificate.
 func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecdsa.PrivateKey) {
 	t.Helper()
-
-	notBefore := time.Now().Add(-time.Hour)
-	notAfter := time.Now().Add(time.Hour)
-
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate CA key: %v", err)
@@ -37,8 +32,8 @@ func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecds
 	caTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "yk-dns-manager test CA"},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
@@ -54,14 +49,9 @@ func newTestCA(t *testing.T) (pemBytes []byte, cert *x509.Certificate, key *ecds
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), cert, key
 }
 
-// newSelfSignedAPI stands up an HTTPS endpoint whose certificate chains to that
-// CA. It returns the base URL and the CA in PEM form.
+// newSelfSignedAPI stands up an HTTPS endpoint whose certificate chains to that CA, and returns its URL and the CA in PEM.
 func newSelfSignedAPI(t *testing.T) (string, []byte) {
 	t.Helper()
-
-	notBefore := time.Now().Add(-time.Hour)
-	notAfter := time.Now().Add(time.Hour)
-
 	caPEM, caCert, caKey := newTestCA(t)
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -71,8 +61,8 @@ func newSelfSignedAPI(t *testing.T) (string, []byte) {
 	leafTmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: "opnsense.test"},
-		NotBefore:    notBefore,
-		NotAfter:     notAfter,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -105,9 +95,7 @@ func baseSettings(baseURL string) map[string]string {
 	}
 }
 
-// TestNew_TLSVerification is the end-to-end proof that ca_file actually fixes
-// the problem skip_tls_verify was being used to paper over: with the CA pinned,
-// the handshake succeeds and verification stays on.
+// TestNew_TLSVerification is the proof that ca_file fixes what skip_tls_verify papered over: the handshake succeeds with verification on.
 func TestNew_TLSVerification(t *testing.T) {
 	baseURL, caPEM := newSelfSignedAPI(t)
 
@@ -123,8 +111,7 @@ func TestNew_TLSVerification(t *testing.T) {
 		contains string
 	}{
 		{
-			// Without a pinned CA the appliance is untrusted, and this is the
-			// failure operators were reaching for skip_tls_verify to silence.
+			// without a pinned CA the appliance is untrusted — the failure operators reached for skip_tls_verify to silence
 			name:     "default verification rejects an untrusted appliance",
 			wantOK:   false,
 			contains: "certificate",
@@ -193,8 +180,7 @@ func TestNew_TLSConfigErrors(t *testing.T) {
 			contains: "reading ca_file",
 		},
 		{
-			// A silently empty cert pool would fall back to the system roots and
-			// the operator would believe the appliance CA was pinned.
+			// a silently empty cert pool would fall back to the system roots and look like a pinned CA
 			name:     "ca_file with no PEM certificate is rejected",
 			extra:    map[string]string{"ca_file": notPEM},
 			contains: "no valid PEM certificate",
@@ -237,8 +223,7 @@ func (c captureSink) Info(_ int, msg string, _ ...any) {
 	*c.msgs = append(*c.msgs, msg)
 }
 
-// TestNew_SkipTLSVerifyWarns asserts the operator is told, on every startup,
-// that credentials are being sent to whoever answers on the network path.
+// TestNew_SkipTLSVerifyWarns asserts the operator is told, on every startup, that credentials go to whoever answers on the network path.
 func TestNew_SkipTLSVerifyWarns(t *testing.T) {
 	msgs := &[]string{}
 	log := logr.New(captureSink{msgs: msgs})
@@ -264,9 +249,7 @@ func TestNew_SkipTLSVerifyWarns(t *testing.T) {
 	}
 }
 
-// TestNew_Scheme covers plain HTTP. The credentials go out as basic auth on
-// every request, so http is refused unless the operator opts in, and the opt-in
-// warns on every startup.
+// TestNew_Scheme covers plain HTTP: the credentials go out as basic auth, so http is refused without an opt-in that warns.
 func TestNew_Scheme(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -307,9 +290,7 @@ func TestNew_Scheme(t *testing.T) {
 	}
 }
 
-// TestNew_SkipTLSVerifyIsABoolean is the deferred part of audit D11: the value
-// is parsed as a boolean, so "True" turns verification off and a value that
-// is not a boolean fails instead of quietly meaning "off".
+// TestNew_SkipTLSVerifyIsABoolean (audit D11): "True" turns verification off; a non-boolean fails instead of quietly meaning off.
 func TestNew_SkipTLSVerifyIsABoolean(t *testing.T) {
 	cases := []struct {
 		value    string
@@ -338,9 +319,15 @@ func TestNew_SkipTLSVerifyIsABoolean(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 			tlsConfig := p.client.Transport.(*http.Transport).TLSClientConfig
-			skipped := tlsConfig != nil && tlsConfig.InsecureSkipVerify
-			if skipped != tc.wantSkip {
-				t.Errorf("verification skipped = %v, want %v", skipped, tc.wantSkip)
+			if tlsConfig.InsecureSkipVerify != tc.wantSkip {
+				t.Errorf("verification skipped = %v, want %v", tlsConfig.InsecureSkipVerify, tc.wantSkip)
+			}
+			if tc.wantSkip && tlsConfig.MinVersion != tls.VersionTLS12 {
+				t.Errorf("MinVersion = %d, want TLS 1.2", tlsConfig.MinVersion)
+			}
+			// a default configuration must leave the system root pool in play
+			if !tc.wantSkip && tlsConfig.RootCAs != nil {
+				t.Error("RootCAs must be nil by default so the system roots are used")
 			}
 		})
 	}

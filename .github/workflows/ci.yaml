@@ -61,8 +61,6 @@ jobs:
         run: |
           {
             echo "VERSION=$(git describe --tags --match 'v[0-9]*' 2>/dev/null || echo master)"
-            echo "COMMIT=$(git rev-parse --short HEAD)"
-            echo "BUILDDATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo 'TAGS<<EOF'
             echo "${IMAGE}:master"
             echo "${IMAGE}:master-${GITHUB_SHA}"
@@ -77,8 +75,6 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
-            COMMIT=${{ steps.version.outputs.COMMIT }}
-            BUILD_DATE=${{ steps.version.outputs.BUILDDATE }}
           tags: ${{ steps.version.outputs.TAGS }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

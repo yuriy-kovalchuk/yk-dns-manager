@@ -5,8 +5,6 @@ IMAGE      ?= $(REGISTRY)/$(APP_NAME)
 PLATFORMS  ?= linux/amd64,linux/arm64
 
 VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 IMG        ?= $(IMAGE):$(VERSION)
 
 CHART_DIR  := charts/$(APP_NAME)
@@ -18,7 +16,6 @@ KIND_CONFIG         := hack/kind-config.yaml
 # real cluster.
 KIND_CONTEXT        := kind-$(KIND_CLUSTER)
 KIND_NAMESPACE      ?= yk-dns-manager-system
-FAKE_IMAGE          ?= fake-opnsense:local
 # Must match the sigs.k8s.io/gateway-api version in go.mod: the controller is
 # compiled against these types, and CRDs two minor versions behind silently
 # prune fields the reconciler reads.
@@ -38,14 +35,12 @@ SETUP_ENVTEST         := go run sigs.k8s.io/controller-runtime/tools/setup-envte
 VERSION_PKG := github.com/yuriy-kovalchuk/yk-dns-manager/internal/version
 
 LDFLAGS := -s -w \
-	-X $(VERSION_PKG).Version=$(VERSION) \
-	-X $(VERSION_PKG).Commit=$(COMMIT) \
-	-X $(VERSION_PKG).BuildDate=$(BUILD_DATE)
+	-X $(VERSION_PKG).Version=$(VERSION)
 
 # ── Default ────────────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-integration test-envtest envtest test-cover vuln clean docker-build docker-push docker-build-local fake-opnsense kind-fake-install kind-fake-delete kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
+.PHONY: all tidy deps-check fmt vet lint build run test test-unit test-envtest envtest test-cover vuln clean docker-build docker-push docker-build-local kind-demo kind-crds kind-status kind-reset helm-lint helm-template helm-package helm-push kind-up kind-down kind-load kind-secret kind-deploy kind-undeploy kind-reload kind-logs install-hooks help
 
 ## all: tidy, fmt, vet, lint, build
 all: tidy fmt vet lint build
@@ -78,15 +73,17 @@ build:
 	mkdir -p $(LOCALBIN)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(LOCALBIN)/$(APP_NAME) ./cmd/$(APP_NAME)
 
+# make run falls back to it when .env sets no CONFIG_PATH
+LOCAL_CONFIG := hack/local/config.yaml
+
 ## run: build and run the primary binary locally
 run:
-	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@echo "reconciling against kubecontext: $$(kubectl config current-context 2>/dev/null || echo unknown)"
-	@set -a && . ./.env && set +a && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug --leader-elect=false
+	@set -a && { [ ! -f .env ] || . ./.env; } && set +a && export CONFIG_PATH=$${CONFIG_PATH:-$(LOCAL_CONFIG)} && echo "config: $$CONFIG_PATH" && go run -ldflags "$(LDFLAGS)" ./cmd/$(APP_NAME) --zap-log-level=debug --leader-elect=false
 
 # ── Testing ────────────────────────────────────────────────────────────────────
-## test: run all tests (unit + integration + envtest)
-test: test-unit test-integration test-envtest
+## test: run all tests (unit + envtest)
+test: test-unit test-envtest
 
 ## test-unit: run unit tests with coverage profile
 test-unit:
@@ -97,15 +94,12 @@ test-cover:
 	go test -v -race -count=1 -coverprofile=coverage.txt ./cmd/... ./internal/...
 	go tool cover -html=coverage.txt -o coverage.html
 
-## test-integration: run integration tests
-test-integration:
-	go test -race -timeout 120s -v -count=1 ./test/integration/
 
 ## envtest: download the envtest control-plane binaries into bin/k8s
 envtest:
 	$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)/k8s -p path
 
-## test-envtest: run the controller against a real API server and the fake appliance
+## test-envtest: run the controller against a real API server and the memory provider
 test-envtest:
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)/k8s -p path)" \
 		go test -race -timeout 300s -v -count=1 ./test/envtest/
@@ -127,9 +121,7 @@ docker-build:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		-t $(IMG)
+		-t $(IMG) .
 
 ## docker-push: multi-platform build and push to registry
 # One buildx step: `docker push` cannot publish the multi-arch manifest that
@@ -139,10 +131,8 @@ docker-push:
 	docker buildx build \
 		--platform $(PLATFORMS) \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMG) \
-		--push
+		--push .
 
 # ── Helm ───────────────────────────────────────────────────────────────────────
 ## helm-lint: lint the chart (strict)
@@ -165,8 +155,6 @@ helm-push: helm-package
 docker-build-local:
 	docker build \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(IMAGE):local .
 
 ## kind-up: create the dev cluster, or say so when reusing an existing one
@@ -183,19 +171,7 @@ kind-down:
 kind-load: docker-build-local
 	kind load docker-image $(IMAGE):local --name $(KIND_CLUSTER)
 
-## fake-opnsense: serve the in-memory OPNsense API locally for `make run`
-fake-opnsense:
-	go run ./hack/fake-opnsense --addr=:8053
-
-## kind-fake-install: run the fake OPNsense inside the kind cluster
-kind-fake-install:
-	docker build -f Dockerfile.fake -t $(FAKE_IMAGE) .
-	kind load docker-image $(FAKE_IMAGE) --name $(KIND_CLUSTER)
-	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) apply -f hack/fake-opnsense-deployment.yaml
-
-kind-fake-delete:
-	kubectl --context $(KIND_CONTEXT) --namespace $(KIND_NAMESPACE) delete -f hack/fake-opnsense-deployment.yaml --ignore-not-found
-
+## kind-secret: put the OPNsense credentials from .env in a Secret, for deploying against a real appliance
 kind-secret:
 	@test -f .env || (echo "Missing .env file — copy from .env.example" && exit 1)
 	@set -a && . ./.env && set +a && \
@@ -210,11 +186,10 @@ kind-secret:
 kind-crds:
 	kubectl --context $(KIND_CONTEXT) apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
 
-# kind-deploy installs the in-memory fake so the local path works with no
-# appliance. To deploy against a real one, edit hack/local-values.yaml and drop
-# the kind-fake-install prerequisite.
-## kind-deploy: cluster + CRDs + image + fake appliance + controller
-kind-deploy: kind-up kind-crds kind-load kind-secret kind-fake-install
+# hack/local-values.yaml selects the memory provider, so no appliance is needed.
+# To deploy against a real one, see the comments there.
+## kind-deploy: cluster + CRDs + image + controller
+kind-deploy: kind-up kind-crds kind-load
 	@if ! helm --kube-context $(KIND_CONTEXT) upgrade --install $(APP_NAME) $(CHART_DIR) \
 		--namespace $(KIND_NAMESPACE) \
 		--create-namespace \
@@ -251,9 +226,7 @@ kind-status:
 	fi
 	@echo "gateway CRDs: $$(kubectl --context $(KIND_CONTEXT) get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1 && echo installed || echo 'missing — make kind-crds')"
 	@echo "controller:   $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy $(APP_NAME) -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not deployed — make kind-deploy')"
-	@echo "fake in-cluster: $$(kubectl --context $(KIND_CONTEXT) -n $(KIND_NAMESPACE) get deploy fake-opnsense -o jsonpath='{.status.readyReplicas}/{.spec.replicas} ready' 2>/dev/null || echo 'not running — make kind-fake-install')"
-	@echo "fake on host:    $$(curl -sf --max-time 2 localhost:8053/records >/dev/null 2>&1 && echo 'listening on :8053' || echo 'not listening — make fake-opnsense')"
-	@test -f .env && echo "env:          $$(grep -E '^(DOMAIN_MAP_PATH|DNS_PROVIDER_PATH)=' .env | sed 's/^[A-Z_]*=//' | tr '\n' ' ')" || echo "env:          no .env — cp .env.example .env"
+	@echo "config:       $$(grep -sE '^CONFIG_PATH=.' .env | sed 's/^CONFIG_PATH=//' | grep . || echo '$(LOCAL_CONFIG) (default)')"
 
 ## kind-reset: rebuild the dev cluster from scratch (use it after the kind pin changes)
 kind-reset: kind-down kind-deploy

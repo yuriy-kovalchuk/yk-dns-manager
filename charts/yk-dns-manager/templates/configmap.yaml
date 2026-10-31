@@ -12,13 +12,17 @@ and in the logs of whatever CI system rendered them.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "yk-dns-manager.fullname" . }}-dns-provider
+  name: {{ include "yk-dns-manager.fullname" . }}
   labels:
     {{- include "yk-dns-manager.labels" . | nindent 4 }}
 data:
-  dns-provider.yaml: |
+  config.yaml: |
     provider: {{ .Values.dnsProvider.provider | quote }}
     upsert: {{ .Values.dnsProvider.upsert }}
+    domains:
+      {{- range $domain, $ip := .Values.domainMap }}
+      {{ $domain | quote }}: {{ $ip | quote }}
+      {{- end }}
     settings:
       {{- range $key, $value := .Values.dnsProvider.settings }}
       {{ $key }}: {{ $value | quote }}

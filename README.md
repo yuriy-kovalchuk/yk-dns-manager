@@ -64,12 +64,13 @@ The controller watches for the hostname `app.example.com`, looks up its IP from 
 
 ### Domain Map
 
-Define which IPs hostnames should resolve to:
+The `domains` section of the config file defines which IPs hostnames should resolve to:
 
 ```yaml
-"*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
-"special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
-homelab.local: 10.0.0.2              # the bare domain needs its own entry
+domains:
+  "*.homelab.local": 10.0.0.2          # every name below homelab.local, at any depth
+  "special.homelab.local": 10.0.0.3    # exactly this name; wins over the wildcard
+  homelab.local: 10.0.0.2              # the bare domain needs its own entry
 ```
 
 - An exact key such as `homelab.local` matches only that one name.
@@ -86,26 +87,29 @@ Earlier versions let an exact key cover every name below it too. The controller 
 
 | Variable | Required | Description |
 |---|---|---|
-| `DOMAIN_MAP_PATH` | yes, unless `--domain-map-path` is given | Path to the domain map YAML file |
-| `DNS_PROVIDER_PATH` | yes — env only, there is no flag for it | Path to the DNS provider config YAML file |
+| `CONFIG_PATH` | yes, unless `--config` is given | Path to the config YAML file |
 
 ### Command-Line Flags
 
 | Flag | Env Var Override | Default | Description |
 |---|---|---|---|
-| `--domain-map-path` | `DOMAIN_MAP_PATH` | — (required) | Path to the domain map file |
+| `--config` | `CONFIG_PATH` | — (required) | Path to the config file: DNS provider, settings and domain map |
 | `--zap-log-level` | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or a numeric logr verbosity such as `-3` for `V(3)` |
 | `--leader-elect` | — | `true` | Elect a leader through a Lease so only one replica manages DNS; turn off only for a single instance outside a cluster (`make run` does) |
 | `--require-accepted-routes` | — | `false` | Only publish DNS for HTTPRoutes that at least one parent Gateway has accepted |
 | `--cleanup-grace-period` | — | `5m` | How long a failing DNS cleanup of a deleted HTTPRoute is retried before the route is released anyway |
 | `--resync-period` | — | `1h` | How often every HTTPRoute is reconciled again even when nothing changed in the cluster; this republishes a record someone changed or deleted on the DNS backend. `0` turns it off |
 
-### DNS Provider Config
+### Config File
+
+One YAML file holds everything the controller needs:
 
 ```yaml
-# examples/dns-provider.yaml
+# examples/config.yaml
 provider: opnsense
 upsert: false
+domains:
+  "*.example.com": 10.0.0.1
 settings:
   base_url: "https://opnsense.example.com/api"
   ca_file: "/etc/yk-dns-manager/ca/ca.pem"
@@ -117,6 +121,7 @@ settings:
   publish_interval: "10s"
 ```
 
+- `domains` maps hostnames to load balancer IPs: `"*.example.com"` covers every name below example.com at any depth, an exact key covers only that one name, and an exact key wins over the most specific wildcard.
 - `provider` selects the backend (see [Supported Providers](#supported-providers)).
 - `upsert: true` also corrects a managed record that holds a different IP; when `false`, existing records are left alone and only missing ones are created. Either way nothing is written when a record is already correct.
 - Settings support `${ENV_VAR}` expansion for credential injection; a reference to an unset variable fails startup, and a `$` anywhere else is kept as is. Unknown fields and unknown `settings` keys also fail startup. Credentials must be referenced that way; the chart fails the render if a literal key or secret appears in `values.yaml`.
@@ -125,7 +130,7 @@ settings:
 - `ca_file` pins the CA that signed the appliance certificate. `skip_tls_verify: "true"` turns verification off entirely and is a last resort — the API credentials go out as basic auth on every request — and it is rejected together with `ca_file`.
 - `publish_interval` is the shortest gap between two publishes of the backend (for OPNsense, an Unbound reconfigure, which restarts the resolver). A burst of route changes then costs one publish instead of one per change: the held-back changes stay owed and go out as soon as the wait is over. Empty or `0` publishes on every change.
 
-Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
+The controller reads this file once at startup; restart it after a change. Full Helm chart values are in [`charts/yk-dns-manager/values.yaml`](charts/yk-dns-manager/values.yaml).
 
 ## Ownership
 
@@ -136,6 +141,7 @@ The controller only changes or deletes DNS records it created. It marks each one
 | Provider | Backend |
 |---|---|
 | OPNsense | Unbound DNS host overrides via OPNsense API |
+| Memory | Records in the controller's memory, lost on restart; for local development and tests (`provider: memory`, optional `publish_interval`) |
 | Pi-hole | Planned |
 | AdGuard Home | Planned |
 | CoreDNS | Planned |
@@ -144,31 +150,45 @@ For details on adding a new provider, see the [Architecture doc](docs/architectu
 
 ## Helm Chart
 
-Key values:
+The chart renders `domainMap` and `dnsProvider` into the [config file](#config-file), mounts it at `/etc/yk-dns-manager/config/config.yaml`, and rolls the pod when it changes. Key values:
 
 | Value | Description |
 |---|---|
-| `domainMap` | Domain-to-IP mapping (rendered as ConfigMap) |
+| `domainMap` | Domain-to-IP mapping (rendered as `domains` in the config ConfigMap) |
 | `dnsProvider.provider` | DNS provider name |
-| `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [DNS Provider Config](#dns-provider-config) |
+| `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [Config File](#config-file) |
 | `dnsProvider.existingSecret` | Secret with provider credentials |
 | `dnsProvider.caConfigMap` | ConfigMap with the appliance CA under the key `ca.pem`, mounted at `/etc/yk-dns-manager/ca` |
 | `leaderElection.enabled` | Leader election through a Lease in the release namespace (on by default; required for `replicaCount` > 1) |
 | `requireAcceptedRoutes` | Only publish DNS for HTTPRoutes a Gateway has accepted (off by default) |
 | `serviceMonitor.enabled` | Create Prometheus ServiceMonitor |
+| `grafanaDashboard.enabled` | Ship the Grafana dashboard as a ConfigMap for the Grafana sidecar (`grafanaDashboard.labels`, `.annotations`, `.namespace`) |
 | `networkPolicy.enabled` | Restrict the pod's traffic; egress ports and CIDRs under `networkPolicy.apiServer` and `networkPolicy.provider` |
 
 ## Observability
 
 - **Events** on each HTTPRoute: `kubectl describe httproute <name>` shows records created, updated and released, and warnings for conflicts, drift in create-only mode, and failures.
-- **Metrics** on port 9090: `yk_dns_manager_records_total{result}` and `yk_dns_manager_dns_errors_total{stage}`, alongside controller-runtime's reconcile metrics.
+- **Metrics** on port 9090, alongside controller-runtime's reconcile, work queue, leader election and Kubernetes client metrics:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `yk_dns_manager_build_info` | gauge | `version`, `provider` | Always 1; which version runs against which backend |
+| `yk_dns_manager_managed_hostnames` | gauge | | Hostnames the leader manages records for (other replicas report 0) |
+| `yk_dns_manager_records_total` | counter | `result` | Record outcomes: `created`, `updated`, `unchanged`, `kept`, `conflict`, `released` |
+| `yk_dns_manager_dns_errors_total` | counter | `stage` | Failed provider calls: `ensure`, `release`, `publish` |
+| `yk_dns_manager_cleanups_abandoned_total` | counter | | Deleted routes released after `--cleanup-grace-period` with their cleanup still failing; their records may be left behind |
+| `yk_dns_manager_publishes_total` | counter | `result` | Publishes `ok`, `failed`, or `deferred` by `publish_interval` |
+| `yk_dns_manager_publish_duration_seconds` | histogram | | Duration of publishes that ran (for OPNsense, the Unbound reconfigure) |
+| `yk_dns_manager_provider_requests_total` | counter | `provider`, `endpoint`, `code` | API requests to the backend by HTTP status, `error` when no response arrived |
+| `yk_dns_manager_provider_request_duration_seconds` | histogram | `provider`, `endpoint` | API request duration |
+
+- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), record outcomes and conflicts, errors, publishing, provider API, controller latency and work queue, Kubernetes API, process.
 
 ## Testing
 
 ```bash
-make test              # all tests (unit + integration + envtest)
-make test-unit         # unit tests only
-make test-integration  # provider against the fake appliance, incl. the conformance suite
+make test              # all tests (unit + envtest)
+make test-unit         # unit tests, incl. the provider conformance suite
 make test-envtest      # the real controller against an envtest API server
 ```
 
@@ -176,12 +196,12 @@ See [docs/testing.md](docs/testing.md) for details.
 
 ## Development
 
-No appliance and no real credentials are needed locally; an in-memory fake stands
-in for OPNsense.
+No appliance and no real credentials are needed locally: the local profiles use
+`provider: memory`, which keeps records in the controller's memory and logs every
+change.
 
 ```bash
-cp .env.example .env
-make kind-deploy   # cluster + CRDs + image + fake appliance + controller
+make kind-deploy   # cluster + CRDs + image + controller with the memory provider
 make kind-demo     # apply a sample HTTPRoute and watch the record appear
 make kind-status   # what is running, and what is missing
 ```

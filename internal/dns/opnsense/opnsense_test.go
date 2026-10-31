@@ -1,8 +1,6 @@
 package opnsense
 
 import (
-	"crypto/tls"
-	"net/http"
 	"strings"
 	"testing"
 
@@ -10,13 +8,7 @@ import (
 )
 
 func TestNew_ValidSettings(t *testing.T) {
-	settings := map[string]string{
-		"base_url":   "https://opnsense.local/api",
-		"api_key":    "key123",
-		"api_secret": "secret456",
-	}
-
-	p, err := New(logr.Discard(), settings)
+	p, err := New(logr.Discard(), baseSettings("https://opnsense.local"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -26,18 +18,12 @@ func TestNew_ValidSettings(t *testing.T) {
 	}
 }
 
-// TestNew_DefaultTTLIgnored: Unbound host overrides have no per-record TTL,
-// so default_ttl never had an effect. It is still accepted, so existing configs
-// keep working, but it warns.
+// TestNew_DefaultTTLIgnored: host overrides have no per-record TTL, so default_ttl never worked; it is accepted, but warns.
 func TestNew_DefaultTTLIgnored(t *testing.T) {
 	for _, v := range []string{"600", "notanumber"} {
 		msgs := &[]string{}
-		settings := map[string]string{
-			"base_url":    "https://opnsense.local/api",
-			"api_key":     "key123",
-			"api_secret":  "secret456",
-			"default_ttl": v,
-		}
+		settings := baseSettings("https://opnsense.local")
+		settings["default_ttl"] = v
 		if _, err := New(logr.New(captureSink{msgs: msgs}), settings); err != nil {
 			t.Fatalf("default_ttl %q: unexpected error: %v", v, err)
 		}
@@ -47,78 +33,24 @@ func TestNew_DefaultTTLIgnored(t *testing.T) {
 	}
 }
 
-func TestNew_MissingBaseURL(t *testing.T) {
-	settings := map[string]string{
-		"api_key":    "key123",
-		"api_secret": "secret456",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing base_url, got nil")
-	}
-}
-
-func TestNew_MissingAPIKey(t *testing.T) {
-	settings := map[string]string{
-		"base_url":   "https://opnsense.local/api",
-		"api_secret": "secret456",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing api_key, got nil")
+// TestNew_MissingRequiredSetting: a config missing an API credential fails startup instead of sending anonymous requests.
+func TestNew_MissingRequiredSetting(t *testing.T) {
+	for _, missing := range []string{"base_url", "api_key", "api_secret"} {
+		settings := baseSettings("https://opnsense.local")
+		delete(settings, missing)
+		if _, err := New(logr.Discard(), settings); err == nil {
+			t.Errorf("expected an error when %s is missing", missing)
+		}
 	}
 }
 
-func TestNew_MissingAPISecret(t *testing.T) {
-	settings := map[string]string{
-		"base_url": "https://opnsense.local/api",
-		"api_key":  "key123",
-	}
-
-	_, err := New(logr.Discard(), settings)
-	if err == nil {
-		t.Fatal("expected error for missing api_secret, got nil")
-	}
-}
-
-func TestNew_SkipTLSVerify(t *testing.T) {
-	settings := map[string]string{
-		"base_url":        "https://opnsense.local/api",
-		"api_key":         "key123",
-		"api_secret":      "secret456",
-		"skip_tls_verify": "true",
-	}
-
-	p, err := New(logr.Discard(), settings)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	transport, ok := p.client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport is %T, want *http.Transport", p.client.Transport)
-	}
-	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("expected InsecureSkipVerify to be set on the transport")
-	}
-	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
-		t.Errorf("MinVersion = %d, want TLS 1.2 (%d)", transport.TLSClientConfig.MinVersion, tls.VersionTLS12)
-	}
-
-	// A default configuration must leave verification untouched, so the system
-	// root pool stays in play. Clone() always yields a non-nil TLSClientConfig,
-	// so assert on the fields rather than the pointer.
-	delete(settings, "skip_tls_verify")
-	p, err = New(logr.Discard(), settings)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	transport = p.client.Transport.(*http.Transport)
-	if transport.TLSClientConfig.InsecureSkipVerify {
-		t.Error("InsecureSkipVerify must be false by default")
-	}
-	if transport.TLSClientConfig.RootCAs != nil {
-		t.Error("RootCAs must be nil by default so the system roots are used")
+// TestNew_PublishIntervalMustBeADuration: a nonsense or negative interval fails startup.
+func TestNew_PublishIntervalMustBeADuration(t *testing.T) {
+	for _, v := range []string{"hourly", "-1s"} {
+		settings := baseSettings("https://opnsense.local")
+		settings["publish_interval"] = v
+		if _, err := New(logr.Discard(), settings); err == nil {
+			t.Errorf("publish_interval %q should fail startup", v)
+		}
 	}
 }
