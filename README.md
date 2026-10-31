@@ -154,7 +154,7 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 
 | Value | Description |
 |---|---|
-| `domainMap` | Domain-to-IP mapping (rendered as `domains` in the config ConfigMap) |
+| `domainMap` | Domain-to-IP mapping (rendered as `domains` in the config ConfigMap). Required: there is no default, and a `null` entry drops one another values file set |
 | `dnsProvider.provider` | DNS provider name |
 | `dnsProvider.settings` | Provider settings (`base_url`, `ca_file`, …); see [Config File](#config-file) |
 | `dnsProvider.existingSecret` | Secret with provider credentials |

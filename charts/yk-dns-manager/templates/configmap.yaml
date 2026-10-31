@@ -9,6 +9,9 @@ and in the logs of whatever CI system rendered them.
 {{-     fail (printf "dnsProvider.settings.%s looks like a literal credential. Put it in a Secret, name that Secret in dnsProvider.existingSecret, and reference it as ${ENV_VAR} instead." $key) }}
 {{-   end }}
 {{- end }}
+{{- if not .Values.domainMap }}
+{{-   fail "domainMap is empty: set at least one hostname pattern and its IP, e.g. domainMap: {\"*.example.com\": \"10.0.0.1\"}" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -21,7 +24,9 @@ data:
     upsert: {{ .Values.dnsProvider.upsert }}
     domains:
       {{- range $domain, $ip := .Values.domainMap }}
+      {{- if $ip }}{{/* null drops an entry another values file set */}}
       {{ $domain | quote }}: {{ $ip | quote }}
+      {{- end }}
       {{- end }}
     settings:
       {{- range $key, $value := .Values.dnsProvider.settings }}

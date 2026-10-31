@@ -1,0 +1,4 @@
+# Minimal values for `make helm-lint` and `make helm-template`: the chart has no
+# default domain map, so rendering it needs one.
+domainMap:
+  "*.example.com": "10.0.0.1"

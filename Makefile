@@ -137,11 +137,11 @@ docker-push:
 # ── Helm ───────────────────────────────────────────────────────────────────────
 ## helm-lint: lint the chart (strict)
 helm-lint:
-	helm lint --strict $(CHART_DIR)
+	helm lint --strict $(CHART_DIR) -f $(CHART_DIR)/ci/values.yaml
 
-## helm-template: render the chart with default values as a smoke test
+## helm-template: render the chart with the CI values as a smoke test
 helm-template:
-	helm template smoke $(CHART_DIR)
+	helm template smoke $(CHART_DIR) -f $(CHART_DIR)/ci/values.yaml
 
 ## helm-package: package the Helm chart
 helm-package:

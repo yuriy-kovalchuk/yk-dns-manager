@@ -64,14 +64,14 @@ priorityClassName: ""
 
 # -- Domain-to-IP mapping, rendered as the domains section of the config
 # file next to dnsProvider: which IP the DNS record of a matching HTTPRoute
-# hostname points to. A "*.example.com" key covers every name below
+# hostname points to. Required, and empty by default: Helm merges maps, so a
+# default entry would end up in every release's map. A "*.example.com" key covers every name below
 # example.com, at any depth; an exact key such as "example.com" covers only
 # that one name. An exact key wins, then the most specific wildcard.
 # Example:
 #   "*.example.com": "10.0.0.1"
 #   "special.example.com": "10.0.0.2"
-domainMap:
-  "*.example.com": "10.0.0.1"
+domainMap: {}
 
 # -- DNS provider configuration. provider, upsert and settings are rendered
 # into the same config file as domainMap.
