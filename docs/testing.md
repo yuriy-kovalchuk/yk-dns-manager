@@ -60,7 +60,7 @@ There are no mocking frameworks. Tests use plain structs implementing `dns.Provi
 
 | Test | Description |
 |---|---|
-| `TestManagedHostnamesSumsRoutes` | The managed-hostnames gauge is the sum of each route's latest count, and 0 drops the route |
+| `TestManagedRecordsReplacesARoutesSeries` | A route's managed-record series are replaced as a whole, other routes keep theirs, and a forgotten route exports none |
 
 ### Provider conformance — `internal/dns/dnstest`
 
@@ -121,11 +121,11 @@ Uses a mock `dns.Provider` and a fake Kubernetes client, so there is no cluster 
 | `TestHTTPRouteReconciler_ConflictIsNotOwned` | A hostname held by someone else's record stays out of the annotation |
 | `TestHTTPRouteReconciler_AdoptsLegacyOnlyForOwnedNames` | Legacy records are adopted only for names the route already recorded owning |
 | `TestHTTPRouteReconciler_SharedHostnameIsKept` | Deleting one of two routes sharing a hostname keeps the record (B1) |
-| `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route and counts the abandoned cleanup (B9, D10) |
+| `TestHTTPRouteReconciler_CleanupRetriesWithinGracePeriod` | A failing cleanup holds the finalizer and retries until the grace period runs out, then releases the route, counts the abandoned cleanup and drops its managed-record series (B9, D10) |
 | `TestHTTPRouteReconciler_RequireAccepted` | Off by default; on, only accepted routes get DNS (S3) |
 | `TestHTTPRouteReconciler_OneReconcilePublishes` | The reconcile that adds the finalizer also publishes (D7) |
 | `TestHTTPRouteReconciler_WantsUpdate` | Which updates trigger a reconcile (D8) |
-| `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events, in the counters and in the managed-hostnames gauge (D6) |
+| `TestHTTPRouteReconciler_EventsAndMetrics` | Outcomes appear as Events, in the counters, and as a managed-record series for each managed hostname but not a conflicting one (D6) |
 | `TestHTTPRouteReconciler_FlushFailureRequeues` | A failed commit is returned so controller-runtime requeues instead of silently dropping the change |
 
 ## Against a real appliance

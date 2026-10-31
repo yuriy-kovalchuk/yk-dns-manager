@@ -173,7 +173,7 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `yk_dns_manager_build_info` | gauge | `version`, `provider` | Always 1; which version runs against which backend |
-| `yk_dns_manager_managed_hostnames` | gauge | | Hostnames the leader manages records for (other replicas report 0) |
+| `yk_dns_manager_managed_record_info` | gauge | `route_namespace`, `route`, `hostname`, `ip` | Always 1; one series per hostname an HTTPRoute manages and the IP it points at (only the leader exports them) |
 | `yk_dns_manager_records_total` | counter | `result` | Record outcomes: `created`, `updated`, `unchanged`, `kept`, `conflict`, `released` |
 | `yk_dns_manager_dns_errors_total` | counter | `stage` | Failed provider calls: `ensure`, `release`, `publish` |
 | `yk_dns_manager_cleanups_abandoned_total` | counter | | Deleted routes released after `--cleanup-grace-period` with their cleanup still failing; their records may be left behind |
@@ -182,7 +182,7 @@ The chart renders `domainMap` and `dnsProvider` into the [config file](#config-f
 | `yk_dns_manager_provider_requests_total` | counter | `provider`, `endpoint`, `code` | API requests to the backend by HTTP status, `error` when no response arrived |
 | `yk_dns_manager_provider_request_duration_seconds` | histogram | `provider`, `endpoint` | API request duration |
 
-- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), record outcomes and conflicts, errors, publishing, provider API, controller latency and work queue, Kubernetes API, process.
+- **Grafana dashboard**: `grafanaDashboard.enabled=true` ships [`charts/yk-dns-manager/dashboards/yk-dns-manager.json`](charts/yk-dns-manager/dashboards/yk-dns-manager.json) as a ConfigMap labelled `grafana_dashboard: "1"` for the Grafana sidecar of kube-prometheus-stack; import the file by hand otherwise. It needs the metrics in Prometheus (`serviceMonitor.enabled=true`). Rows: overview (leader, version, managed hostnames, reconcile rate and errors, abandoned cleanups), a table of the managed HTTPRoutes with their hostnames and IPs, record outcomes and conflicts, errors, publishing, provider API, and controller latency and work queue.
 
 ## Testing
 

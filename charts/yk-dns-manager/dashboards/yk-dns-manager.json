@@ -249,7 +249,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "max(yk_dns_manager_managed_hostnames{namespace=~\"$namespace\", job=~\"$job\"})",
+          "expr": "count(count by (hostname) (yk_dns_manager_managed_record_info{namespace=~\"$namespace\", job=~\"$job\"}))",
           "legendFormat": "",
           "refId": "A"
         }
@@ -462,7 +462,7 @@
     },
     {
       "type": "row",
-      "title": "DNS records",
+      "title": "Managed HTTPRoutes",
       "id": 8,
       "collapsed": false,
       "gridPos": {
@@ -474,10 +474,101 @@
       "panels": []
     },
     {
+      "type": "table",
+      "title": "Managed HTTPRoutes",
+      "description": "Every hostname the controller manages a DNS record for, with the HTTPRoute that claims it and the IP the record points at. A hostname two routes share appears once per route.",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "max by (route_namespace, route, hostname, ip) (yk_dns_manager_managed_record_info{namespace=~\"$namespace\", job=~\"$job\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true
+            },
+            "indexByName": {
+              "route_namespace": 0,
+              "route": 1,
+              "hostname": 2,
+              "ip": 3
+            },
+            "renameByName": {
+              "route_namespace": "Namespace",
+              "route": "HTTPRoute",
+              "hostname": "Hostname",
+              "ip": "IP"
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": true,
+          "reducer": [
+            "count"
+          ],
+          "countRows": true,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "Hostname",
+            "desc": false
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "filterable": true,
+            "align": "auto"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "DNS records",
+      "id": 10,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "panels": []
+    },
+    {
       "type": "timeseries",
       "title": "Record outcomes",
       "description": "What the controller did per record: created, updated, unchanged (already right), kept (managed record with another IP, upsert off), conflict (someone else's record), released.",
-      "id": 9,
+      "id": 11,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -486,7 +577,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 17
       },
       "targets": [
         {
@@ -531,7 +622,7 @@
       "type": "timeseries",
       "title": "Conflicts and drift",
       "description": "Records left alone: conflict means a record the controller does not own holds the name; kept means a managed record points elsewhere and upsert is off.",
-      "id": 10,
+      "id": 12,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -540,7 +631,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 17
       },
       "targets": [
         {
@@ -584,13 +675,13 @@
     {
       "type": "row",
       "title": "Errors",
-      "id": 11,
+      "id": 13,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 25
       },
       "panels": []
     },
@@ -598,7 +689,7 @@
       "type": "timeseries",
       "title": "DNS errors by stage",
       "description": "Failed provider calls: ensure (create/update), release (delete) or publish.",
-      "id": 12,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -607,7 +698,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 26
       },
       "targets": [
         {
@@ -652,7 +743,7 @@
       "type": "timeseries",
       "title": "Reconcile failures",
       "description": "Errors are retried with backoff; terminal errors, panics and timeouts are not expected at all.",
-      "id": 13,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -661,7 +752,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 26
       },
       "targets": [
         {
@@ -732,13 +823,13 @@
     {
       "type": "row",
       "title": "Publishing",
-      "id": 14,
+      "id": 16,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 34
       },
       "panels": []
     },
@@ -746,7 +837,7 @@
       "type": "timeseries",
       "title": "Publishes by result",
       "description": "ok and failed publishes ran (for OPNsense, an Unbound reconfigure that restarts the resolver); deferred ones were held back by publish_interval to batch a burst.",
-      "id": 15,
+      "id": 17,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -755,7 +846,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 35
       },
       "targets": [
         {
@@ -800,7 +891,7 @@
       "type": "timeseries",
       "title": "Publish duration",
       "description": "How long a publish takes.",
-      "id": 16,
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -809,7 +900,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 35
       },
       "targets": [
         {
@@ -871,13 +962,13 @@
     {
       "type": "row",
       "title": "Provider API",
-      "id": 17,
+      "id": 19,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 43
       },
       "panels": []
     },
@@ -885,7 +976,7 @@
       "type": "timeseries",
       "title": "Requests by endpoint and status",
       "description": "API requests to the DNS backend; code \"error\" means no response arrived.",
-      "id": 18,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -894,7 +985,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 33
+        "y": 44
       },
       "targets": [
         {
@@ -939,7 +1030,7 @@
       "type": "timeseries",
       "title": "Failed requests",
       "description": "Requests answered with a non-2xx status or not answered at all.",
-      "id": 19,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -948,7 +1039,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 33
+        "y": 44
       },
       "targets": [
         {
@@ -993,7 +1084,7 @@
       "type": "timeseries",
       "title": "Request latency p95",
       "description": "95th percentile request duration per endpoint.",
-      "id": 20,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1002,7 +1093,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 33
+        "y": 44
       },
       "targets": [
         {
@@ -1046,13 +1137,13 @@
     {
       "type": "row",
       "title": "Controller",
-      "id": 21,
+      "id": 23,
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 52
       },
       "panels": []
     },
@@ -1060,7 +1151,7 @@
       "type": "timeseries",
       "title": "Reconcile latency",
       "description": "Time per HTTPRoute reconcile, including the DNS backend calls.",
-      "id": 22,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1069,7 +1160,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 42
+        "y": 53
       },
       "targets": [
         {
@@ -1132,7 +1223,7 @@
       "type": "timeseries",
       "title": "Reconciles by result",
       "description": "success, error, requeue (back off and retry) and requeue_after (held-back publish or cleanup retry).",
-      "id": 23,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1141,7 +1232,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 42
+        "y": 53
       },
       "targets": [
         {
@@ -1186,7 +1277,7 @@
       "type": "timeseries",
       "title": "Work queue",
       "description": "Routes waiting to be reconciled, and how often they are retried.",
-      "id": 24,
+      "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1195,7 +1286,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 42
+        "y": 53
       },
       "targets": [
         {
@@ -1249,7 +1340,7 @@
       "type": "timeseries",
       "title": "Queue wait p95",
       "description": "How long a route waits in the queue before a worker picks it up.",
-      "id": 25,
+      "id": 27,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1258,7 +1349,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 61
       },
       "targets": [
         {
@@ -1303,7 +1394,7 @@
       "type": "timeseries",
       "title": "Longest running reconcile",
       "description": "Age of the oldest reconcile still running; a value that keeps growing means a stuck reconcile.",
-      "id": 26,
+      "id": 28,
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1312,7 +1403,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 61
       },
       "targets": [
         {
@@ -1322,302 +1413,6 @@
           },
           "expr": "max(workqueue_longest_running_processor_seconds{namespace=~\"$namespace\", job=~\"$job\", name=\"httproute\"})",
           "legendFormat": "longest",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "row",
-      "title": "Kubernetes API",
-      "id": 27,
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 58
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Requests by status",
-      "description": "Calls to the Kubernetes API server by HTTP status.",
-      "id": 28,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 59
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "sum by (code) (rate(rest_client_requests_total{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval]))",
-          "legendFormat": "{{code}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 30,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "normal",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "row",
-      "title": "Process",
-      "id": 29,
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 67
-      },
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Memory",
-      "description": "Resident memory per pod; the chart's default limit is 256Mi.",
-      "id": 30,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 0,
-        "y": 68
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "process_resident_memory_bytes{namespace=~\"$namespace\", job=~\"$job\"}",
-          "legendFormat": "{{pod}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "CPU",
-      "description": "CPU cores used per pod.",
-      "id": 31,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 6,
-        "y": 68
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "rate(process_cpu_seconds_total{namespace=~\"$namespace\", job=~\"$job\"}[$__rate_interval])",
-          "legendFormat": "{{pod}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Goroutines",
-      "description": "A count that keeps growing points at a leak.",
-      "id": 32,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 68
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "go_goroutines{namespace=~\"$namespace\", job=~\"$job\"}",
-          "legendFormat": "{{pod}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 1,
-            "showPoints": "never",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Uptime",
-      "description": "Time since each pod's process started; a drop is a restart.",
-      "id": 33,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 68
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "expr": "time() - process_start_time_seconds{namespace=~\"$namespace\", job=~\"$job\"}",
-          "legendFormat": "{{pod}}",
           "refId": "A"
         }
       ],
