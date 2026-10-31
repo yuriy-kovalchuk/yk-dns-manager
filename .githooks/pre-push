@@ -1,37 +1,55 @@
 #!/bin/sh
+# Pre-push hook: enforces the commit format from docs/commits.md, validates v*
+# tag format, and runs the test suite. The message pattern is deliberately
+# identical to .githooks/commit-msg: no scopes (docs/commits.md defines none) and
+# no `revert` type, with the machine-generated subjects git writes for you
+# (Merge / Revert) exempted, as documented there.
+
 set -e
 
-echo "Running tests before push..."
-go test -race -timeout 120s ./...
+CONVENTIONAL_RE='^(feat|fix|refactor|test|docs|build|ci|chore|perf|style)(!)?: .+'
+GENERATED_RE='^Merge |^Revert "'
+TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'
 
-echo "Checking commit message format and tag names..."
-while read local_ref local_sha remote_ref remote_sha; do
+check_commits() {
+  range="$1"
+  tmpfile=$(mktemp)
+  git log --format='%s' "$range" 2>/dev/null > "$tmpfile"
+  while IFS= read -r msg; do
+    [ -z "$msg" ] && continue
+    if ! printf '%s' "$msg" | grep -qE "$CONVENTIONAL_RE" &&
+       ! printf '%s' "$msg" | grep -qE "$GENERATED_RE"; then
+      printf 'ERROR: non-conventional commit message:\n  %s\n' "$msg" >&2
+      printf 'Format: type: description   (no scopes - see docs/commits.md)\n' >&2
+      printf 'Types:  feat|fix|refactor|test|docs|build|ci|chore|perf|style\n' >&2
+      rm -f "$tmpfile"
+      exit 1
+    fi
+  done < "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+while read -r local_ref local_sha remote_ref remote_sha; do
   case "$local_ref" in
     refs/tags/*)
       tag="${local_ref#refs/tags/}"
-      if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9][a-zA-Z0-9.-]*)?$'; then
-        echo "Bad tag name: $tag"
-        echo "  Expected: v<major>.<minor>.<patch> or v<major>.<minor>.<patch>-<pre-release>"
-        echo "  Examples: v1.0.0  v0.3.0-alpha  v1.0.0-rc.1"
+      if ! printf '%s' "$tag" | grep -qE "$TAG_RE"; then
+        printf 'ERROR: invalid tag format "%s"\n' "$tag" >&2
+        printf 'Expected: v<major>.<minor>.<patch>[-prerelease]\n' >&2
         exit 1
       fi
       ;;
-    *)
-      if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-        commits=$(git log --format="%H" "$local_sha" --not --remotes 2>/dev/null)
+    refs/heads/master)
+      if [ "$remote_sha" = '0000000000000000000000000000000000000000' ]; then
+        range="$local_sha"
       else
-        commits=$(git log --format="%H" "$remote_sha..$local_sha")
+        range="$remote_sha..$local_sha"
       fi
-
-      for commit in $commits; do
-        msg=$(git log -1 --format="%s" "$commit")
-        if ! echo "$msg" | grep -qE '^(feat|fix|refactor|test|docs|build|ci|chore|perf|style)(\([^)]+\))?!?: .+'; then
-          echo "Bad commit message: $commit"
-          echo "  $msg"
-          echo "  Expected: type: description  (see docs/commits.md)"
-          exit 1
-        fi
-      done
+      check_commits "$range"
       ;;
   esac
 done
+
+printf '==> running tests...\n'
+go test -race -timeout 120s ./...
+printf '==> pre-push checks passed\n'
