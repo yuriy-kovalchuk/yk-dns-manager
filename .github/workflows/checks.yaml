@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0 # tags are needed for git describe in `make build`
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           # go.mod pins the patch: setup-go runs with GOTOOLCHAIN=local, so this is the
           # standard library govulncheck judges, and the Dockerfile base image must match.
@@ -95,7 +95,7 @@ jobs:
           limit-severities-for-sarif: true
 
       - name: Upload image findings to the Security tab
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always()
         with:
           sarif_file: trivy-image.sarif
@@ -134,7 +134,7 @@ jobs:
           limit-severities-for-sarif: true
 
       - name: Upload repository findings to the Security tab
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         if: always()
         with:
           sarif_file: trivy-fs.sarif
